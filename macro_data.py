@@ -35,9 +35,9 @@ class MacroData:
 
     def __init__(self) -> None:
         self.today = dt.date.today()
-        self.hist_path = Path("/Users/georgewright/macro_and_index_data.xlsx")
+        self.hist_path = Path("")
         self.forecast_path = Path(
-            f"/Users/georgewright/Portfolio_Optimisation_Data_{self.today}.xlsx"
+            f"Portfolio_Optimisation_Data_{self.today}.xlsx"
         )
 
         self.historical: dict[str, pd.DataFrame] = {}
