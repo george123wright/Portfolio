@@ -26,7 +26,8 @@ def graham_number(
         for p in pe_list:
             for pb in ptb_list:
                 val = np.sqrt(p * float(e) * float(pb) * fv)
-                gn_vals.append(np.clip(val, lb, ub))
+                if not np.isnan(val):
+                    gn_vals.append(np.clip(val, lb, ub))
 
     gn = np.array(pd.Series(gn_vals).dropna())
     
@@ -34,11 +35,11 @@ def graham_number(
         rel_ret = (gn / price) - 1
 
         return (
-            np.min(gn),         
-            np.mean(gn),        
-            np.max(gn),            
-            np.mean(rel_ret),     
-            np.std(rel_ret)       
+            np.min(gn),           
+            np.mean(gn),           
+            np.max(gn),           
+            np.mean(rel_ret),      
+            np.std(rel_ret)   
         )
     else:
         return 0, 0, 0, 0, 0
