@@ -317,15 +317,7 @@ def main() -> None:
 
     # 1. Download market data
     tickers = [
-        "1211.HK", "AMZN", "APD", "ASTS", "ASX", "AV.L", "BA", "BA.L", "BABA", "BATS.L", "BBAI",
-        "BLDR", "BLZE", "BNP.PA", "BNTC", "BP.L", "BBD-B.TO", "BT-A.L", "BUR", "BUSE", "C", "CCO.TO", "CELH", "CNQ.TO", "COP", "COHR", "CPNG", "CRM", "CRWD", "COST", "CVX", "CYBR", "CZR",
-        "DHI", "DHR", "DIS", "DPZ", "DKNG", "EVR", "EZJ.L", "FARO", "FISI", "FIX", "FLNC", "FLOW.AS", "FSG.L", "FTAI", "FUN",
-        "GLBE", "GM", "GOOG", "GRG.L", "GS", "GTLB", "HEIA.AS", "HOOD", "HSBA.L", "HWM",
-        "IAG.L", "IMI.L", "INVZ", "JD.L", "JPM", "KO", "KBR", "LH", "LMP.L", "LOVE", "LUNR", "MCD", "MELI", "META", "MGM", "MGNI", "MNG.L", "MSFT", 
-        "MTZ", "NEE", "NG.L", "NUE", "NVDA", "NOVO-B.CO", "OUST", "PLTR", "PSN.L", 
-        "QNST", "REL.L", "RGTI", "RR.L", "RY.TO", "SAN.MC", "SCHW", "SHIP", "SMCI", "SSB", "STE", "SU.TO", "TBLA", "TDY", "TEM", "TEVA", 
-        "TRMB", "TRMD", "TSCO.L", "TTD", "TTWO", "UBSG.SW", "VIRT", "VKTX", "VRNS",
-        "W7L.L", "WMT", "WPK.TO", "ZETA", "ZIM"
+        ""
     ]    
     start_date = '2000-01-01'  
     data = download_data(tickers, start_date, today)
