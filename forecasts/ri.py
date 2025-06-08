@@ -88,9 +88,6 @@ for ticker in tickers:
     dps          = float(div.mean()) / shares_outstanding[ticker]
     
     lp = latest_prices[ticker]
-    if ticker in ['BABA','PDD']:    lp *= usdcny
-    if ticker in ['BP.L','HSBA.L']: lp *= 10/gbpusd
-    if ticker == 'ASX':             lp *= 30
     lb = 0.2 * lp
     ub = 5.0 * lp
     
