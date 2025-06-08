@@ -178,3 +178,121 @@ def annualise_returns(ret_series: pd.Series, periods_per_year: int) -> float:
     cum = (1 + ret_series).prod()
     return cum ** (periods_per_year / total_periods) - 1
 
+
+def gbm(n_years = 10, n_scenarios=1000, mu=0.07, sigma=0.15, steps_per_year=12, s_0=100.0, prices=True):
+    """
+    Evolution of Geometric Brownian Motion trajectories, such as for Stock Prices through Monte Carlo
+    :param n_years:  The number of years to generate data for
+    :param n_paths: The number of scenarios/trajectories
+    :param mu: Annualized Drift, e.g. Market Return
+    :param sigma: Annualized Volatility
+    :param steps_per_year: granularity of the simulation
+    :param s_0: initial value
+    :return: a numpy array of n_paths columns and n_years*steps_per_year rows
+    """
+    dt = 1/steps_per_year
+    n_steps = int(n_years*steps_per_year) + 1
+    rets_plus_1 = np.random.normal(loc=(1+mu)**dt, scale=(sigma*np.sqrt(dt)), size=(n_steps, n_scenarios))
+    rets_plus_1[0] = 1
+    ret_val = s_0*pd.DataFrame(rets_plus_1).cumprod() if prices else rets_plus_1-1
+    return ret_val
+
+
+def simulate_portfolio_stats(
+    mu: float,
+    sigma: float,
+    steps: int = 252,
+    s0: float = 100.0,
+    scenarios: int = 1_000_000
+) -> Dict[str, Any]:
+    """
+    Simulate 1-year outcomes via GBM and gather summary statistics about the returns distribution.
+    """
+    sim_paths = gbm(n_years=1, n_scenarios=scenarios, mu=mu, sigma=sigma,
+                    steps_per_year=steps, s_0=s0)
+    final_prices = sim_paths.loc[steps]
+    final_returns = (final_prices / s0) - 1
+    q25_l = final_returns.quantile(0.245)
+    q25_h = final_returns.quantile(0.255)
+    q75_l = final_returns.quantile(0.745)
+    q75 = final_returns.quantile(0.75)
+    q75_h = final_returns.quantile(0.755)
+    stats = {
+        "mean_returns": final_returns.mean(),
+        "loss_percentage": 100 * (final_returns < 0).sum() / len(final_returns),
+        "mean_loss_amount": final_returns[final_returns < 0].mean(),
+        "mean_gain_amount": final_returns[final_returns >= 0].mean(),
+        "variance": (final_prices / s0).var(),
+        "lower_quartile": final_returns[(final_returns >= q25_l) & (final_returns <= q25_h)].mean(),
+        "upper_quartile": final_returns[(final_returns >= q75_l) & (final_returns <= q75_h)].mean(),
+        "upper_returns_mean": final_returns[final_returns >= q75].mean(),
+        "min_return": float(final_prices.min() / s0) - 1,
+        "max_return": float(final_prices.max() / s0) - 1
+    }
+    return stats
+
+
+def simulate_and_report(name: str, wts: np.ndarray, comb_rets: float, bear_rets: float, bull_rets: float, vol: float, vol_ann: float,
+                            comb_score: pd.Series, weekly_rets: pd.DataFrame, rf: float, beta: float, benchmark_weekly_rets) -> Dict[str, Any]:
+        
+    port_rets = portfolio_return(wts, comb_rets)
+    
+    port_bear_rets = portfolio_return(wts, bear_rets)
+    
+    port_bull_rets = portfolio_return(wts, bull_rets)
+    
+    stats = simulate_portfolio_stats(port_rets, vol_ann, steps=252, s0=100.0, scenarios=1000000)
+    
+    b_val = port_beta(wts, beta)
+    
+    treynor = compute_treynor_ratio(port_rets, rf, b_val)
+    
+    score_val = port_score(wts, comb_score)
+    
+    portfolio_rets_hist = portfolio_return(wts, weekly_rets)
+    
+    sr_pred = (port_rets - rf) / vol_ann
+    
+    ann_sr_hist = sharpe_ratio(portfolio_rets_hist, riskfree_rate=rf, periods_per_year=52)
+    
+    dd = drawdown(portfolio_rets_hist)["Drawdown"].min()
+    
+    skew_val = skewness(portfolio_rets_hist)
+    
+    kurt_val = kurtosis(portfolio_rets_hist)
+    
+    cf_var5 = var_gaussian(portfolio_rets_hist, modified=True)
+    
+    hist_cvar5 = cvar_historic(portfolio_rets_hist)
+    
+    summary = {
+        "Average Returns": f"{port_rets * 100:.2f}%",
+        "Average Bear Returns": f"{port_bear_rets * 100:.2f}%",
+        "Average Bull Returns": f"{port_bull_rets * 100:.2f}%",
+        "Daily Volatility": vol,
+        "Annual Volatility": vol_ann,
+        "Scenario Average Returns": f"{stats['mean_returns'] * 100:.2f}%",
+        "Scenario Loss Incurred": f"{stats['loss_percentage']:.2f}%",
+        "Scenario Average Loss": f"{stats['mean_loss_amount'] * -100:.2f}%",
+        "Scenario Average Gain": f"{stats['mean_gain_amount'] * 100:.2f}%",
+        "Scenario Variance": stats["variance"],
+        "Scenario Lower Quartile": f"{stats['lower_quartile'] * 100:.2f}%",
+        "Scenario Upper Quartile": f"{stats['upper_quartile'] * 100:.2f}%",
+        "Scenario Upper Quartile Mean": f"{stats['upper_returns_mean'] * 100:.2f}%",
+        "Scenario Min Returns": f"{stats['min_return'] * 100:.2f}%",
+        "Scenario Max Returns": f"{stats['max_return'] * 100:.2f}%",
+        "Portfolio Beta": f"{b_val:.4f}",
+        "Treynor Ratio": f"{treynor:.4f}",
+        "Portfolio Score": f"{score_val:.2f}",
+        "Portfolio Tracking Error": tracking_error(benchmark_weekly_rets, portfolio_rets_hist),
+        "Skewness": skew_val,
+        "Kurtosis": kurt_val,
+        "Cornish-Fisher VaR (5%)": cf_var5,
+        "Historic CVaR (5%)": hist_cvar5,
+        "Sharpe Ratio (Predicted)": sr_pred,
+        "Sharpe Hist Ratio": ann_sr_hist,
+        "Historic Annual Returs": annualise_returns(portfolio_rets_hist, 52),
+        "Max Drawdown": dd
+    }
+        
+    return summary
