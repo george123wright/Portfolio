@@ -4,7 +4,7 @@ import numpy as np
 import logging
 from sklearn.model_selection import KFold
 from functions.fast_regression import grid_search_regression, constrained_regression, ordinary_regression
-from financial_forecast_data import FinancialForecastData
+from data_processing.financial_forecast_data import FinancialForecastData
 
 
 pd.set_option('future.no_silent_downcasting', True)
