@@ -2,8 +2,8 @@ import pandas as pd
 import datetime as dt
 import numpy as np
 import logging
-from financial_forecast_data3 import FinancialForecastData
-from fast_regression import constrained_regression
+from data_processing.financial_forecast_data import FinancialForecastData
+from functions.fast_regression import constrained_regression
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
