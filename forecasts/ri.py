@@ -4,7 +4,7 @@ from scipy.optimize import minimize
 import itertools
 import datetime as dt
 import logging
-from financial_forecast_data3 import FinancialForecastData
+from data_processing.financial_forecast_data import FinancialForecastData
 
 df_opts = {'future.no_silent_downcasting': True}
 for opt, val in df_opts.items():
