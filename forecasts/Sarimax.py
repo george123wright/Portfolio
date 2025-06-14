@@ -1,22 +1,22 @@
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
-from statsmodels.stats.diagnostic import acorr_ljungbox
 from sklearn.preprocessing import StandardScaler
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 import warnings
 from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from statsmodels.tsa.api import VAR
+from joblib import Parallel, delayed
 
 from export_forecast import export_results
-from ratio_data import RatioData
 from macro_data3 import MacroData
 
-REGRESSORS = ['Interest', 'Cpi', 'Gdp', 'Unemp']
-SMALL_FLOOR = 1e-6
+BASE_REGRESSORS = ['Interest', 'Cpi', 'Gdp', 'Unemp']
+SHOCK_INTERVAL = 13   
 N_SIMS = 1000
 half = N_SIMS // 2
+CANDIDATE_ORDERS = [(1,1,0), (0,1,1), (1,1,1)]
 
 
 def configure_logger() -> logging.Logger:
@@ -31,99 +31,70 @@ def configure_logger() -> logging.Logger:
 
 logger = configure_logger()
 
+def compute_alpha_from_residuals(vr: VAR) -> float:
+    """
+    Compute α = trace(Σ̂_ε) / trace(Σ_u)
+     - Σ̂_ε: empirical covariance of one‐step VAR residuals
+     - Σ_u : vr.sigma_u from the fitted model
+    """
+    resid = vr.resid
+    cov_eps = np.cov(resid, rowvar=False, ddof=0)
+    cov_u   = vr.sigma_u
+    alpha    = np.trace(cov_eps) / np.trace(cov_u)
+    return alpha
 
-def prepare_sarimax_model(
+def prepare_sarimax_ensemble(
     df_model: pd.DataFrame,
     regressors: List[str]
-) -> SARIMAX:
+) -> Tuple[List[SARIMAX], np.ndarray]:
+    """
+    Fit SARIMAX models for each candidate order, return list of fit results and sampling probabilities.
+    """
+    fits = []
+    aics = []
     y = df_model['y']
+    exog = df_model[regressors]
 
-    candidates = [(1,1,0), (0,1,1), (1,1,1)]
-    best_aic = np.inf
-    best_order = candidates[0]
-    warm_init = None
-
-    for order in candidates:
+    for order in CANDIDATE_ORDERS:
         try:
-            m = SARIMAX(y,
-                        order=order,
-                        seasonal_order=(0,0,0,0),
-                        enforce_stationarity=False,
-                        enforce_invertibility=False)
-            fit_q = m.fit(disp=False, method='lbfgs', maxfun=1000)
-            if fit_q.aic < best_aic:
-                best_aic, best_order = fit_q.aic, order
-                warm_init = fit_q.params
+            model = SARIMAX(
+                y,
+                order=order,
+                seasonal_order=(0,0,0,0),
+                exog=exog,
+                enforce_stationarity=False,
+                enforce_invertibility=False
+            )
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore', ConvergenceWarning)
+                fit = model.fit(disp=False, method='lbfgs', maxfun=5000)
+            fits.append(fit)
+            aics.append(fit.aic)
         except Exception:
             continue
 
-    p_star, d_star, q_star = best_order
+    if not fits:
+        raise RuntimeError("No SARIMAX fits succeeded")
 
-    model = SARIMAX(y,
-                    order=(p_star, d_star, q_star),
-                    seasonal_order=(0,0,0,0),
-                    exog=df_model[regressors],
-                    enforce_stationarity=False,
-                    enforce_invertibility=False)
-    with warnings.catch_warnings():
-        warnings.simplefilter('ignore', ConvergenceWarning)
-        sp = warm_init
-        if sp is None or len(sp) != len(model.start_params):
-            sp = None
-        fit_final = model.fit(
-            disp=False,
-            method='lbfgs',
-            maxfun=10000,
-            factr=1e7,
-            start_params=sp
-        )
+    aics = np.array(aics)
+    delta = aics - aics.min()
+    weights = np.exp(-0.5 * delta)
+    probs = weights / weights.sum()
 
-    lb = acorr_ljungbox(fit_final.resid, lags=range(1,13), return_df=True)
-    if (lb['lb_pvalue'] < 0.05).any():
-        p2, d2, q2 = p_star, d_star, q_star
-        if p2 < 3:
-            p2 += 1
-        elif q2 < 3:
-            q2 += 1
-        else:
-            return fit_final
-
-        model2 = SARIMAX(y,
-                         order=(p2, d2, q2),
-                         seasonal_order=(0,0,0,0),
-                         exog=df_model[regressors],
-                         enforce_stationarity=False,
-                         enforce_invertibility=False)
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', ConvergenceWarning)
-            try:
-                fit2 = model2.fit(
-                    disp=False,
-                    method='lbfgs',
-                    maxfun=10000,
-                    factr=1e7,
-                    error_dist='t',
-                    dist_kwargs={'df':5},
-                    start_params=fit_final.params
-                )
-                if fit2.aic < fit_final.aic:
-                    return fit2
-            except Exception:
-                pass
-
-    return fit_final
+    return fits, probs
 
 
 def evaluate_sarimax_cv(
     df_scaled: pd.DataFrame,
     regressors: List[str],
-    fit,
+    fits: List,
+    probs: np.ndarray,
     n_splits: int = 3,
     horizon: int = 52
 ) -> float:
     """
-    Cross‐validate a multi‐step (horizon) SARIMAX forecast.
-    Returns the RMSE of price predictions horizon steps ahead.
+    Cross‐validate multi‐step SARIMAX ensemble forecasts (uses mean forecasts only).
+    Returns RMSE of price forecasts horizon steps ahead.
     """
     N = len(df_scaled)
     if N <= horizon:
@@ -145,15 +116,16 @@ def evaluate_sarimax_cv(
         if len(exog_h) < horizon:
             break
 
+        fit = fits[np.argmin([f.aic for f in fits])]
         pred = fit.get_forecast(steps=horizon, exog=exog_h)
         r_pred = pred.predicted_mean.values
+
         r_true = df_scaled['y'].iloc[
             train_end + 1 : train_end + 1 + horizon
         ].values
 
         P_pred = P0 * np.exp(np.sum(r_pred))
         P_true = P0 * np.exp(np.sum(r_true))
-
         sq_errors.append((P_true - P_pred) ** 2)
 
     return np.sqrt(np.mean(sq_errors)) if sq_errors else np.nan
@@ -163,94 +135,91 @@ def simulate_macro_scenarios(
     vr: VAR,
     last_vals: np.ndarray,
     steps: int,
-    n_sims: int,
-    shock_interval: int = 13 
+    shock_interval: int = SHOCK_INTERVAL,
+    alpha: Optional[float] = None,
 ) -> np.ndarray:
-    """
-    Vectorized simulation of n_sims VAR paths using antithetic variates.
-    Returns array (n_sims, steps, k).
-    """
+    
+    if alpha is None:
+        alpha = compute_alpha_from_residuals(vr)
+        
     Su = vr.sigma_u
     k = Su.shape[0]
-    p = vr.k_ar
+    cov = (Su + Su.T) / 2
+    cov_w = alpha * cov
+    cov_q = shock_interval * cov
+    jitter = 1e-6 * np.eye(k)
+    L_w = np.linalg.cholesky(cov_w + jitter)
+    L_q = np.linalg.cholesky(cov_q + jitter)
 
-    cov = (Su + Su.T) / 2 + 1e-6 * np.eye(k)
-    L = np.linalg.cholesky(cov)
-
-    z = np.random.randn(half, steps, k)
-    eps = np.einsum('ij,bst->bsi', L, z)
-    eps_full = np.concatenate([eps, -eps], axis=0)
-
-    comp_mat = np.zeros((k*p, k*p))
-    for j in range(p):
-        comp_mat[:k, j*k:(j+1)*k] = vr.coefs[j]
-    if p > 1:
-        comp_mat[k:, :-k] = np.eye(k*(p-1))
-
-    init = last_vals.flatten()
-    state = np.tile(init, (n_sims, 1))
-    sims = np.zeros((n_sims, steps, k), float)
-
-    for t in range(steps):
-        hist = state
-        y_hat = hist @ comp_mat.T
-        if (t % shock_interval) == 0:
-            shock_t = eps_full[:, t, :]
-        else:
-            shock_t = np.zeros((n_sims, k))
-        y = y_hat + shock_t
-
-        if p > 1:
-            state = np.hstack([y, hist[:, :k*(p-1)]])
-        else:
-            state = y
-        sims[:, t, :] = y
-
+    sims = np.zeros((N_SIMS, steps, k), float)
+    for i in range(half):
+        hist = list(last_vals.copy())
+        for t in range(steps):
+            y_hat = sum(vr.coefs[j] @ hist[-j-1] for j in range(vr.k_ar))
+            if (t % shock_interval) == 0:
+                eps = L_q @ np.random.randn(k)
+            else:
+                eps = L_w @ np.random.randn(k)
+            nxt = y_hat + eps
+            sims[i, t] = nxt
+            hist.append(nxt)
+    for i in range(half, N_SIMS):
+        sims[i] = 2*last_vals - sims[i - half]  
     return sims
 
 
-def simulate_price_paths(
-    macro_sims, fit, scaler, cp, param_mean, param_cov
-):
-    n_sims, steps, k = macro_sims.shape
-    exog_flat   = macro_sims.reshape(n_sims * steps, k)
-    exog_scaled = scaler.transform(exog_flat)
+def simulate_price_path(
+    macro_path: np.ndarray,
+    fits: List,
+    fit_probs: np.ndarray,
+    scaler,
+    future_dates: pd.DatetimeIndex,
+    cp: float,
+    regressors: List[str],
+    lb: float,
+    ub: float,
+) -> np.ndarray:
+    idx = np.random.choice(len(fits), p=fit_probs)
+    fit = fits[idx]
+    orig_params = fit.params.copy()
 
-    param_names = list(fit.param_names)
-    exog_idx = [param_names.index(reg) for reg in REGRESSORS if reg in param_names]
-    if len(exog_idx) != len(REGRESSORS):
-        raise ValueError(f"Could not find all regressors in param_names: {param_names}")
-    
-    cov_mat = fit.cov_params().to_numpy()  
-    cov_exog = cov_mat[np.ix_(exog_idx, exog_idx)]  
-    mean_exog = fit.params.to_numpy()[exog_idx]    
+    beta_sim = np.random.multivariate_normal(orig_params, fit.cov_params())
+    fit.params = beta_sim
 
-    betas = np.random.multivariate_normal(mean_exog, cov_exog, size=n_sims)
+    try:
+        fb = pd.DataFrame({'ds': future_dates})
+        for j, name in enumerate(BASE_REGRESSORS):
+            fb[name] = macro_path[:, j]
+        fb['shock_dummy'] = ((np.arange(len(future_dates)) % SHOCK_INTERVAL) == 0).astype(float)
 
+        exog_macro = scaler.transform(fb[BASE_REGRESSORS].values)
+        exog = np.hstack([exog_macro, fb[['shock_dummy']].values])
 
-    price_sims = np.zeros((n_sims, steps))
-    orig_params = fit.params.to_numpy().copy()
-    for i in range(n_sims):
-        tmp = orig_params.copy()
-        tmp[exog_idx] = betas[i]
-        fit.params = tmp
-        r = fit.forecast(steps=steps,
-                        exog=exog_scaled[i*steps:(i+1)*steps])
-        price_sims[i] = cp * np.exp(np.cumsum(r))
-    fit.params = orig_params
-    return price_sims
+        fc = fit.get_forecast(steps=len(future_dates), exog=exog)
+        mu  = fc.predicted_mean
+        var = fc.var_pred_mean
+        r_sim = mu + np.random.randn(len(mu)) * np.sqrt(var)
 
+        path = cp * np.exp(np.cumsum(r_sim))
+        return np.clip(path, lb, ub)
+
+    finally:
+        fit.params = orig_params
 
 
 def main() -> None:
-    r = RatioData()
     macro = MacroData()
+    r = macro.r
     tickers = r.tickers
     forecast_period = 52
     cv_splits = 3
+
     close = r.weekly_close
     latest_prices = r.last_price
     analyst = r.analyst
+    
+    lb = 0.2 * latest_prices
+    ub = 5.0 * latest_prices
 
     logger.info("Importing macro history …")
     raw_macro = macro.assign_macro_history_non_pct().reset_index()
@@ -258,161 +227,98 @@ def main() -> None:
         columns={'year':'ds'} if 'year' in raw_macro.columns
         else {raw_macro.columns[1]:'ds'}
     )
-    raw_macro['ds'] = (
-        raw_macro['ds'].dt.to_timestamp()
-        if isinstance(raw_macro['ds'].dtype, pd.PeriodDtype)
-        else pd.to_datetime(raw_macro['ds'])
-    )
+    raw_macro['ds'] = raw_macro['ds'].dt.to_timestamp()
     country_map = {t: str(c) for t,c in zip(analyst.index, analyst['country'])}
     raw_macro['country'] = raw_macro['ticker'].map(country_map)
-    macro_clean = raw_macro[['ds','country'] + REGRESSORS].dropna()
+    macro_clean = raw_macro[['ds','country'] + BASE_REGRESSORS].dropna()
 
-    logger.info("Simulating macro scenarios for each country …")
-    country_macro_paths: Dict[str, Optional[np.ndarray]] = {}
+    logger.info("Simulating macro scenarios…")
+    country_paths: Dict[str, Optional[np.ndarray]] = {}
     for ctry, dfc in macro_clean.groupby('country'):
         dfm_raw = (
-            dfc.set_index('ds')[REGRESSORS]
-            .sort_index()
-            .resample('W').mean()
-            .ffill()
-            .dropna()
+            dfc.set_index('ds')[BASE_REGRESSORS]
+               .sort_index().resample('W').mean()
+               .ffill().dropna()
         )
-        dfm_raw.index = pd.DatetimeIndex(dfm_raw.index, freq='W-SUN')
-        dfm_raw = dfm_raw.clip(lower=SMALL_FLOOR)
         dfm = np.log(dfm_raw).diff().dropna()
         vr = VAR(dfm).fit(maxlags=1)
         if vr.k_ar < 1:
-            country_macro_paths[ctry] = None
+            country_paths[ctry] = None
             continue
-
         last_vals = dfm.values[-vr.k_ar:]
-        sims = simulate_macro_scenarios(
-            vr=vr,
-            last_vals=last_vals,
-            steps=forecast_period,
-            n_sims=N_SIMS
-        )
-        country_macro_paths[ctry] = sims
+        sims = simulate_macro_scenarios(vr, last_vals, forecast_period)
+        country_paths[ctry] = sims
 
-    results = {tk: {} for tk in tickers}
+    results = {tk:{} for tk in tickers}
+    logger.info("Fitting SARIMAX ensemble…")
 
-    logger.info("Running SARIMAX Monte Carlo forecasts …")
     for tk in tickers:
-        logger.info("Ticker: %s", tk)
         cp = latest_prices.get(tk, np.nan)
         if pd.isna(cp):
-            logger.warning("No price for %s, skipping", tk)
-            continue
+            logger.warning("No price for %s, skipping", tk); continue
 
         dfp = pd.DataFrame({'ds': close.index, 'price': close[tk].values})
-        dfp['ds'] = pd.to_datetime(dfp['ds'])
-        dfp['y'] = np.log(dfp['price']).diff()
-        dfp = dfp.dropna(subset=['y']).reset_index(drop=True)
+        dfp['y'] = np.log(dfp['price']).diff(); dfp.dropna(inplace=True)
+        tm = raw_macro[raw_macro['ticker']==tk][['ds']+BASE_REGRESSORS]
+        dfm = pd.merge_asof(dfp.sort_values('ds'), tm.sort_values('ds'), on='ds')
+        dfm = dfm.set_index('ds').asfreq('W-SUN').ffill().bfill().dropna()
 
-        tm = raw_macro[raw_macro['ticker'] == tk][['ds'] + REGRESSORS]
-        dfm = pd.merge_asof(
-            dfp.sort_values('ds'),
-            tm.sort_values('ds'),
-            on='ds',
-            direction='backward'
-        )
-        dfm = (
-            dfm.set_index('ds')
-               .sort_index()
-               .asfreq('W-SUN')
-               .ffill()
-               .bfill()
-        )
-        dfm = dfm.dropna(subset=['price','y'] + REGRESSORS)
-
-        df_price = dfm[['price']].copy()
-        df_price['y'] = dfm['y']
-        df_macro     = dfm[REGRESSORS].copy()
-        df_macro_ld  = np.log(df_macro).diff().dropna()
-
-        df_comb = pd.concat([df_price, df_macro_ld], axis=1).dropna()
+        df_price = dfm[['price']].copy(); df_price['y']=np.log(dfm['price']).diff(); df_price.dropna(inplace=True)
+        df_macro = np.log(dfm[BASE_REGRESSORS]).diff().dropna()
+        df_comb = pd.concat([df_price, df_macro], axis=1).dropna()
         if df_comb.empty:
-            logger.warning("Insufficient data for %s, skipping", tk)
-            continue
+            logger.warning("Insufficient data for %s, skipping", tk); continue
 
-        scaler = StandardScaler().fit(df_comb[REGRESSORS].values)
+        scaler = StandardScaler().fit(df_comb[BASE_REGRESSORS].values)
         df_scaled = df_comb.copy()
-        df_scaled[REGRESSORS] = scaler.transform(df_comb[REGRESSORS].values)
+        df_scaled[BASE_REGRESSORS] = scaler.transform(df_comb[BASE_REGRESSORS].values)
+        df_scaled['shock_dummy'] = ((np.arange(len(df_scaled)) % SHOCK_INTERVAL) == 0).astype(float)
+        regressors = BASE_REGRESSORS + ['shock_dummy']
 
-        try:
-            fit = prepare_sarimax_model(df_scaled, REGRESSORS)
-        except Exception as e:
-            logger.error("SARIMAX failed for %s: %s", tk, e)
-            continue
+        fits, probs = prepare_sarimax_ensemble(df_scaled, regressors)
+        rmse = evaluate_sarimax_cv(df_scaled, regressors, fits, probs, n_splits=cv_splits, horizon=forecast_period)
 
-        param_mean = fit.params.copy()
-        param_cov  = fit.cov_params().to_numpy()
-
-        rm_price = evaluate_sarimax_cv(
-            df_scaled,
-            REGRESSORS,
-            fit,
-            n_splits=cv_splits,
-            horizon=forecast_period
-        )
-
+        last_date = df_scaled.index.max()
+        future_dates = pd.date_range(start=last_date+pd.Timedelta(weeks=1), periods=forecast_period, freq='W-SUN')
         country = country_map.get(tk)
-        macro_sims = country_macro_paths.get(country)
+        macro_sims = country_paths.get(country)
         if macro_sims is None:
-            last_obs = dfm[REGRESSORS].iloc[-1].values
-            det_path = np.tile(last_obs, (forecast_period, 1))
-            macro_sims = np.stack([det_path] * N_SIMS)
+            last_obs = dfm[BASE_REGRESSORS].iloc[-1].values
+            macro_sims = np.stack([np.tile(last_obs, (forecast_period,1))]*N_SIMS)
 
-        price_sims = simulate_price_paths(
-            macro_sims,
-            fit,
-            scaler,
-            cp,
-            param_mean,
-            param_cov
+        price_sims = Parallel(n_jobs=-1)(
+            delayed(simulate_price_path)(
+                macro_sims[i], fits, probs, scaler,
+                future_dates, cp, regressors,
+                lb_tk := lb[tk], ub_tk := ub[tk]
+            )
+            for i in range(N_SIMS)
         )
+        price_sims = np.vstack(price_sims)
 
-        final_sims = price_sims[:, -1]
-
-        min_price = final_sims.min()
-        max_price = final_sims.max()
-        avg_price = final_sims.mean()
-        rets = final_sims / cp - 1
-        avg_ret = rets.mean()
-        rets_std = rets.std(ddof=1)
-
-        se = np.sqrt(((rm_price / cp)**2) + (rets_std**2))
-
-        results[tk].update({
-            'low': min_price,
-            'avg': avg_price,
-            'high': max_price,
-            'returns': avg_ret,
-            'se': se
-        })
-
-        logger.info(
-            "Ticker: %s, Low: %.2f, Avg: %.2f, High: %.2f, Returns: %.4f, SE: %.4f",
-            tk, min_price, avg_price, max_price, avg_ret, se
-        )
+        final = price_sims[:,-1]
+        rets = final/cp - 1
+        results[tk] = {
+            'low': final.min(),
+            'avg': final.mean(),
+            'high': final.max(),
+            'returns': rets.mean(),
+            'se': np.sqrt((rmse/cp)**2 + rets.std(ddof=1)**2)
+        }
+        logger.info("%s -> low %.2f, avg %.2f, high %.2f, se %.2f", tk, results[tk]['low'], results[tk]['avg'], results[tk]['high'], results[tk]['se'])
 
     df_out = pd.DataFrame({
         'Ticker': tickers,
-        'Current Price': [latest_prices.get(t, np.nan) for t in tickers],
-        'Avg Price': [results[t].get('avg', np.nan) for t in tickers],
-        'Low Price': [results[t].get('low', np.nan) for t in tickers],
-        'High Price': [results[t].get('high', np.nan) for t in tickers],
-        'Returns': [
-            (results[t].get('avg', np.nan) / latest_prices.get(t, np.nan) - 1)
-            if latest_prices.get(t, np.nan) else np.nan
-            for t in tickers
-        ],
-        'SE': [results[t].get('se', np.nan) for t in tickers]
+        'Current Price': [latest_prices.get(t) for t in tickers],
+        'Avg Price': [results[t]['avg'] for t in tickers],
+        'Low Price': [results[t]['low'] for t in tickers],
+        'High Price': [results[t]['high'] for t in tickers],
+        'Returns': [(results[t]['avg']/latest_prices.get(t)-1) for t in tickers],
+        'SE': [results[t]['se'] for t in tickers]
     }).set_index('Ticker')
 
     export_results({'SARIMAX Monte Carlo': df_out})
-    logger.info("Monte Carlo SARIMAX run completed.")
-
+    logger.info("Run completed.")
 
 if __name__ == '__main__':
     main()
