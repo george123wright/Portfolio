@@ -2,6 +2,8 @@ import pandas as pd
 import datetime as dt
 import numpy as np
 import logging
+import os
+from pathlib import Path
 from sklearn.model_selection import KFold
 from functions.fast_regression import grid_search_regression, constrained_regression, ordinary_regression
 from data_processing.financial_forecast_data import FinancialForecastData
@@ -14,7 +16,11 @@ logger = logging.getLogger(__name__)
 today = dt.date.today()
 today_ts = pd.Timestamp.today().normalize()
 
-EXCEL_OUT_FILE   = f'Portfolio_Optimisation_Forecast_{today}.xlsx'  
+base_dir = Path(os.environ.get("PORTFOLIO_DIR", "."))
+EXCEL_OUT_FILE   = os.environ.get(
+    "PORTFOLIO_FORECAST_FILE",
+    str(base_dir / f"Portfolio_Optimisation_Forecast_{today}.xlsx"),
+)
 
 fdata = FinancialForecastData()
 macro = fdata.macro
@@ -224,6 +230,9 @@ dcf_df = pd.DataFrame({
     'SE': se_dict
 })
 dcf_df.index.name = 'Ticker'
-excel_file3 = f"/Users/georgewright/Portfolio_Optimisation_DCF.xlsx"
+excel_file3 = os.environ.get(
+    "PORTFOLIO_DCF_FILE",
+    "/Users/georgewright/Portfolio_Optimisation_DCF.xlsx",
+)
 with pd.ExcelWriter(excel_file3, mode='a', engine='openpyxl', if_sheet_exists='replace') as writer:
     dcf_df.to_excel(writer, sheet_name='DCF')

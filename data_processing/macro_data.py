@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from functools import cached_property
+import os
 from ratio_data import RatioData
 
 r = RatioData()
@@ -32,11 +33,25 @@ class MacroData:
         "Interest_Rate":       "Interest_Rate",
     }
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        hist_path: str | Path | None = None,
+        forecast_path: str | Path | None = None,
+    ) -> None:
         self.today         = dt.date.today()
-        self.hist_path     = Path("/Users/georgewright/macro_and_index_data.xlsx")
+        self.hist_path     = Path(
+            hist_path
+            or os.environ.get(
+                "PORTFOLIO_HIST_PATH",
+                "/Users/georgewright/macro_and_index_data.xlsx",
+            )
+        )
         self.forecast_path = Path(
-            f"/Users/georgewright/Portfolio_Optimisation_Data_{self.today}.xlsx"
+            forecast_path
+            or os.environ.get(
+                "PORTFOLIO_FORECAST_PATH",
+                f"/Users/georgewright/Portfolio_Optimisation_Data_{self.today}.xlsx",
+            )
         )
         self.r = RatioData()
 

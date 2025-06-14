@@ -1,12 +1,22 @@
 import pandas as pd
 import datetime as dt
+import os
+from pathlib import Path
 from export_forecast import export_results
 from data_processing.ratio_data import RatioData
 
-def get_data():
+def get_data(dcf_path: str | Path | None = None):
    
+    dcf_path = Path(
+        dcf_path
+        or os.environ.get(
+            "PORTFOLIO_DCF_FILE",
+            "/Users/georgewright/Portfolio_Optimisation_DCF.xlsx",
+        )
+    )
+
     dcf = pd.read_excel(
-        '/Users/georgewright/Portfolio_Optimisation_DCF.xlsx',
+        dcf_path,
         sheet_name = 'DCF',
         index_col=0,
         parse_dates=True,
@@ -14,7 +24,7 @@ def get_data():
     )
    
     dcfe = pd.read_excel(
-        '/Users/georgewright/Portfolio_Optimisation_DCF.xlsx',
+        dcf_path,
         sheet_name = 'DCFE',
         index_col=0,
         parse_dates=True,
@@ -22,7 +32,7 @@ def get_data():
     )
    
     epv = pd.read_excel(
-        '/Users/georgewright/Portfolio_Optimisation_DCF.xlsx',
+        dcf_path,
         sheet_name = 'EPV',
         index_col=0,
         parse_dates=True,
@@ -30,7 +40,7 @@ def get_data():
     )
     
     ri = pd.read_excel(
-        '/Users/georgewright/Portfolio_Optimisation_DCF.xlsx',
+        dcf_path,
         sheet_name = 'RI',
         index_col=0,
         parse_dates=True,
@@ -38,7 +48,7 @@ def get_data():
     )
     
     lin_reg = pd.read_excel(
-        '/Users/georgewright/Portfolio_Optimisation_DCF.xlsx',
+        dcf_path,
         sheet_name = 'Lin Reg Returns',
         index_col=0,
         parse_dates=True,
@@ -63,8 +73,19 @@ today = dt.date.today() - dt.timedelta(days=1)
 
 yesterday = today - dt.timedelta(days=1)
 
-excel_file = f"/Users/georgewright/Portfolio_Optimisation_Forecast_{today}.xlsx"
-excel_file2 = f"/Users/georgewright/Portfolio_Optimisation_Data_{today}.xlsx"
+base_dir = Path(os.environ.get("PORTFOLIO_DIR", "."))
+excel_file = str(
+    os.environ.get(
+        "PORTFOLIO_FORECAST_FILE",
+        base_dir / f"Portfolio_Optimisation_Forecast_{today}.xlsx",
+    )
+)
+excel_file2 = str(
+    os.environ.get(
+        "PORTFOLIO_DATA_FILE",
+        base_dir / f"Portfolio_Optimisation_Data_{today}.xlsx",
+    )
+)
 
 close = pd.read_excel(excel_file2, sheet_name="Close", index_col=0, parse_dates=True, engine="openpyxl").sort_index(ascending=True)
 
@@ -79,7 +100,7 @@ for t in tickers:
 latest_prices = r.last_price
 
 currency = pd.read_excel(
-    f'/Users/georgewright/Portfolio_Optimisation_Data_{today}.xlsx',
+    excel_file2,
     sheet_name='Currency',
     index_col=0,
     parse_dates=True,

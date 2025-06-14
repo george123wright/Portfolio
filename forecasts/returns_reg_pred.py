@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Dict, List, Tuple
+import os
 
 import numpy as np
 import pandas as pd
@@ -281,7 +282,12 @@ def main() -> None:
         return
 
     df = pd.DataFrame(results).set_index("Ticker")
-    out_file = Path("/Users/georgewright/Portfolio_Optimisation_DCF.xlsx")
+    out_file = Path(
+        os.environ.get(
+            "PORTFOLIO_DCF_FILE",
+            "/Users/georgewright/Portfolio_Optimisation_DCF.xlsx",
+        )
+    )
     with pd.ExcelWriter(out_file, mode="a", engine="openpyxl", if_sheet_exists="replace") as writer:
         df.to_excel(writer, sheet_name="Lin Reg Returns")
 

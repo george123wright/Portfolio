@@ -6,6 +6,7 @@ from typing import Final
 import numpy as np
 import pandas as pd
 from functools import cached_property
+import os
 from macro_data import MacroData
 macro = MacroData()
 
@@ -61,9 +62,14 @@ class FinancialForecastData:
         self,
         tickers: list[str] = macro.r.tickers,
         quiet: bool = False,
+        root_dir: str | Path | None = None,
     ):
         self.tickers   = list(tickers)
-        self.root_dir  = Path("/Users/georgewright/modelling/stock_analysis_data")
+        env_root = os.environ.get(
+            "PORTFOLIO_STOCK_DATA_DIR",
+            "/Users/georgewright/modelling/stock_analysis_data",
+        )
+        self.root_dir  = Path(root_dir or env_root)
         self.macro     = macro
         self.analyst_df = macro.r.analyst
         self.quiet     = quiet

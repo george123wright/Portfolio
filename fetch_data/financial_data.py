@@ -4,6 +4,8 @@ import pandas as pd
 import datetime as dt
 import scipy.stats as st
 import logging
+import os
+from pathlib import Path
 from typing import Tuple, Any, Dict
 from maps.industry_mapping import IndustryMap
 from maps.sector_map import SectorMap
@@ -19,13 +21,23 @@ ch.setFormatter(formatter)
 logger.addHandler(ch)
 
 today: dt.date = dt.date.today()
-
-excel_file: str = f"Portfolio_Optimisation_Data_{today}.xlsx"
-
-output_excel_file: str = f"Portfolio_Optimisation_Forecast_{today}.xlsx"
+base_dir = Path(os.environ.get("PORTFOLIO_DIR", "."))
+data_file = Path(
+    os.environ.get(
+        "PORTFOLIO_DATA_FILE",
+        base_dir / f"Portfolio_Optimisation_Data_{today}.xlsx",
+    )
+)
+excel_file: str = str(data_file)
+output_excel_file: str = str(
+    os.environ.get(
+        "PORTFOLIO_OUTPUT_FILE",
+        base_dir / f"Portfolio_Optimisation_Forecast_{today}.xlsx",
+    )
+)
 
 currency = pd.read_excel(
-    f'/Users/georgewright/Portfolio_Optimisation_Data_{today}.xlsx',
+    data_file,
     sheet_name='Currency',
     index_col=0,
     parse_dates=True,
