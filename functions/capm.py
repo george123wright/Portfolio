@@ -1,3 +1,7 @@
+"""
+Simple CAPM utility returning volatility and expected return for a stock relative to a market index.
+"""
+
 import numpy as np
 import pandas as pd
 
