@@ -1,3 +1,7 @@
+"""
+Fits SARIMAX models with macro regressors, simulates future macro scenarios via VAR, and Monte‑Carlo forecasts share prices.
+"""
+
 import logging
 from typing import List, Dict, Optional, Tuple
 import numpy as np
