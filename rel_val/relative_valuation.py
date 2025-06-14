@@ -1,12 +1,6 @@
 import numpy as np
 import pandas as pd
-
-def bvps(eps, prev_bvps, dps):
-    """
-    Calculate BVPS for the next period:
-    BVPSₙ = BVPSₙ₋₁ + EPSₙ - DPSₙ.
-    """
-    return max(float(prev_bvps) + float(eps) - float(dps), 0)
+from pbv import bvps
 
 def rel_val_model(low_eps: float, 
                        avg_eps: float, 
