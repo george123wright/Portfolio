@@ -1,3 +1,7 @@
+"""
+Loads historical macroeconomic data per country and provides annualised statistics and forecasts.
+"""
+
 from __future__ import annotations
 import datetime as dt
 from pathlib import Path
