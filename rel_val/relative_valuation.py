@@ -1,5 +1,5 @@
 """
-Combines all the relative valuation models
+Consolidated relative‑valuation model blending P/E, P/S, P/BV and EV/Sales signals.
 """
 
 import numpy as np
