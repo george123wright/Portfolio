@@ -6,15 +6,11 @@ import yfinance as yf
 import ta
 import numpy as np
 from pypfopt import expected_returns
-from openpyxl import Workbook
-from openpyxl.utils import get_column_letter
-from openpyxl.styles import PatternFill
-from openpyxl.formatting.rule import CellIsRule
-from openpyxl.worksheet.table import Table, TableStyleInfo
 from pandas_datareader import data as web
 import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from export_forecast import export_results
 
 BASE_FORECAST_URL = "https://tradingeconomics.com/forecast"
 FORECAST_SPECS: Dict[str, Dict[str, Any]] = {
@@ -138,7 +134,6 @@ def scrape_commodity_forecast(
         if not first_th or first_th.get_text(strip=True) != category:
             continue
 
-        # parse the body
         records = []
         for row in tbl.find("tbody").find_all("tr"):
             cells = row.find_all("td")
@@ -150,8 +145,8 @@ def scrape_commodity_forecast(
             records.append(rec)
 
         df = pd.DataFrame(records)
-        # set index from the correct column
         df.set_index(col_map[index_pos], inplace=True)
+        
         return df
 
     raise RuntimeError(f"No '{category}' table found on commodity page.")
@@ -220,7 +215,7 @@ def macro_data() -> pd.DataFrame:
     """
     today = dt.date.today()
     start, end = '2010-01-01', today.isoformat()
-    # SP500
+
     sp = yf.download('^GSPC', start=start, end=end)
     
     sp500_monthly = pd.DataFrame(sp["Close"].resample("ME").ffill())
@@ -231,7 +226,6 @@ def macro_data() -> pd.DataFrame:
 
     sp500_monthly.dropna(inplace=True)
 
-    # FRED series
     series_map = [
         ('Inflation', 'CPIAUCSL'),
         ('US_GDP', 'GDP'),
@@ -255,58 +249,7 @@ def macro_data() -> pd.DataFrame:
     macro_df = df.join(sp500_monthly, how='inner')
     return macro_df
 
-def format_and_save_excel(
-    filename: str,
-    sheets: Dict[str, pd.DataFrame],
-    apply_table: bool = False
-) -> None:
-    logging.info("Creating Excel %s", filename)
-    with pd.ExcelWriter(filename, engine="openpyxl") as writer:
-        for name, df in sheets.items():
-            df.sort_index().to_excel(writer, sheet_name=name)
 
-        if apply_table and 'Exponential Returns' in writer.sheets:
-            wb = writer.book
-            ws = wb['Exponential Returns']
-
-            max_row, max_col = ws.max_row, ws.max_column
-            table_ref = f"A1:{get_column_letter(max_col)}{max_row}"
-            tbl = Table(displayName="ExpRetTbl", ref=table_ref)
-            tbl.tableStyleInfo = TableStyleInfo(
-                name="TableStyleMedium9", showRowStripes=True
-            )
-            ws.add_table(tbl)
-
-            # proper fills
-            red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-            green_fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
-
-            # apply conditional formatting to columns B & C
-            for col_letter in ['B', 'C']:
-                rng = f"{col_letter}2:{col_letter}{max_row}"
-                ws.conditional_formatting.add(
-                    rng,
-                    CellIsRule(
-                        operator='lessThan',
-                        formula=['0'],
-                        fill=red_fill,
-                        stopIfTrue=True
-                    )
-                )
-                ws.conditional_formatting.add(
-                    rng,
-                    CellIsRule(
-                        operator='greaterThan',
-                        formula=['0'],
-                        fill=green_fill,
-                        stopIfTrue=True
-                    )
-                )
-    logging.info("Saved Excel %s", filename)
-
-# -----------------------------------------------------------------------------
-# Main Workflow
-# -----------------------------------------------------------------------------
 def main() -> None:
     """
     Orchestrate data download, indicator computation, forecast scraping,
@@ -315,9 +258,16 @@ def main() -> None:
     configure_logging()
     today = dt.date.today()
 
-    # 1. Download market data
     tickers = [
-        ""
+        "1211.HK", "AMZN", "APD", "ASTS", "ASX", "AV.L", "BA", "BA.L", "BABA", "BATS.L", "BBAI",
+        "BLDR", "BLZE", "BNP.PA", "BNTC", "BP.L", "BBD-B.TO", "BT-A.L", "BUR", "BUSE", "C", "CCO.TO", "CELH", "CNQ.TO", "COP", "COHR", "CPNG", "CRM", "CRWD", "COST", "CVX", "CYBR", "CZR",
+        "DHI", "DHR", "DIS", "DPZ", "DKNG", "EVR", "EZJ.L", "FARO", "FISI", "FIX", "FLNC", "FLOW.AS", "FSG.L", "FTAI", "FUN",
+        "GLBE", "GM", "GOOG", "GRG.L", "GS", "GTLB", "HEIA.AS", "HOOD", "HSBA.L", "HWM",
+        "IAG.L", "IMI.L", "INVZ", "JD.L", "JPM", "KO", "KBR", "LH", "LMP.L", "LOVE", "LUNR", "MCD", "MELI", "META", "MGM", "MGNI", "MNG.L", "MSFT", 
+        "MTZ", "NEE", "NG.L", "NUE", "NVDA", "NOVO-B.CO", "OUST", "PLTR", "PSN.L", 
+        "QNST", "REL.L", "RGTI", "RR.L", "RY.TO", "SAN.MC", "SCHW", "SHIP", "SMCI", "SSB", "STE", "SU.TO", "TBLA", "TDY", "TEM", "TEVA", 
+        "TRMB", "TRMD", "TSCO.L", "TTD", "TTWO", "UBSG.SW", "VIRT", "VKTX",
+        "W7L.L", "WMT", "WPK.TO", "ZETA", "ZIM"
     ]    
     start_date = '2000-01-01'  
     data = download_data(tickers, start_date, today)
@@ -379,25 +329,23 @@ def main() -> None:
     one_year_raw = close_1y.iloc[-1] / close_1y.iloc[0] - 1
 
     er_ema_df = pd.DataFrame({
-        "EMA Returns": exp_ret_ema,
+        "Returns": exp_ret_ema,
         "EMA Weekly Returns": exp_ret_week,
-        "EMA Daily Volatility": latest_ema_vol,
-        "EMA Weekly Volatility": latest_wk_vol
+        "SE": latest_ema_vol * np.sqrt(252),
+        "Weekly SE": latest_wk_vol
     })
     dr_df = pd.DataFrame({
         "Returns": one_year_raw,
-        "Vol": ret_1y.std(),
-        "Annual Vol": ret_1y.std() * np.sqrt(len(ret_1y))
+        "ASE": ret_1y.std() * np.sqrt(len(ret_1y))
     })
 
     file_raw = f"Portfolio_Optimisation_Data_{today}.xlsx"
     forecast_file = f"Portfolio_Optimisation_Forecast_{today}.xlsx"
 
-    format_and_save_excel(file_raw, sheets_data)
-    format_and_save_excel(
-        forecast_file,
+    export_results(sheets_data, file_raw)
+    export_results(
         {"Exponential Returns": er_ema_df, "Daily Returns": dr_df},
-        apply_table=True
+        forecast_file
     )
 
 
