@@ -1,3 +1,8 @@
+"""
+fetch_data/fetch_macro_data.py
+Retrieves macroeconomic time series (interest, CPI, GDP, etc.) from FRED for multiple countries and saves them to Excel..
+"""
+
 import pandas as pd
 import datetime as dt
 import logging
