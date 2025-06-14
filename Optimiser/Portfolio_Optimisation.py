@@ -14,9 +14,9 @@ from openpyxl.styles import PatternFill
 import pandas as pd
 from openpyxl.formatting.rule import ColorScaleRule 
 import portfolio_functions as pf
-from cov_functions import shrinkage_covariance
+from functions.cov_functions import shrinkage_covariance
 import portfolio_optimisers as po
-from ratio_data import RatioData
+from data_processing.ratio_data import RatioData
 
 r = RatioData()
 
