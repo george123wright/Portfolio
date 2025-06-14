@@ -1,3 +1,7 @@
+"""
+Builds a gradient‑boosting regression model to predict returns from engineered features, using bootstrapping to create scenario matrices.
+"""
+
 from __future__ import annotations
 import logging
 from pathlib import Path
