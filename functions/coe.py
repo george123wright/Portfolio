@@ -1,3 +1,7 @@
+"""
+Calculates cost of equity per ticker using betas, country risk premiums and currency premiums.
+"""
+
 import pandas as pd
 
 def calculate_cost_of_equity(
