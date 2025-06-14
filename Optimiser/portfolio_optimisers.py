@@ -233,7 +233,7 @@ def comb_port(
 ) -> np.ndarray:
     """
     Builds a 'Combination' portfolio using a weighted average of MSR and Sortino portfolios
-    plus an extra penalty based on risk contributions.
+    plus an extra penalty based on Information Ratio.
     """
     n = er.shape[0]
     init_guess = np.zeros(n)
