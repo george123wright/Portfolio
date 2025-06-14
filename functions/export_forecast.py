@@ -1,3 +1,7 @@
+"""
+Writes various DataFrames to an Excel workbook and applies conditional formatting and tables.
+"""
+
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from openpyxl.formatting.rule import CellIsRule, FormulaRule, ColorScaleRule
