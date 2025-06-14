@@ -8,10 +8,6 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
 from openpyxl.styles import PatternFill
-from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.table import Table, TableStyleInfo
-from openpyxl.styles import PatternFill
-import pandas as pd
 from openpyxl.formatting.rule import ColorScaleRule 
 import portfolio_functions as pf
 from functions.cov_functions import shrinkage_covariance
