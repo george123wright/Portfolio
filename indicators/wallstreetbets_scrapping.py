@@ -1,3 +1,8 @@
+"""
+Scrapes posts and comments from r/wallstreetbets, extracts ticker mentions, analyses sentiment using NLTK’s VADER, 
+and saves aggregated results with conditional formatting in Excel.
+"""
+
 import re
 import time
 import logging
