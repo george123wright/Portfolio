@@ -1,3 +1,7 @@
+"""
+Price‑to‑sales valuation for projected revenue scenarios.
+"""
+
 import numpy as np
 import pandas as pd
 
