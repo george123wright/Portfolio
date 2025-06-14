@@ -127,10 +127,6 @@ for ticker in tickers:
     dcfe_df.loc[ticker, 'Returns'] = (dcfe_df.loc[ticker, 'Avg Price'] / latest_prices[ticker]) - 1
 
     dcfe_df.loc[ticker, 'SE'] /= latest_prices[ticker]
-
-    epv_df.loc[ticker, 'Returns'] = (epv_df.loc[ticker, 'Avg Price'] / latest_prices[ticker]) - 1
-
-    epv_df.loc[ticker, 'Return SE'] /= latest_prices[ticker]
     
     ri_df.loc[ticker, 'Current Price'] = latest_prices[ticker]
     
