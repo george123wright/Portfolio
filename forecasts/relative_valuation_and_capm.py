@@ -1,3 +1,17 @@
+"""
+Runs relative‑valuation models 
+
+- P/E
+- P/S
+- EV/Sales
+- PBV
+- Graham, 
+- CAPM
+- CAPM with Black–Litterman market views
+
+as well as the cost‑of‑equity calculation.
+"""
+
 import datetime as dt
 import numpy as np
 import pandas as pd
