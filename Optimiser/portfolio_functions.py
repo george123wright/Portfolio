@@ -1,3 +1,7 @@
+"""
+Contains portfolio utility functions—returns, volatility, downside deviation, risk metrics and Monte‑Carlo simulation helpers.
+"""
+
 import pandas as pd
 import numpy as np
 from typing import Tuple, Dict, Any, List
