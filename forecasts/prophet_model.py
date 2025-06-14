@@ -1,3 +1,7 @@
+"""
+Uses META Prophet with macro and financial regressors to forecast prices under different revenue/EPS scenarios.
+"""
+
 import logging
 import datetime as dt
 from typing import List, Tuple, Union, Dict
