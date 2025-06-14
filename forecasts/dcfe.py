@@ -1,3 +1,7 @@
+"""
+Calculates discounted cash‑flow to equity valuations using constrained regression on financials and analyst forecasts.
+"""
+
 import pandas as pd
 import datetime as dt
 import numpy as np
