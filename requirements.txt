@@ -1,0 +1,17 @@
+pandas
+numpy
+yfinance
+pandas_datareader
+openpyxl
+scikit-learn
+ta
+pypfopt
+cvxpy
+statsmodels
+prophet
+requests
+beautifulsoup4
+joblib
+scipy
+nltk
+
