@@ -1,3 +1,7 @@
+"""
+Price‑to‑earnings valuation producing price range and return statistics.
+"""
+
 import numpy as np
 import pandas as pd
 
