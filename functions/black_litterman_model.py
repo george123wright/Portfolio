@@ -1,3 +1,7 @@
+"""
+Implements Black–Litterman portfolio calculations: implied returns, proportional prior, and the posterior mean/covariance update
+"""
+
 import numpy as np
 import pandas as pd
 from numpy.linalg import inv
