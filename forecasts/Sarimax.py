@@ -9,8 +9,8 @@ from statsmodels.tools.sm_exceptions import ConvergenceWarning
 from statsmodels.tsa.api import VAR
 from joblib import Parallel, delayed
 
-from export_forecast import export_results
-from macro_data3 import MacroData
+from functions.export_forecast import export_results
+from data_processing.macro_data import MacroData
 
 BASE_REGRESSORS = ['Interest', 'Cpi', 'Gdp', 'Unemp']
 SHOCK_INTERVAL = 13   
