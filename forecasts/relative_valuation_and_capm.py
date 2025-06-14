@@ -2,18 +2,21 @@ import datetime as dt
 import numpy as np
 import pandas as pd
 import logging
-from index_mapping import INDEX_MAPPING
-from black_litterman_model import black_litterman
-from capm import capm_model
-from price_to_sales import price_to_sales_price_pred
-from pe import pe_price_pred
-from ev import ev_to_sales_price_pred
-from pbv import price_to_book_pred 
-from ratio_data import RatioData
-from financial_forecast_data3 import FinancialForecastData
-from export_forecast import export_results
-from graham_model import graham_number
-from relative_valuation import rel_val_model
+from maps.index_mapping import INDEX_MAPPING
+from functions.black_litterman_model import black_litterman
+from functions.capm import capm_model
+from rel_val.price_to_sales import price_to_sales_price_pred
+from rel_val.pe import pe_price_pred
+from rel_val.ev import ev_to_sales_price_pred
+from rel_val.pbv import price_to_book_pred 
+from data_processing.ratio_data import RatioData
+from data_processing.financial_forecast_data import FinancialForecastData
+from functions.export_forecast import export_results
+from rel_val.graham_model import graham_number
+from rel_val.relative_valuation import rel_val_model
+from maps.currency_mapping import country_to_pair
+from functions.coe import calculate_cost_of_equity
+from data_processing.macro_data import MacroData
 
 today = dt.date.today()
 
@@ -96,24 +99,99 @@ def run_black_litterman_on_indexes(indr: RatioData,
         'View Return (Q4)': Q,
         'Posterior Market Return': mu_bl
     })
+    
+    bl_df.index.name = 'Index'
 
     logger.info("Black–Litterman posterior market returns:\n%s", bl_df)
+
+    return bl_df, sigma_bl
+
+def blend_fx_returns(hist_series, annual_forecast, weight=0.5):
+    """
+    Return a weighted average of historical and forecast FX returns.
+    """
+    
+    hist_series.index = hist_series.index.str.replace(r'=X$', '', regex=True)
+
+    hist, fc = hist_series.align(annual_forecast, join='inner')
+    blended = (weight * hist) + ((1 - weight) * fc)
+    
+    return blended
+
+def run_black_litterman_on_currency(
+    historic_returns: pd.DataFrame,
+    mu_prior: pd.Series,
+    predicted_rates: pd.Series,
+    tau: float = 1.0,
+    delta: float = 2.5
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """
+    Apply the Black–Litterman model to currency returns.
+
+    Args:
+        historic_returns: DataFrame with index=year, columns=currency codes, annual returns.
+        predicted_rates: Series indexed by currency codes, values are forecast return (float).
+        tau: Scaling factor for uncertainty in the prior.
+        delta: Risk aversion coefficient.
+
+    Returns:
+        bl_df: DataFrame with index=currency code, column 'Posterior Currency Return'.
+        sigma_bl: Posterior covariance matrix (ndarray).
+    """
+
+    if isinstance(mu_prior, pd.DataFrame):
+        mu_prior = mu_prior.mean(axis=0)       
+
+    strip = lambda s: s.replace('=X', '')
+    sigma_prior = historic_returns.cov()
+    sigma_prior = sigma_prior.rename(index=strip, columns=strip)
+
+    mu_prior.index = mu_prior.index.str.replace('=X', '')
+    predicted_rates = predicted_rates.reindex(mu_prior.index)
+
+    w_prior = pd.Series(1.0 / len(mu_prior), index=mu_prior.index)
+
+    P = pd.DataFrame(
+        np.eye(len(mu_prior)),
+        index=mu_prior.index,
+        columns=mu_prior.index
+    )
+    Q = predicted_rates.reindex(mu_prior.index)   
+
+    mu_bl, sigma_bl = black_litterman(
+        w_prior=w_prior,
+        sigma_prior=sigma_prior,
+        p=P,
+        q=Q,
+        omega=None,
+        delta=delta,
+        tau=tau,
+        prior=mu_prior                    
+    )
+
+    bl_df = pd.DataFrame({
+        'Posterior Currency Return': mu_bl
+    }, index=mu_prior.index)
 
     return bl_df, sigma_bl
 
 
 def main():
 
-    rf = 0.0465
+    rf = 0.046
     
     s5 = np.sqrt(5)
 
     s52 = np.sqrt(52)
 
     logger.info("Importing Data from Excel")
+    
+    macro = MacroData()
 
     r = RatioData()
     
+    crp = r.crp()
+            
     fdata = FinancialForecastData()
     
     overall_ann_rets, overall_weekly_rets = r.index_returns()
@@ -135,6 +213,8 @@ def main():
     enterprise_value = temp_analyst['enterpriseValue']
     
     marketCap = temp_analyst['marketCap']
+    
+    country = temp_analyst['country']
     
     mc_ev = enterprise_value / marketCap
     
@@ -179,7 +259,7 @@ def main():
             "Avg Price": cur_price * (1 + ret_capm_bl) if not pd.isna(cur_price) else np.nan,
             "Returns": ret_capm_bl,
             "Daily Volatility": vol_capm_bl / s5,
-            "Annual Volatility": vol_capm_bl * s52
+            "SE": vol_capm_bl * s52
         })
         
         capm_hist.append({
@@ -188,11 +268,35 @@ def main():
             "Avg Price": cur_price * (1 + ret_capm_hist) if not pd.isna(cur_price) else np.nan,
             "Returns": ret_capm_hist,
             "Daily Volatility": vol_capm_hist / s5,
-            "Annual Volatility": vol_capm_hist * s52
+            "SE": vol_capm_hist * s52
         })
+        
+    hist_ann_fx, fx_rets = r.get_currency_annual_returns(country_to_pair)
+    fx_fc = macro.convert_to_gbp_rates(current_col='Last', future_col='Q1/26')
+    pred_fx_growth = fx_fc['Pred Change (%)']
+        
+    pred_cur_growth = blend_fx_returns(
+        hist_series=hist_ann_fx,
+        annual_forecast=pred_fx_growth,
+        weight=0.5
+    )
+    
+    spx_ret = bl_df.at['^GSPC', 'Posterior Market Return']
+    
 
     capm_bl_pred_df = pd.DataFrame(capm_bl_data).set_index("Ticker")
     capm_hist_df = pd.DataFrame(capm_hist).set_index("Ticker")
+    
+    coe_df = calculate_cost_of_equity(
+        tickers=tickers,
+        rf=rf,
+        beta_series=beta,
+        spx_expected_return=spx_ret,
+        crp_df=crp,
+        currency_bl_df=pred_cur_growth,
+        country_to_pair=country_to_pair,
+        ticker_country_map=country,        
+    )
     
     low_rev_y = temp_analyst['Low Revenue Estimate']
     avg_rev_y = temp_analyst['Avg Revenue Estimate']
@@ -392,10 +496,9 @@ def main():
             "Avg Price": r_rel_val[1],
             "High Price": r_rel_val[2],
             "Returns": r_rel_val[3],
-            "Volatility": r_rel_val[4]
+            "SE": r_rel_val[4]
         })
-                        
-            
+    
     pe_pred_df = pd.DataFrame(pe_pred_list).set_index("Ticker")
     evs_pred_df = pd.DataFrame(evs_pred_list).set_index("Ticker")
     ps_pred_df = pd.DataFrame(ps_pred_list).set_index("Ticker")
@@ -413,6 +516,7 @@ def main():
         'PBV Pred': pbv_pred_df,
         'Graham Pred': graham_pred_df,
         'Rel Val Pred': rel_val_pred_df,
+        'COE': coe_df,
     }
     
     export_results(sheets_to_write)
