@@ -1,3 +1,8 @@
+"""
+Utility for constrained or unconstrained elastic‑net regression with CVXPY and grid‑search hyperparameter tuning.
+"""
+
+
 from __future__ import annotations
 from functools import lru_cache
 import itertools
