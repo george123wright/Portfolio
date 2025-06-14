@@ -1,3 +1,7 @@
+"""
+Aggregates predictions from multiple models and derives a blended return forecast per ticker.
+"""
+
 import numpy as np
 import pandas as pd
 import datetime as dt
