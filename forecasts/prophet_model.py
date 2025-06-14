@@ -6,7 +6,7 @@ import pandas as pd
 from prophet import Prophet
 from prophet.diagnostics import cross_validation, performance_metrics
 from export_forecast import export_results
-from financial_forecast_data import FinancialForecastData
+from data_processing.financial_forecast_data import FinancialForecastData
 from itertools import product
 
 
