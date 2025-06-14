@@ -1,3 +1,7 @@
+"""
+Implements a residual income valuation model combining book value growth, cost of equity and analyst estimates.
+"""
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
