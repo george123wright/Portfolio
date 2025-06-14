@@ -12,7 +12,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from joblib import Parallel, delayed
 from sklearn.base import clone
 
-from financial_forecast_data import FinancialForecastData
+from data_processing.financial_forecast_data import FinancialForecastData
 
 logging.basicConfig(
     level=logging.INFO,
