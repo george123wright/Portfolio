@@ -5,13 +5,10 @@ import datetime as dt
 import scipy.stats as st
 import logging
 from typing import Tuple, Any, Dict
-from openpyxl import load_workbook
-from openpyxl.styles import PatternFill
-from openpyxl.formatting.rule import CellIsRule, FormulaRule
-from openpyxl.worksheet.table import Table, TableStyleInfo
-from openpyxl.utils import get_column_letter
-from maps.industry_mapping import IndustryMap
-from maps.sector_map import SectorMap
+from industry_mapping import IndustryMap
+from sector_map import SectorMap
+from export_forecast import export_results
+
 pd.set_option('future.no_silent_downcasting', True)
 
 logger = logging.getLogger(__name__)
@@ -907,6 +904,15 @@ for ticker in tickers:
         targets_df.loc[ticker, 'Avg EPS Estimate'] /= usdcny
         targets_df.loc[ticker, 'High EPS Estimate'] /= usdcny
         
+targets_df.rename(
+    columns={
+      'targetLowPrice':  'Low Price',
+      'targetHighPrice': 'High Price',
+      'targetMedianPrice': 'Median Price',
+      'targetMeanPrice': 'Avg Price'
+    },
+    inplace=True
+)
 
 def compute_z_score(n: int) -> float:
     """
@@ -957,7 +963,7 @@ def rets_variable_yahoo(meanY: float, medianY: float, minY: float, maxY: float,
 
         sigma_return = (maxY - minY) / (2 * z_score * price)
 
-    return expected_return, sigma_return, sigma_return, beta
+    return expected_return, sigma_return, beta
 
 latest_prices_series = pd.Series({ticker: close[ticker].iloc[-1] for ticker in tickers})
 
@@ -979,13 +985,13 @@ for ticker in tickers:
 
         price = latest_prices[ticker]
 
-        meanY = data['targetMeanPrice']
+        meanY = data['Avg Price']
 
-        medianY = data['targetMedianPrice']
+        medianY = data['Median Price']
 
-        minY = data['targetLowPrice']
+        minY = data['Low Price']
 
-        maxY = data['targetHighPrice']
+        maxY = data['High Price']
 
         nY = data['numberOfAnalystOpinions']
 
@@ -1013,11 +1019,10 @@ for ticker, result in analyst_results.items():
     Analyst_Target_Data.append({
         "Ticker": ticker,
         "Current Price": latest_prices[ticker],
-        f"Target Price ({one_year_from_today})": latest_prices[ticker] * (1 + result[0]),
-        "Predicted Returns": result[0],
-        "Predicted Volatility": result[1],
-        "Standard Error": result[2],
-        "Beta": result[3]
+        "Avg Price": latest_prices[ticker] * (1 + result[0]),
+        "Returns": result[0],
+        "SE": result[1],
+        "Beta": result[2]
     })
 
 Analyst_Target_df = pd.DataFrame(Analyst_Target_Data)
@@ -1026,145 +1031,15 @@ Analyst_Target_df = Analyst_Target_df.set_index("Ticker")
 
 Analyst_Target_df = Analyst_Target_df.reindex(targets_df.index)
 
-Analyst_Target_df = Analyst_Target_df.reset_index()
-
-Analyst_Target_df = pd.DataFrame(Analyst_Target_Data)
-
 Analyst_Target_df.columns = Analyst_Target_df.columns.astype(str)
 
 logger.info("Uploading Data to Excel ...")
 
-red_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
-green_fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+sheets_to_write = {
+    "Analyst Data": targets_df,
+    "Analyst Target": Analyst_Target_df,
+}
 
-
-def format_sheet_as_table(excel_file: str, sheet_name: str) -> None:
-    """
-    Convert the specified sheet into an Excel table with a preset style.
-    """
-
-    try:
-
-        wb = load_workbook(excel_file)
-
-    except Exception as exc:
-
-        logger.error(
-            "Error opening Excel file '%s': %s. Ensure the file is not open in another application.",
-            excel_file, exc
-        )
-
-        return
-
-    if sheet_name not in wb.sheetnames:
-
-        logger.warning("Sheet '%s' not found in %s", sheet_name, excel_file)
-
-        wb.close()
-
-        return
-
-    ws = wb[sheet_name]
-
-    ws._tables.clear()
-
-    max_row = ws.max_row
-
-    max_col = ws.max_column
-
-    last_col_letter = get_column_letter(max_col)
-
-    table_range = f"A1:{last_col_letter}{max_row}"
-
-    table_name = sheet_name.replace(" ", "") + "Table"
-
-    table = Table(displayName=table_name, ref=table_range)
-
-    style = TableStyleInfo(
-        name="TableStyleMedium9",
-        showFirstColumn=False,
-        showLastColumn=False,
-        showRowStripes=True,
-        showColumnStripes=False
-    )
-  
-    table.tableStyleInfo = style
-  
-    ws.add_table(table)
-
-    wb.save(excel_file)
- 
-    wb.close()
-  
-    logger.info("Formatted sheet '%s' as a table.", sheet_name)
-
-with pd.ExcelWriter(output_excel_file, mode='a', engine='openpyxl', if_sheet_exists='replace') as writer:
-  
-    targets_df.to_excel(writer, sheet_name='Analyst Data', index=True)
-  
-    Analyst_Target_df.to_excel(writer, sheet_name='Analyst Target', index=False)
-
-    ws1 = writer.sheets['Analyst Data']
- 
-    max_row_ws1 = ws1.max_row
-
-    current_price_col = None
-  
-    for cell in ws1[1]:
-   
-        if cell.value == "Current Price":
-  
-            current_price_col = cell.column_letter
-  
-            break
-
-    if current_price_col is None:
-       
-        logger.error("Current Price column not found in 'Analyst Data'. Using default 'I'.")
-       
-        current_price_col = "I"
-
-    for col in ['B', 'C', 'D', 'E']:
-       
-        formula_red = f"{col}2<{current_price_col}2"
-        formula_green = f"{col}2>{current_price_col}2"
-
-        ws1.conditional_formatting.add(
-            f"{col}2:{col}{max_row_ws1}",
-            FormulaRule(formula=[formula_red], fill=red_fill)
-        )
-
-        ws1.conditional_formatting.add(
-            f"{col}2:{col}{max_row_ws1}",
-            FormulaRule(formula=[formula_green], fill=green_fill)
-        )
-
-    ws2 = writer.sheets['Analyst Target']
-    
-    max_row_ws2 = ws2.max_row
-
-    ws2.conditional_formatting.add(
-        f"C2:C{max_row_ws2}",
-        FormulaRule(formula=["C2<B2"], fill=red_fill)
-    )
-
-    ws2.conditional_formatting.add(
-        f"C2:C{max_row_ws2}",
-        FormulaRule(formula=["C2>B2"], fill=green_fill)
-    )
-
-    ws2.conditional_formatting.add(
-        f"D2:D{max_row_ws2}",
-        CellIsRule(operator='lessThan', formula=['0'], fill=red_fill)
-    )
-
-    ws2.conditional_formatting.add(
-        f"D2:D{max_row_ws2}",
-        CellIsRule(operator='greaterThan', formula=['0'], fill=green_fill)
-    )
-
-format_sheet_as_table(output_excel_file, 'Analyst Data')
-
-format_sheet_as_table(output_excel_file, 'Analyst Target')
+export_results(sheets_to_write)
 
 logger.info("Data has been uploaded to Excel with conditional formatting applied, and all sheets are now tables.")
