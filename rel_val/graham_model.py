@@ -1,3 +1,7 @@
+"""
+Computes Graham number–style valuations combining P/E and P/B metrics.
+"""
+
 import numpy as np
 import pandas as pd
 from pbv import bvps
