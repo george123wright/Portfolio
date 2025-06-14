@@ -1,3 +1,7 @@
+"""
+Implements optimisation routines for max Sharpe, Sortino, information ratio, equal‑risk and combination strategies with bounds.
+"""
+
 import pandas as pd
 import numpy as np
 from typing import Tuple, List
