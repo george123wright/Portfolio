@@ -1,3 +1,7 @@
+"""
+Calculates price targets using price‑to‑book ratios and book‑value growth.
+"""
+
 import numpy as np
 import pandas as pd
 
