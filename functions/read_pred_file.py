@@ -1,7 +1,7 @@
 import pandas as pd
 import datetime as dt
 from export_forecast import export_results
-from ratio_data import RatioData
+from data_processing.ratio_data import RatioData
 
 def get_data():
    
