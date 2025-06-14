@@ -1,3 +1,7 @@
+"""
+Combines all the relative valuation models
+"""
+
 import numpy as np
 import pandas as pd
 from pbv import bvps
