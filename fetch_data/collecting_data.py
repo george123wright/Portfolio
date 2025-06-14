@@ -1,3 +1,7 @@
+"""
+Downloads historical market data, computes technical indicators, scrapes Trading Economics forecasts and exports all series to Excel.
+"""
+
 import datetime as dt
 import logging
 from typing import List, Dict, Any, Tuple
