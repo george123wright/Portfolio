@@ -4,7 +4,7 @@ import datetime as dt
 import logging
 from typing import Dict, Tuple
 from data_processing.ratio_data import RatioData
-from export_forecast import export_results
+from functions.export_forecast import export_results
 
 today = dt.date.today()
 logging.basicConfig(level=logging.INFO,
