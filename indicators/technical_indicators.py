@@ -1,3 +1,7 @@
+"""
+Computes classic technical analysis signals from price data stored in Excel. 
+It loads OHLCV sheets, scores each ticker and writes “Signal Scores” back to the workbook.
+"""
 from __future__ import annotations
 
 import datetime as dt
