@@ -5,9 +5,9 @@ import datetime as dt
 import scipy.stats as st
 import logging
 from typing import Tuple, Any, Dict
-from industry_mapping import IndustryMap
-from sector_map import SectorMap
-from export_forecast import export_results
+from maps.industry_mapping import IndustryMap
+from maps.sector_map import SectorMap
+from functions.export_forecast import export_results
 
 pd.set_option('future.no_silent_downcasting', True)
 
