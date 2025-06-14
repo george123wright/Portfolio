@@ -1,3 +1,7 @@
+"""
+Performs discounted cash‑flow valuation using regression‑based cash‑flow forecasts and Monte‑Carlo scenarios.
+"""
+
 import pandas as pd
 import datetime as dt
 import numpy as np
