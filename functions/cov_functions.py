@@ -1,3 +1,12 @@
+"""
+Provides covariance estimators
+- sample
+- constant‑correlation
+- shrinkage versions
+- predicted
+"""
+
+
 import numpy as np
 import pandas as pd
 import statsmodels.stats.moment_helpers as mh
