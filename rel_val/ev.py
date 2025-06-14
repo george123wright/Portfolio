@@ -1,3 +1,7 @@
+"""
+EV‑to‑sales valuation adjusted for market cap / enterprise value multiples
+"""
+
 import numpy as np
 import pandas as pd
 
