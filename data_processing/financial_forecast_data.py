@@ -1,3 +1,7 @@
+"""
+Handles per‑ticker financial statements, analyst forecasts and derived KPIs; supplies data for forecasting models.
+"""
+
 from __future__ import annotations
 import datetime as dt
 import re
