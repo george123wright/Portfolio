@@ -1,3 +1,7 @@
+"""
+Main script orchestrating portfolio optimisation: loads Excel data, computes bounds, runs optimisers, simulates portfolio performance and writes all outputs.
+"""
+
 import datetime as dt
 import logging
 from typing import Tuple, List
