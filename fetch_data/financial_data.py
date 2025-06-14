@@ -1,3 +1,7 @@
+"""
+Uses Yahoo Finance to pull analyst info, financial statements and estimates for each ticker and exports processed metrics.
+"""
+
 import numpy as np
 import yfinance as yf
 import pandas as pd
