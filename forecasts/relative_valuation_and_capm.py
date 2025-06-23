@@ -31,10 +31,8 @@ from rel_val.relative_valuation import rel_val_model
 from maps.currency_mapping import country_to_pair
 from functions.coe import calculate_cost_of_equity
 from data_processing.macro_data import MacroData
+import config
 
-today = dt.date.today()
-
-EXCEL_IN_FILE    = f'Portfolio_Optimisation_Data_{today}.xlsx'  
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +118,7 @@ def run_black_litterman_on_indexes(indr: RatioData,
 
     return bl_df, sigma_bl
 
+
 def blend_fx_returns(hist_series, annual_forecast, weight=0.5):
     """
     Return a weighted average of historical and forecast FX returns.
@@ -132,70 +131,10 @@ def blend_fx_returns(hist_series, annual_forecast, weight=0.5):
     
     return blended
 
-def run_black_litterman_on_currency(
-    historic_returns: pd.DataFrame,
-    mu_prior: pd.Series,
-    predicted_rates: pd.Series,
-    tau: float = 1.0,
-    delta: float = 2.5
-) -> tuple[pd.DataFrame, np.ndarray]:
-    """
-    Apply the Black–Litterman model to currency returns.
-
-    Args:
-        historic_returns: DataFrame with index=year, columns=currency codes, annual returns.
-        predicted_rates: Series indexed by currency codes, values are forecast return (float).
-        tau: Scaling factor for uncertainty in the prior.
-        delta: Risk aversion coefficient.
-
-    Returns:
-        bl_df: DataFrame with index=currency code, column 'Posterior Currency Return'.
-        sigma_bl: Posterior covariance matrix (ndarray).
-    """
-
-    if isinstance(mu_prior, pd.DataFrame):
-        mu_prior = mu_prior.mean(axis=0)       
-
-    strip = lambda s: s.replace('=X', '')
-    sigma_prior = historic_returns.cov()
-    sigma_prior = sigma_prior.rename(index=strip, columns=strip)
-
-    mu_prior.index = mu_prior.index.str.replace('=X', '')
-    predicted_rates = predicted_rates.reindex(mu_prior.index)
-
-    w_prior = pd.Series(1.0 / len(mu_prior), index=mu_prior.index)
-
-    P = pd.DataFrame(
-        np.eye(len(mu_prior)),
-        index=mu_prior.index,
-        columns=mu_prior.index
-    )
-    Q = predicted_rates.reindex(mu_prior.index)   
-
-    mu_bl, sigma_bl = black_litterman(
-        w_prior=w_prior,
-        sigma_prior=sigma_prior,
-        p=P,
-        q=Q,
-        omega=None,
-        delta=delta,
-        tau=tau,
-        prior=mu_prior                    
-    )
-
-    bl_df = pd.DataFrame({
-        'Posterior Currency Return': mu_bl
-    }, index=mu_prior.index)
-
-    return bl_df, sigma_bl
-
 
 def main():
-
-    rf = 0.046
     
     s5 = np.sqrt(5)
-
     s52 = np.sqrt(52)
 
     logger.info("Importing Data from Excel")
@@ -205,6 +144,8 @@ def main():
     r = RatioData()
     
     crp = r.crp()
+    
+    print("CRP", crp)
             
     fdata = FinancialForecastData()
     
@@ -235,7 +176,6 @@ def main():
     bl_market_dict = bl_df['Posterior Market Return'] if bl_df is not None else None
     
     capm_bl_data = []
-    
     capm_hist = []
 
     beta = temp_analyst['beta']
@@ -261,9 +201,9 @@ def main():
 
         b_stock = beta.get(ticker, 1.0)
 
-        vol_capm_bl, ret_capm_bl = capm_model(b_stock, market_vol, rf, matched_index_ret_bl, weekly_ret[ticker], matched_index_weekly_bl)
+        vol_capm_bl, ret_capm_bl = capm_model(b_stock, market_vol, config.RF, matched_index_ret_bl, weekly_ret[ticker], matched_index_weekly_bl)
                 
-        vol_capm_hist, ret_capm_hist = capm_model(b_stock, market_vol, rf, matched_index_ret, weekly_ret[ticker], matched_index_weekly)
+        vol_capm_hist, ret_capm_hist = capm_model(b_stock, market_vol, config.RF, matched_index_ret, weekly_ret[ticker], matched_index_weekly)
                 
         cur_price = latest_prices.get(ticker, np.nan)
 
@@ -296,14 +236,13 @@ def main():
     )
     
     spx_ret = bl_df.at['^GSPC', 'Posterior Market Return']
-    
 
     capm_bl_pred_df = pd.DataFrame(capm_bl_data).set_index("Ticker")
     capm_hist_df = pd.DataFrame(capm_hist).set_index("Ticker")
     
     coe_df = calculate_cost_of_equity(
         tickers=tickers,
-        rf=rf,
+        rf=config.RF,
         beta_series=beta,
         spx_expected_return=spx_ret,
         crp_df=crp,
@@ -538,4 +477,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
