@@ -10,24 +10,32 @@ from typing import Dict, Tuple
 from data_processing.ratio_data import RatioData
 from functions.export_forecast import export_results
 
+import config
+
+
+r = RatioData()
+
 today = dt.date.today()
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-EXCEL_OUT_FILE   = f'Portfolio_Optimisation_Forecast_{today}.xlsx'
-EXCEL_IN_FILE    = f'Portfolio_Optimisation_Data_{today}.xlsx'
+IND_DATA_FILE    = 'ind_data_mc_all_simple_mean.xlsx'
 
-MIN_STD        = 1e-3
-RET_CLIP_LOW   = -0.80
-RET_CLIP_HIGH  =  5.00
-MAX_MODEL_WT   = 0.25
+MIN_STD = 1e-2
+MAX_STD = 2
+MAX_MODEL_WT = 0.15
+
 
 def ensure_headers_are_strings(df: pd.DataFrame) -> pd.DataFrame:
+    
     df.columns = [str(col) if col is not None else '' for col in df.columns]
+    
     if df.index.name is None:
         df.index.name = 'Index'
+    
     else:
         df.index.name = str(df.index.name)
+    
     return df
 
 
@@ -38,8 +46,9 @@ def fix_header_cells(ws):
 
 class PortfolioOptimizer:
     def __init__(self, excel_file: str, ratio_data: RatioData):
+        
         self.excel_file_out = excel_file
-        self.excel_file_in = EXCEL_IN_FILE
+        self.excel_file_in = config.DATA_FILE
         self.ratio_data = ratio_data
         self.today = dt.date.today()
         self.LOWER_PERCENTILE = 25
@@ -48,6 +57,7 @@ class PortfolioOptimizer:
         self._load_all_data()
 
     def _load_all_data(self) -> None:
+        
         xls = pd.ExcelFile(self.excel_file_out)
 
         self.wsb = (
@@ -56,6 +66,7 @@ class PortfolioOptimizer:
                       index_col='ticker')
             .sort_index()
         )
+        
         self.wsb.index = self.wsb.index.str.upper()
 
         model_sheets = {
@@ -71,15 +82,20 @@ class PortfolioOptimizer:
             'SARIMAX Monte Carlo': 'SARIMAX',
             'Rel Val Pred':    'RelVal'
         }
+        
         self.models: Dict[str, pd.DataFrame] = {}
+        
         for sheet_name, name in model_sheets.items():
+           
             cols = ['Ticker', 'Returns', 'SE'] + (
                 ['Current Price'] if sheet_name == 'Analyst Target' else []
             )
+           
             df = (
                 xls.parse(sheet_name, usecols=cols, index_col=0)
                 .sort_index()
             )
+           
             self.models[name] = df
 
         analyst_cols = [
@@ -92,10 +108,12 @@ class PortfolioOptimizer:
             'New Shares Issued', 'Previous Gross Margin', 'Asset Turnover',
             'Previous Asset Turnover', 'Insider Purchases', 'Avg EPS Estimate', 'marketCap'
         ]
+        
         self.analyst_df = (
             xls.parse('Analyst Data', usecols=analyst_cols, index_col=0)
             .sort_index()
         )
+        
         if self.analyst_df.index.dtype == object:
             self.analyst_df.index = self.analyst_df.index.str.upper()
 
@@ -108,6 +126,7 @@ class PortfolioOptimizer:
                           index_col=0)
             .iloc[-1]
         )
+        
     def short_score(self,
                     shares_short: pd.Series,
                     shares_outstanding: pd.Series,
@@ -122,6 +141,7 @@ class PortfolioOptimizer:
             .intersection(shares_outstanding.index)
             .intersection(shares_short_prior.index)
         )
+        
         curr = shares_short.reindex(common_idx).fillna(0)
         out = shares_outstanding.reindex(common_idx)
         prior = shares_short_prior.reindex(common_idx).fillna(0)
@@ -129,6 +149,7 @@ class PortfolioOptimizer:
         ratio = curr.div(out).fillna(0)
 
         ratio_nz = ratio[ratio != 0].dropna()
+        
         if ratio_nz.empty:
             return pd.Series(0.0, index=common_idx)
 
@@ -139,7 +160,9 @@ class PortfolioOptimizer:
         scores -= (ratio >= upper).astype(int)
 
         prior_ratio = prior.div(out).fillna(0)
+        
         mask_prior_nz = prior > 0
+        
         scores -= ((ratio >= 1.05 * prior_ratio) & mask_prior_nz).astype(int)
 
         scores += (ratio <= 0.95 * prior_ratio).astype(int)
@@ -269,6 +292,7 @@ class PortfolioOptimizer:
 
         return sc
     
+    
     def return_on_assets_score(self, return_on_assets: pd.Series, score: pd.Series, ind_roa: pd.Series) -> pd.Series:
         """
         Adjust the score based on return on assets.
@@ -367,17 +391,21 @@ class PortfolioOptimizer:
         sc.loc[valid_idx] -= (series_1y[valid_idx] < trailing_series[valid_idx]).astype(int)
 
         return sc
-
+    
+    
     def compute_combination_forecast(
         self,
         region_indicators: Dict[str, pd.Series]
     ) -> Tuple[pd.Series, pd.Series, pd.Series, Dict[str, pd.Series], pd.DataFrame]:
         """
-        Compute combination returns, volatility, final score, model weights, and breakdown.
+        Compute combination returns, volatility (SE), final score, model weights, and breakdown.
+        Return outliers are clipped at [Q1 - IQR, Q3 + IQR] per model; SE is from
+        within-model and between-model variance; weights capped via cap_norm.
         """
+
         names = list(self.models.keys())
         rets = [self.models[n]['Returns'] for n in names]
-        ses  = [self.models[n]['SE']      for n in names]
+        ses = [self.models[n]['SE'] for n in names]
 
         a = self.analyst_df
         div = a['dividendYield'] / 100
@@ -413,105 +441,120 @@ class PortfolioOptimizer:
         eps_1y = a['Avg EPS Estimate']
         mcap = a['marketCap']
 
-        ind_pe  = region_indicators['PE']
-        ind_pb  = region_indicators['PB']
+        ind_pe = region_indicators['PE']
+        ind_pb = region_indicators['PB']
         ind_roe = region_indicators['ROE']
         ind_roa = region_indicators['ROA']
         ind_rvg = region_indicators['RevG']
-        ind_eg  = region_indicators.get('EarningsG', pd.Series(0, index=price.index))
+        ind_eg = region_indicators.get('EarningsG', pd.Series(0, index=price.index))
 
-        all_series = rets + ses + [
-            div, recommendation, shares_short, shares_outstanding,
-            shares_short_prior, beta, earnings_growth, rev_growth,
-            debt_to_equity, roa, roe, pb, teps, feps,
+        series_list = rets + ses + [div, recommendation, shares_short,
+            shares_outstanding, shares_short_prior, beta, earnings_growth,
+            rev_growth, debt_to_equity, roa, roe, pb, teps, feps,
             gross_margin, price, nY, lower_target, insider_purchases,
             net_income, operating_cashflow, prev_roa, long_debt,
             prev_long_debt, current_ratio, prev_current_ratio,
             shares_issued, prev_gm, at, prev_at, eps_1y, mcap,
-            ind_pe, ind_pb, ind_roe, ind_roa, ind_rvg, ind_eg
-        ]
-        common_idx = set(all_series[0].index)
-        for s in all_series[1:]:
+            ind_pe, ind_pb, ind_roe, ind_roa, ind_rvg, ind_eg]  
+       
+        common_idx = set(series_list[0].index)
+       
+        for s in series_list[1:]: 
             common_idx &= set(s.index)
+        
         common_idx = sorted(common_idx)
 
-        rets = [r.reindex(common_idx).clip(RET_CLIP_LOW, RET_CLIP_HIGH) for r in rets]
-        ses  = [s.reindex(common_idx).clip(lower=MIN_STD) for s in ses]
+        rets = [r.reindex(common_idx).clip(lower=config.LBR, upper=config.UBR) for r in rets]
+        ses = [s.reindex(common_idx).clip(lower=MIN_STD, upper=MAX_STD) for s in ses]
 
-        n_models = len(names)
-        fund_series = [x.reindex(common_idx).fillna(0)
-                    for x in all_series[2 * n_models:]]
-        (
-            div, recommendation, shares_short, shares_outstanding,
-            shares_short_prior, beta, earnings_growth, rev_growth,
-            debt_to_equity, roa, roe, pb, teps, feps,
-            gross_margin, price, nY, lower_target, insider_purchases,
-            net_income, operating_cashflow, prev_roa, long_debt,
-            prev_long_debt, current_ratio, prev_current_ratio,
-            shares_issued, prev_gm, at, prev_at, eps_1y, mcap,
-            ind_pe, ind_pb, ind_roe, ind_roa, ind_rvg, ind_eg
-        ) = fund_series
+        ret_df = pd.DataFrame({names[i]: rets[i] for i in range(len(names))}, index=common_idx)
+        
+        Q1, Q3 = ret_df.quantile(0.25), ret_df.quantile(0.75)
+       
+        IQR = Q3 - Q1
+       
+        lower, upper = Q1 - IQR, Q3 + IQR
+       
+        ret_df_clipped = ret_df.clip(lower=lower, upper=upper, axis=1)
 
-        valid = [~((r.abs() > 10) | (s <= MIN_STD)) for r, s in zip(rets, ses)]
-
-        inv_var = [np.where(v, np.sqrt(1 / s), 0.0) for v, s in zip(valid, ses)]
-        tot_inv = sum(inv_var)
-        raw_w = [iv / tot_inv for iv in inv_var]
-
+        model_vars = pd.DataFrame({names[i]: ses[i]**2 for i in range(len(names))}, index=common_idx)
+       
+        inv_var = 1.0 / model_vars
+        tot_inv = inv_var.sum(axis=1)
+        raw_w = inv_var.div(tot_inv, axis=0)
+        
         def cap_norm(w_arr, cap=MAX_MODEL_WT, mask=None):
+       
             final = np.minimum(w_arr, cap)
+       
             if mask is not None:
                 final = np.where(mask, final, 0.)
+       
             for _ in range(1000):
                 deficit = 1 - final.sum(axis=0)
+       
                 if np.all(deficit <= 1e-8):
                     break
+       
                 room = np.maximum(cap - final, 0.)
+       
                 if mask is not None:
                     room = np.where(mask, room, 0.)
+       
                 for j, d in enumerate(deficit):
+       
                     if d <= 0 or room[:, j].sum() == 0:
                         continue
+       
                     alloc = room[:, j]
                     final[:, j] += d * alloc / alloc.sum()
                     final[:, j] = np.minimum(final[:, j], cap)
+       
                     if mask is not None:
                         final[:, j] = np.where(mask[:, j], final[:, j], 0.)
+       
             return final
+        
+        w_arr = cap_norm(raw_w.values.T, cap=MAX_MODEL_WT)
+        weights = { names[i]: pd.Series(w_arr[i], index=common_idx) for i in range(len(names)) }
 
-        w_arr = cap_norm(np.vstack(raw_w), cap=MAX_MODEL_WT, mask=np.vstack(valid))
-        weights = {names[i]: pd.Series(w_arr[i], index=common_idx, name=names[i])
-                   for i in range(len(names))}
+        comb_rets = div.reindex(common_idx).fillna(0)
+       
+        for i,n in enumerate(names):
+            comb_rets += weights[n] * ret_df_clipped[n]
 
-        comb_rets = div.copy()
-        for n in names:
-            comb_rets += weights[n] * self.models[n].loc[common_idx, 'Returns']
-        comb_var = sum((weights[n] * ses[i]) ** 2 for i, n in enumerate(names))
-        comb_stds = np.sqrt(comb_var)
+        w_df = pd.DataFrame(weights)
+       
+        within_var = (w_df * model_vars).sum(axis=1)
+        between_var = (w_df * (ret_df_clipped.sub(comb_rets, axis=0)**2)).sum(axis=1) / 11
+       
+        total_var = within_var + between_var
+       
+        comb_stds = np.sqrt(total_var.clip(lower=MIN_STD**2, upper=MAX_STD**2))
 
         score_base = self.short_score(shares_short, shares_outstanding, shares_short_prior)
-        score_ws   = self.wsb_score(score_base.copy())
-        score_eg   = self.earnings_growth_score(earnings_growth, score_ws.copy(), ind_eg)
-        score_rg   = self.revenue_growth_score(rev_growth, score_eg.copy(), ind_rvg)
-        score_roe  = self.return_on_equity_score(roe, score_rg.copy(), ind_roe)
-        score_roa  = self.return_on_assets_score(roa, score_roe.copy(), ind_roa)
-        score_pb   = self.price_to_book_score(pb, score_roa.copy(), ind_pb)
-        score_eps  = self.ep_score(teps, feps, price, score_pb.copy(), ind_pe, eps_1y)
+        score_ws = self.wsb_score(score_base.copy())
+        score_eg = self.earnings_growth_score(earnings_growth, score_ws.copy(), ind_eg)
+        score_rg = self.revenue_growth_score(rev_growth, score_eg.copy(), ind_rvg)
+        score_roe = self.return_on_equity_score(roe, score_rg.copy(), ind_roe)
+        score_roa = self.return_on_assets_score(roa, score_roe.copy(), ind_roa)
+        score_pb = self.price_to_book_score(pb, score_roa.copy(), ind_pb)
+        score_eps = self.ep_score(teps, feps, price, score_pb.copy(), ind_pe, eps_1y)
 
         upper_std = np.percentile(comb_stds, self.UPPER_PERCENTILE)
-        std_adj   = -(comb_stds > upper_std).astype(int)
-        lower_target_adj  = (lower_target > price).astype(int)
+        std_adj = -(comb_stds > upper_std).astype(int)
+        lower_target_adj = (lower_target > price).astype(int)
         rec_strong_buy_adj = pd.Series(np.where(recommendation == 'strong_buy', 3, 0), index=common_idx)
         rec_sell_adj = pd.Series(np.where(recommendation.isin(['sell','strong_sell']), -5, 0), index=common_idx)
         insider_pos_adj = pd.Series(np.where(insider_purchases > 0, 2, 0), index=common_idx)
         insider_neg_adj = pd.Series(np.where(insider_purchases < 0,-1, 0), index=common_idx)
-        net_income_adj   = pd.Series(np.where(net_income > 0, 1, 0), index=common_idx)
-        ocf_adj          = pd.Series(np.where(operating_cashflow > net_income, 1, 0), index=common_idx)
-        ld_adj           = pd.Series(np.where(prev_long_debt > long_debt, 1, 0), index=common_idx)
-        cr_adj           = pd.Series(np.where(prev_current_ratio < current_ratio, 1, 0), index=common_idx)
-        no_new_shares_adj= pd.Series(np.where(shares_issued <= 0,1, 0), index=common_idx)
-        gm_adj           = pd.Series(np.where(gross_margin > prev_gm, 1, 0), index=common_idx)
-        at_adj           = pd.Series(np.where(prev_at < at, 1, 0), index=common_idx)
+        net_income_adj = pd.Series(np.where(net_income > 0, 1, 0), index=common_idx)
+        ocf_adj = pd.Series(np.where(operating_cashflow > net_income, 1, 0), index=common_idx)
+        ld_adj = pd.Series(np.where(prev_long_debt > long_debt, 1, 0), index=common_idx)
+        cr_adj = pd.Series(np.where(prev_current_ratio < current_ratio, 1, 0), index=common_idx)
+        no_new_shares_adj = pd.Series(np.where(shares_issued <= 0,1, 0), index=common_idx)
+        gm_adj = pd.Series(np.where(gross_margin > prev_gm, 1, 0), index=common_idx)
+        at_adj = pd.Series(np.where(prev_at < at, 1, 0), index=common_idx)
 
         score_breakdown = pd.DataFrame({
             'Short Score': score_base,
@@ -537,27 +580,25 @@ class PortfolioOptimizer:
         })
 
         additional_total = score_breakdown.drop(columns=['Short Score']).sum(axis=1)
+        
         final_scores = score_eps + additional_total
-
+        
         sell_mask = recommendation.isin(['sell','strong_sell'])
+        
         final_scores.loc[sell_mask] = -100
-
+        
         final_scores += self.signal_scores
-
+        
         final_scores = pd.Series(np.minimum(final_scores, nY), index=common_idx)
-
-        bear_rets = comb_rets - 1.96 * comb_stds
-        final_scores.loc[bear_rets < 0] = np.minimum(final_scores, 10)
-
+        
         score_breakdown['Final Score'] = final_scores
 
         return comb_rets, comb_stds, final_scores, weights, score_breakdown
-
-
+    
+    
 def main():
     logging.info('Loading data...')
-    r = RatioData()
-    optimizer = PortfolioOptimizer(EXCEL_OUT_FILE, r)
+    optimizer = PortfolioOptimizer(config.FORECAST_FILE, r)
 
     metrics = r.dicts()
     region_ind = {
@@ -576,8 +617,9 @@ def main():
 
     idx = optimizer.latest_prices.index.sort_values()
     price = optimizer.latest_prices.reindex(idx)
-    bull = comb_rets + 1.96 * comb_stds
-    bear = comb_rets - 1.96 * comb_stds
+    
+    bull = (comb_rets + 1.96 * comb_stds).clip(config.ubr, 4)
+    bear = (comb_rets - 1.96 * comb_stds).clip(config.lbr)
 
     df = pd.DataFrame({
             'Ticker': idx,
@@ -590,18 +632,28 @@ def main():
             'High Returns': bull,
             'SE': comb_stds
         }, index=idx).set_index('Ticker')
+    
     for name, w in weights.items():
         df[f'{name} (%)'] = w.reindex(idx) * 100
+        
     df['Score'] = final_scores.reindex(idx)
 
     df = ensure_headers_are_strings(df)
+    
     score_breakdown = ensure_headers_are_strings(score_breakdown)
+    
     sheets_to_upload = {
         'Combination Forecast': df,
         'Score Breakdown': score_breakdown
     }
+    
     export_results(sheets_to_upload)
+    
     logging.info('Done.')
+
+if __name__ == '__main__':
+    main()
+
 
 if __name__ == '__main__':
     main()
