@@ -16,7 +16,7 @@ import config
 def export_results(sheets, output_excel_file=None):
     
     if not output_excel_file:
-        output_excel_file = config.MODEL_FILE
+        output_excel_file = config.FORECAST_FILE
         
     with pd.ExcelWriter(
         output_excel_file,
