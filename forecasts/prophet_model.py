@@ -12,10 +12,12 @@ from prophet.diagnostics import cross_validation, performance_metrics
 from export_forecast import export_results
 from data_processing.financial_forecast_data import FinancialForecastData
 from itertools import product
+import config
 
 
 REV_KEYS = ['low_rev_y', 'avg_rev_y', 'high_rev_y',
             'low_rev', 'avg_rev', 'high_rev']
+
 EPS_KEYS = ['low_eps_y', 'avg_eps_y', 'high_eps_y',
             'low_eps', 'avg_eps', 'high_eps']
 
@@ -37,10 +39,12 @@ def configure_logger() -> logging.Logger:
 
 logger = configure_logger()
 
+
 def prepare_prophet_model(df_model: pd.DataFrame, regressors: List[str]) -> Prophet:
     """
     Prepare and fit a Prophet model using the given DataFrame and list of regressors.
     """
+   
     model = Prophet(
         changepoint_prior_scale=0.05,
         changepoint_range=0.9,
@@ -48,16 +52,21 @@ def prepare_prophet_model(df_model: pd.DataFrame, regressors: List[str]) -> Prop
         weekly_seasonality=True,
         yearly_seasonality=False
     )
+   
     for reg in regressors:
         model.add_regressor(reg, standardize=True, prior_scale=0.01)
+   
     model.fit(df_model)
+   
     return model
+
 
 def add_financials(daily_df: pd.DataFrame, fd: pd.DataFrame) -> pd.DataFrame:
     """
     Attach the latest available quarterly numbers to each trading day.
     Assumes both frames have a 'ds' column sorted ascending.
     """
+
     return pd.merge_asof(
         daily_df.sort_values('ds'),
         fd.sort_values('ds'),
@@ -71,10 +80,13 @@ def clip_to_bounds(df: pd.DataFrame, price: float) -> pd.DataFrame:
     Limit yhat, yhat_lower, yhat_upper to [0.2⋅price, 5⋅price].
     Operates in-place and returns the same DataFrame for chaining.
     """
+
     lower, upper = 0.2 * price, 5.0 * price
+
     df[['yhat', 'yhat_lower', 'yhat_upper']] = df[
         ['yhat', 'yhat_lower', 'yhat_upper']
     ].clip(lower=lower, upper=upper)
+
     return df
 
 
@@ -82,6 +94,7 @@ def evaluate_forecast(model: Prophet, initial: str, period: str, horizon: str) -
     """
     Evaluate forecast performance using Prophet's built-in cross-validation and performance metrics.
     """
+
     try:
         cv_results = cross_validation(model, initial=initial, period=period, horizon=horizon)
         metrics = performance_metrics(cv_results)
@@ -96,15 +109,20 @@ def _linear(series: pd.Series, end_value: Union[float, np.nan]) -> pd.Series:
     Create a linear ramp from series.iloc[0] up to end_value over len(series) points.
     If end_value is NaN, return the original series unchanged.
     """
+
     if pd.isna(end_value):
         return series
+
     start = series.iloc[0]
+
     length = len(series)
+
     return pd.Series(
         np.linspace(start, end_value, length),
         index=series.index,
         dtype=series.dtype
     )
+
 
 def build_base_future(
     model: Prophet,
@@ -130,38 +148,33 @@ def build_base_future(
       interp_int_allH, interp_inf_allH, interp_gdp_allH, interp_unemp_allH: 
          numpy arrays of length H = forecast_period, ready to assign into future_base.
     """
-    # 1) Make the full future dates
+
     future_base = model.make_future_dataframe(
         periods=forecast_period,
         freq='W',
         include_history=True
     )
-    # 2) Merge once with fin_df
+
     future_base = pd.merge_asof(
         future_base,
-        fin_df,       # fin_df is already sorted by 'ds'
+        fin_df,       
         on='ds',
         direction='backward'
     )
-    # 3) Merge once with macro_df
+
     future_base = pd.merge_asof(
         future_base,
-        macro_df,     # macro_df is already sorted by 'ds'
+        macro_df,     
         on='ds',
         direction='backward'
     )
-    # 4) Forward/backward fill all regressors in the history portion
+
     future_base[regressors] = future_base[regressors].ffill().bfill()
 
-    # 5) Identify horizon slice
     horizon_mask = future_base['ds'] > last_vals['ds']
     H = horizon_mask.sum()
     h_idx = np.arange(1, H + 1)
 
-    # 6) Precompute macro interpolations once for all scenarios:
-    #    Note: we assume int_array, inf_array, etc. are 1D arrays where:
-    #          len(int_array) = L_int, etc. At least one element (maybe NaN).
-    #    We'll create `interp_int_allH` only if needed, else fill NA or linear ramp
     if 'Interest' in regressors:
         if int_array is not None and len(int_array) > 1 and not np.all(np.isnan(int_array)):
             L_int = len(int_array)
@@ -169,8 +182,6 @@ def build_base_future(
             x_int = np.arange(L_int) * seg_int
             interp_int_allH = np.interp(h_idx, x_int, int_array)
         else:
-            # Linear ramp from last historical Interest to whatever numeric int_array (if float),
-            # else leave NaN here (will fill later)
             interp_int_allH = None
     else:
         interp_int_allH = None
@@ -237,13 +248,16 @@ def forecast_with_prophet(
 
     Finally, calls model.predict() and clips to [0.2*price, 5*price].
     """
+   
     future = future_base.copy()
+   
     if 'Revenue' in regressors:
         if not pd.isna(rev_target):
             future.loc[horizon_mask, 'Revenue'] = _linear(
                 future.loc[horizon_mask, 'Revenue'],
                 rev_target
             )
+   
     if 'EPS (Basic)' in regressors:
         if not pd.isna(eps_target):
             future.loc[horizon_mask, 'EPS (Basic)'] = _linear(
@@ -253,6 +267,7 @@ def forecast_with_prophet(
 
     if interp_int_allH is not None and 'Interest' in regressors:
         future.loc[horizon_mask, 'Interest'] = interp_int_allH
+   
     elif 'Interest' in regressors and not pd.isna(interp_int_allH):
         future.loc[horizon_mask, 'Interest'] = _linear(
             future.loc[horizon_mask, 'Interest'],
@@ -261,6 +276,7 @@ def forecast_with_prophet(
 
     if interp_inf_allH is not None and 'Cpi' in regressors:
         future.loc[horizon_mask, 'Cpi'] = interp_inf_allH
+   
     elif 'Cpi' in regressors and not pd.isna(interp_inf_allH):
         future.loc[horizon_mask, 'Cpi'] = _linear(
             future.loc[horizon_mask, 'Cpi'],
@@ -269,6 +285,7 @@ def forecast_with_prophet(
 
     if interp_gdp_allH is not None and 'Gdp' in regressors:
         future.loc[horizon_mask, 'Gdp'] = interp_gdp_allH
+   
     elif 'Gdp' in regressors and not pd.isna(interp_gdp_allH):
         future.loc[horizon_mask, 'Gdp'] = _linear(
             future.loc[horizon_mask, 'Gdp'],
@@ -277,6 +294,7 @@ def forecast_with_prophet(
 
     if interp_unemp_allH is not None and 'Unemp' in regressors:
         future.loc[horizon_mask, 'Unemp'] = interp_unemp_allH
+   
     elif 'Unemp' in regressors and not pd.isna(interp_unemp_allH):
         future.loc[horizon_mask, 'Unemp'] = _linear(
             future.loc[horizon_mask, 'Unemp'],
@@ -292,6 +310,7 @@ def forecast_with_prophet(
 
     return forecast
 
+
 def forecast_with_prophet_without_fd(
     model: Prophet,
     forecast_period: int,
@@ -305,8 +324,10 @@ def forecast_with_prophet_without_fd(
     Merges macro data, fills missing values, sets regressors to last observed values,
     then predicts. Finally, clip yhat to [0, ∞).
     """
+
     future = model.make_future_dataframe(periods=forecast_period, freq='W')
     future['ds'] = pd.to_datetime(future['ds'])
+
     macro_df['ds'] = pd.to_datetime(macro_df['ds'])
 
     future = future.merge(macro_df, on='ds', how='left')
@@ -319,7 +340,9 @@ def forecast_with_prophet_without_fd(
     forecast = clip_to_bounds(forecast, current_price)
     forecast[['yhat', 'yhat_lower', 'yhat_upper']] = \
         forecast[['yhat', 'yhat_lower', 'yhat_upper']]
+
     return forecast
+
 
 def main() -> None:
 
@@ -352,15 +375,18 @@ def main() -> None:
         .rename(columns={'year': 'ds'})
         [['ticker', 'ds'] + MACRO_REGRESSORS]
     )
+
     if pd.api.types.is_period_dtype(macro_history['ds']):
         macro_history['ds'] = macro_history['ds'].dt.to_timestamp()
     else:
         macro_history['ds'] = pd.to_datetime(macro_history['ds'])
+
     macro_history.sort_values(['ticker', 'ds'], inplace=True)
     macro_groups = macro_history.groupby('ticker')
 
     fin_data_raw: Dict[str, pd.DataFrame] = fdata.prophet_data
     fin_data_processed: Dict[str, pd.DataFrame] = {}
+
     for tk in tickers:
         df_fd = fin_data_raw.get(tk, pd.DataFrame()).reset_index().rename(
             columns={
@@ -369,8 +395,10 @@ def main() -> None:
                 'eps': 'EPS (Basic)'
             }
         )
+
         if 'ds' in df_fd.columns:
             df_fd['ds'] = pd.to_datetime(df_fd['ds'])
+
         df_fd.sort_values('ds', inplace=True)
         fin_data_processed[tk] = df_fd
 
@@ -383,10 +411,12 @@ def main() -> None:
     final_rmse = {}
 
     logger.info("Computing Prophet Forecasts ...")
+
     for ticker in tickers:
         logger.info("Processing ticker: %s", ticker)
 
         current_price = latest_prices.get(ticker, np.nan)
+
         if pd.isna(current_price):
             logger.warning("No current price for %s. Skipping.", ticker)
             continue
@@ -402,6 +432,7 @@ def main() -> None:
             'ds': close.index,
             'y':  close[ticker]
         })
+
         df_price['ds'] = pd.to_datetime(df_price['ds'])
         df_price.sort_values('ds', inplace=True) 
 
@@ -409,9 +440,11 @@ def main() -> None:
             logger.warning("No macro history for %s. Skipping.", ticker)
             min_price[ticker] = max_price[ticker] = avg_price[ticker] = scenario_se[ticker] = avg_returns_dict[ticker] = 0.0
             continue
+
         tm = macro_groups.get_group(ticker).drop(columns='ticker').copy()
 
         fd_ticker = fin_data_processed.get(ticker, pd.DataFrame()).copy()
+
         if fd_ticker.empty:
             df_model = df_price.merge(tm, on='ds', how='left')
             df_model.ffill(inplace=True)
@@ -455,10 +488,13 @@ def main() -> None:
                     current_price,
                     regressors
                 )
+            
                 min_price[ticker] = forecast['yhat_lower'].iloc[-1]
                 max_price[ticker] = forecast['yhat_upper'].iloc[-1]
                 avg_price[ticker] = forecast['yhat'].iloc[-1]
+            
                 avg_returns_dict[ticker] = ((avg_price[ticker] / current_price) - 1 if current_price != 0 else np.nan)
+            
                 scenario_se[ticker] = ((max_price[ticker] - min_price[ticker]) / (2 * 1.96 * current_price) if current_price != 0 else np.nan)
 
             except Exception as e:
@@ -487,6 +523,7 @@ def main() -> None:
             )
 
             results = []
+            
             for rev_key, eps_key in SCENARIOS:
                 label = f"{rev_key}|{eps_key}"
                 rev_target = next_fc.at[ticker, rev_key]
@@ -540,22 +577,27 @@ def main() -> None:
                 all_y   = scenario_df['yhat'].values
                 all_low = scenario_df['yhat_lower'].values
                 all_high= scenario_df['yhat_upper'].values
+            
                 scenario_array = np.concatenate([all_y, all_low, all_high])
 
                 avg_price[ticker] = (all_y.mean() if all_y.size > 0 else 0.0)
                 returns_arr = ((scenario_array / current_price) - 1 if (current_price != 0 and scenario_array.size > 0) else np.zeros_like(scenario_array))
                 avg_returns_dict[ticker] = (returns_arr.mean() if returns_arr.size > 0 else 0.0)
+            
                 scenario_vol = (returns_arr.std() if returns_arr.size > 0 else 0.0)
                 scenario_se[ticker] = (scenario_vol / np.sqrt(num_analysts[ticker]) if (num_analysts[ticker] > 0) else 0.0)
 
     max_rmse = max(pd.Series(final_rmse).dropna())
+    
     for ticker in tickers:
+
         if ticker in final_rmse:
-            print()
+
             if pd.isna(final_rmse[ticker]):
                 se[ticker] = np.sqrt(scenario_se[ticker]**2 + (max_rmse**2))
             else:
                 se[ticker] = np.sqrt((scenario_se[ticker]**2) + (final_rmse[ticker]**2))
+
         else:
             se[ticker] = 0
 
@@ -583,8 +625,9 @@ def main() -> None:
         "Prophet Pred": prophet_results,
     }
 
-    export_results(sheets_to_write)
+    export_results(sheets_to_write, config.MODEL_FILE)
     logger.info("Prophet forecasting, cross-validation, and export completed.")
+    
     
 if __name__ == "__main__":
     main()
