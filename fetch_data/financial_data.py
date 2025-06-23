@@ -12,6 +12,7 @@ from typing import Tuple, Any, Dict
 from maps.industry_mapping import IndustryMap
 from maps.sector_map import SectorMap
 from functions.export_forecast import export_results
+import config
 
 pd.set_option('future.no_silent_downcasting', True)
 
@@ -22,14 +23,8 @@ formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 ch.setFormatter(formatter)
 logger.addHandler(ch)
 
-today: dt.date = dt.date.today()
-
-excel_file: str = f"Portfolio_Optimisation_Data_{today}.xlsx"
-
-output_excel_file: str = f"Portfolio_Optimisation_Forecast_{today}.xlsx"
-
 currency = pd.read_excel(
-    f'/Users/georgewright/Portfolio_Optimisation_Data_{today}.xlsx',
+    config.DATA_FILE,
     sheet_name='Currency',
     index_col=0,
     parse_dates=True,
@@ -61,14 +56,14 @@ logger.info("Downloading Analyst Data from Yahoo Finance ...")
 try:
 
     close = (
-        pd.read_excel(excel_file, sheet_name="Close", index_col=0, parse_dates=True, engine="openpyxl")
+        pd.read_excel(config.DATA_FILE, sheet_name="Close", index_col=0, parse_dates=True, engine="openpyxl")
         .sort_index(ascending=True)
     )
 
     close.columns = close.columns.astype(str)
 
     rets = (
-        pd.read_excel(excel_file, sheet_name="Historic Returns", index_col=0, parse_dates=True, engine="openpyxl")
+        pd.read_excel(config.DATA_FILE, sheet_name="Historic Returns", index_col=0, parse_dates=True, engine="openpyxl")
         .sort_index(ascending=True)
     )
 
@@ -78,7 +73,7 @@ except Exception as e:
 
     logger.error(
         "Failed to read data from Excel. Ensure the file '%s' is not open in another application. Error: %s",
-        excel_file, e
+        config.DATA_FILE, e
     )
 
     raise
@@ -1013,8 +1008,6 @@ for ticker in tickers:
             meanY, medianY, minY, maxY,
             nY, price, beta, div
         )
-
-one_year_from_today = today + dt.timedelta(days=365)
 
 Analyst_Target_Data = []
 
