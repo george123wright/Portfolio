@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 from numpy.linalg import inv
 
+
 def implied_returns(delta: float, sigma: pd.DataFrame, w: pd.Series) -> pd.Series:
     """
     Compute the implied returns given delta, covariance sigma, and weights w.
@@ -14,6 +15,7 @@ def implied_returns(delta: float, sigma: pd.DataFrame, w: pd.Series) -> pd.Serie
     ir.name = 'Implied Returns'
     return ir
 
+
 def proportional_prior(sigma: pd.DataFrame, tau: float, p: pd.DataFrame) -> pd.DataFrame:
     """
     Construct a diagonal omega matrix from sigma, tau and the view matrix p.
@@ -21,6 +23,7 @@ def proportional_prior(sigma: pd.DataFrame, tau: float, p: pd.DataFrame) -> pd.D
     helit_omega = p.dot(tau * sigma).dot(p.T)
     return pd.DataFrame(np.diag(np.diag(helit_omega.values)),
                         index=p.index, columns=p.index)
+
 
 def black_litterman(w_prior: pd.Series,
                     sigma_prior: pd.DataFrame,
@@ -33,6 +36,7 @@ def black_litterman(w_prior: pd.Series,
     """
     Compute the posterior (Black–Litterman) returns and covariance.
     """
+                        
     if omega is None:
         omega = proportional_prior(sigma_prior, tau, p)
    
@@ -46,6 +50,7 @@ def black_litterman(w_prior: pd.Series,
 
     pi_array = pi.values.reshape(-1, 1)
     Q_array = q.values.reshape(-1, 1)
+                        
     p_array = p.values
     sigma_scaled_array = sigma_prior_scaled.values
     omega_array = omega.values
