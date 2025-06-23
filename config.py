@@ -5,7 +5,7 @@ TODAY = dt.date.today()
 YEAR_AGO = TODAY - dt.timedelta(days=365)
 FIVE_YEAR_AGO = TODAY - dt.timedelta(days=5 * 365)
 
-BASE_DIR = Path("/Users/georgewright")
+BASE_DIR = Path("")
 
 DATA_FILE = BASE_DIR / f"Portfolio_Optimisation_Data_{TODAY}.xlsx"
 FORECAST_FILE = BASE_DIR / f"Portfolio_Optimisation_Forecast_{TODAY}.xlsx"
