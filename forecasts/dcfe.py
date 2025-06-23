@@ -9,14 +9,11 @@ import logging
 from data_processing.financial_forecast_data import FinancialForecastData
 from functions.fast_regression import constrained_regression
 
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-today = dt.date.today()
-today_ts = pd.Timestamp(today)
-EXCEL_OUT_FILE = f'Portfolio_Optimisation_Forecast_{today}.xlsx'
-EXCEL_IN_FILE = f'Portfolio_Optimisation_Data_{today}.xlsx'
-root_dir = '/Users/georgewright/modelling/stock_analysis_data'
+today_ts = pd.Timestamp(config.TODAY)
 
 fdata = FinancialForecastData()
 macro = fdata.macro
@@ -25,14 +22,16 @@ tickers = r.tickers
 latest_prices = r.last_price.copy()
 
 ticker_metadata = r.analyst
+
 market_cap = ticker_metadata['marketCap']
 shares_out = ticker_metadata['sharesOutstanding']
+
 tax_rate = {ticker: ticker_metadata['Tax Rate'][ticker] if pd.notna(ticker_metadata['Tax Rate'][ticker]) else 0.22 for ticker in tickers}
 
-coe_table = pd.read_excel(EXCEL_OUT_FILE, sheet_name='CAPM BL Pred', index_col=0, engine='openpyxl')
-coe = coe_table['Returns']
+coe = pd.read_excel(config.FORECAST_FILE, sheet_name='COE', index_col=0, usecols=['Ticker', 'COE'], engine='openpyxl')
 
 dicts = r.dicts()
+
 growth_dict = dicts['eps1y_5']
 pe_ind_dict = dicts['PE']
 
@@ -40,8 +39,6 @@ low_price = {}
 avg_price = {}
 high_price = {}
 se_dict = {}
-
-rf = 0.046
 
 for ticker in tickers:
     
@@ -57,8 +54,10 @@ for ticker in tickers:
     fc_df = fc_df.dropna(
         subset=['low_rev','avg_rev','high_rev','low_eps','avg_eps','high_eps']
     )
+   
     fc_df.index = pd.to_datetime(fc_df.index)
     fc_df = fc_df.sort_index()  
+   
     if fc_df.empty:
         logger.warning(f"{ticker}: no valid forecast data after dropping all‐NaN rows, skipping")
         low_price[ticker] = avg_price[ticker] = high_price[ticker] = se_dict[ticker] = np.nan
@@ -80,8 +79,8 @@ for ticker in tickers:
 
     mc_debt = kpis['market_value_debt'].iat[0]
        
-    coe_t = max(rf, coe[ticker])
-   
+    coe_t = coe.loc[ticker].values
+
     E = market_cap[ticker]
    
     V = E + mc_debt
@@ -103,10 +102,10 @@ for ticker in tickers:
     rev_matrix = rev_opts[np.arange(years)[:,None], idxs.T].T
     eps_matrix = eps_opts[np.arange(years)[:,None], idxs.T].T
 
-    days     = (fc_df.index.to_numpy() - np.datetime64(today_ts)) / np.timedelta64(1, 'D')
+    days = (fc_df.index.to_numpy() - np.datetime64(today_ts)) / np.timedelta64(1, 'D')
     discount = 1.0 / ((1 + coe_t) ** (days / 365.0))
 
-    fcfs = beta[0] + rev_matrix * beta[1] + eps_matrix * beta[2]
+    fcfs = beta[0] + (rev_matrix * beta[1]) + (eps_matrix * beta[2])
    
     dcf_years = fcfs * discount[np.newaxis, :]  
 
@@ -125,6 +124,7 @@ for ticker in tickers:
 
     prices = (dcf_vals / shares_out[ticker]).clip(0.2 * latest_prices[ticker],
                                                   5.0 * latest_prices[ticker])
+    
     flat_prices = prices.flatten()
 
     low_price[ticker] = max(flat_prices.min(), 0)
@@ -133,15 +133,21 @@ for ticker in tickers:
 
     dfcf = dcf_years 
     stds = dfcf.std(axis=0)
+  
     n = fc_df["num_analysts"].iloc[:years].astype(float).values
     n[n == 0] = 1.0 
+    
     ses = stds / np.sqrt(n)
 
     tv_flat = tv_disc.flatten()
+    
     std_term = tv_flat.std()
+    
     n_term = float(fc_df["num_analysts"].iat[-1])
+    
     if n_term < 1:
         n_term = 1.0
+    
     se_term = std_term / np.sqrt(n_term)
 
     se_total = np.sqrt((ses**2).sum() + se_term**2)
@@ -149,14 +155,16 @@ for ticker in tickers:
 
     logger.info(f"{ticker}: Low {low_price[ticker]}, Avg {avg_price[ticker]}, High {high_price[ticker]}, SE {se_dict[ticker]}")
 
+
 dcf_df = pd.DataFrame({
     'Low Price': low_price,
     'Avg Price': avg_price,
     'High Price': high_price,
     'SE': se_dict
 })
+
 dcf_df.index.name = 'Ticker'
-excel_file3 = f"/Users/georgewright/Portfolio_Optimisation_DCF.xlsx"
-with pd.ExcelWriter(excel_file3, mode='a',
+
+with pd.ExcelWriter(config.MODEL_FILE, mode='a',
                      engine='openpyxl', if_sheet_exists='replace') as writer:
      dcf_df.to_excel(writer, sheet_name='DCFE')
