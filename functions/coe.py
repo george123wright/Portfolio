@@ -30,16 +30,28 @@ def calculate_cost_of_equity(
     Returns:
         DataFrame indexed by ticker with columns ['Beta','Country','CRP','Currency Premium','COE'].
     """
+   
     records = []
+   
     def_cur = 'GBPUSD'
+   
     crp_mean = crp_df['CRP'].mean()
+   
     for t in tickers:
+   
         beta = beta_series.loc[t]
+   
         country = ticker_country_map.get(t, 'NA')
         crp_val = crp_df['CRP'].get(country, crp_mean)
-        ccy = country_to_pair.get(country, def_cur)
-        curr_prem = currency_bl_df.at[ccy]
-        coe = rf + beta * max((max((spx_expected_return - rf), 0) + crp_val + curr_prem), 0)
+   
+        if country == 'United Kingdom':
+            curr_prem = 0
+        else:
+            ccy = country_to_pair.get(country, def_cur)
+            curr_prem = currency_bl_df.at[ccy]
+   
+        coe = rf +  max(((beta * max((spx_expected_return - rf), 0)) + crp_val + curr_prem), 0)
+   
         records.append({
             'Ticker': t,
             'Country': country,
@@ -48,4 +60,5 @@ def calculate_cost_of_equity(
             'Currency Premium': curr_prem,
             'COE': coe
         })
+   
     return pd.DataFrame(records).set_index('Ticker')
