@@ -19,6 +19,8 @@ from openpyxl.styles import PatternFill
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
+import config
+
 
 nltk.download('vader_lexicon', quiet=True)
 
@@ -282,10 +284,6 @@ def main() -> None:
       4. Saves results to Excel and applies conditional formatting and table styling.
     """
 
-    today = dt.date.today()
-
-    excel_file = f"Portfolio_Optimisation_Forecast_{today}.xlsx"
-
     logger.info("Scraping WallStreetBets posts...")
 
     posts = get_wsb_posts(limit=100)
@@ -423,7 +421,7 @@ def main() -> None:
 
     try:
 
-        with pd.ExcelWriter(excel_file, mode='a', engine='openpyxl', if_sheet_exists='replace') as writer:
+        with pd.ExcelWriter(config.FORECAST_FILE, mode='a', engine='openpyxl', if_sheet_exists='replace') as writer:
 
             findings_df.to_excel(writer, sheet_name='Sentiment Findings', index=False)
 
@@ -457,13 +455,13 @@ def main() -> None:
                 CellIsRule(operator='greaterThan', formula=['0'], fill=green_fill)
             )
 
-        logger.info("Sentiment findings successfully saved to Excel in '%s'.", excel_file)
+        logger.info("Sentiment findings successfully saved to Excel in '%s'.", config.FORECAST_FILE)
 
     except Exception as exc:
       
         logger.error("Failed to write sentiment findings to Excel: %s", exc)
 
-    format_sheet_as_table(excel_file, 'Sentiment Findings')
+    format_sheet_as_table(config.FORECAST_FILE, 'Sentiment Findings')
 
 
 if __name__ == "__main__":
