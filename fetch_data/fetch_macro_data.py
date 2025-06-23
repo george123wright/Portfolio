@@ -10,6 +10,7 @@ import yfinance as yf
 from pandas_datareader import data as pdr
 
 macro_series = {
+    
     "United States": {
         "interest": "FEDFUNDS",
         "cpi":      "CPIAUCSL",
@@ -19,51 +20,58 @@ macro_series = {
         "corporate profits": "CPATAX",
         "balance on current account": "IEABC"
     },
+    
     "United Kingdom": {
         "interest": "IRSTCI01GBM156N",
         "cpi":      "GBRCPIALLMINMEI",
         "gdp":      "MKTGDPGBA646NWDB",
         "unemp":    "LRHUTTTTGBM156S"
     },
+    
     "Germany": {
         "interest": "IRSTCI01DEM156N",
         "cpi":      "DEUCPIALLMINMEI",
         "gdp":      "MKTGDPDEA646NWDB",
         "unemp":    "LRHUTTTTDEM156S"
     },
+    
     "France": {
         "interest": "IRSTCI01FRM156N",
         "cpi":      "FRACPIALLMINMEI",
         "gdp":      "MKTGDPFRA646NWDB",
         "unemp":    "LRHUTTTTFRM156S"
     },
+    
     "Canada": {
         "interest": "IRSTCI01CAM156N",
         "cpi":      "CANCPIALLMINMEI",
         "gdp":      "MKTGDPCAA646NWDB",
         "unemp":    "LRUNTTTTCAM156S"
     },
+    
     "Spain": {
         "interest": "IRSTCI01ESM156N",
         "cpi":      "CP0000ESM086NEST",
         "gdp":      "MKTGDPESA646NWDB",
         "unemp":    "LRHUTTTTESM156S"
     },
+    
     "FX": {
         "USD per GBP": "DEXUSUK",
         "USD per EUR": "DEXUSEU",
         "USD per CHF": "DEXCZUS",
         "USD per CAD": "DEXCAUS"
     },
+    
     "CHINA": {
         "interest": "INTDSRCNM193N",
         "cpi":      "CHNCPIALLMINMEI",
         "gdp":      "MKTGDPCNA646NWDB"
     },
+    
     "Israel": {
         "interest": "IRSTCI01ILM156N",
     }
-    
     
 }
 
@@ -94,18 +102,25 @@ def fetch_country_df(codes, start, end):
     else:
         return None
 
+
 def main():
+ 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(levelname)s - %(message)s"
     )
+    
     today = dt.date.today()
+    
     start = pd.to_datetime("2000-01-01")
     end   = pd.Timestamp(today)
+    
     macro_by_country = {}
 
     for country, codes in macro_series.items():
+    
         logging.info("Fetching macro data for %s...", country)
+        
         df = fetch_country_df(codes, start, end)
 
         if df is not None and not df.empty:
@@ -114,12 +129,16 @@ def main():
         else:
             logging.error("No data for %s (skipping)", country)
 
+   
     out_file = "macro_and_index_data.xlsx"
+    
     with pd.ExcelWriter(out_file, engine="openpyxl") as writer:
         for country, df in macro_by_country.items():
             df.to_excel(writer, sheet_name=country)
         close_df.to_excel(writer, sheet_name="Stock Indexes and Commodities")
+    
     logging.info("Saved macro + stock index data to %s", out_file)
+
 
 if __name__ == "__main__":
     main()
