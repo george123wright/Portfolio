@@ -22,6 +22,7 @@ from statsmodels.tsa.api import VAR
 from numpy.lib.stride_tricks import as_strided
 
 from data_processing.financial_forecast_data import FinancialForecastData
+import config
 
 SEED = 42
 random.seed(SEED)
@@ -730,7 +731,7 @@ def main() -> None:
                 logger.error("Worker failed for %s: %s", ticker, ex)
 
     summary_df = pd.DataFrame(results).set_index("Ticker")
-    excel_file = os.path.expanduser("~/Portfolio_Optimisation_DCF.xlsx")
+    excel_file = os.path.expanduser("~/config.MODEL_FILE")
     with pd.ExcelWriter(excel_file, mode='a', engine='openpyxl', if_sheet_exists='replace') as writer:
         summary_df.to_excel(writer, sheet_name='LSTM')
 
