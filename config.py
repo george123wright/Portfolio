@@ -14,6 +14,7 @@ MODEL_FILE = BASE_DIR / "Portfolio_Optimisation_DCF.xlsx"
 ROOT_FIN_DIR = BASE_DIR / "modelling" / "stock_analysis_data"
 
 RF = 0.046
-lbr, ubr = 0.2, 5
+lbr, ubr = -0.8, 4
+lbp, ubp = 0.2, 5
 MAX_WEIGHT = 0.1
 MONEY_IN_PORTFOLIO = 4000
