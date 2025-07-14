@@ -20,9 +20,9 @@ import config
 
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
-    datefmt="%H:%M:%S",
+    level = logging.INFO,
+    format = "%(asctime)s %(levelname)-8s %(message)s",
+    datefmt = "%H:%M:%S",
 )
 
 logger = logging.getLogger(__name__)
@@ -48,10 +48,10 @@ def fit_base_model_from_arrays(
         (
             "model",
             HistGradientBoostingRegressor(
-                random_state=42,
-                early_stopping=False,
-                min_samples_leaf=1,
-                max_depth=3,
+                random_state = 42,
+                early_stopping = False,
+                min_samples_leaf = 1,
+                max_depth = 3,
             ),
         )
     ])
@@ -65,8 +65,8 @@ def fit_base_model_from_arrays(
         pipe,
         param_grid,
         cv=cv,
-        scoring="neg_mean_squared_error",
-        n_jobs=-1, 
+        scoring = "neg_mean_squared_error",
+        n_jobs = -1, 
     )
 
     gs.fit(X_arr, y_arr)
@@ -74,7 +74,9 @@ def fit_base_model_from_arrays(
     return gs.best_estimator_
 
 
-def _clean_df_once(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+def _clean_df_once(
+    df: pd.DataFrame
+) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """
     Clean out rows with NaN / ±Inf in either features or target.
     Return:
@@ -88,9 +90,11 @@ def _clean_df_once(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, List[str]]
     y = df["Return"]
 
     X = X.replace([np.inf, -np.inf], np.nan)
+    
     mask = X.notna().all(axis=1) & y.notna()
 
     X_clean_df = X.loc[mask, :]
+    
     y_clean_ser = y.loc[mask]
 
     feature_names = list(X_clean_df.columns)
@@ -115,14 +119,17 @@ def bootstrap_models(
     models = []
     
     for _ in range(n_resamples):
+       
         samp = data_hist.sample(frac=0.8, replace=True)
     
         Xs = samp.drop(columns=["Return"])
+       
         ys = samp["Return"]
 
         Xs.replace([np.inf, -np.inf], np.nan, inplace=True)
     
         mask = Xs.notna().all(axis=1) & ys.notna()
+       
         Xs, ys = Xs[mask], ys[mask]
 
         m = clone(base_model)
@@ -149,12 +156,14 @@ def _fit_one_bootstrap(
     n_samples = X_feat.shape[0]
 
     rng = np.random.RandomState(random_state)
+   
     idx = rng.randint(0, n_samples, size=n_samples)  
 
     X_samp = X_feat[idx, :]
     y_samp = y_arr[idx]
 
     m = clone(base_model)
+   
     m.fit(X_samp, y_samp)
 
     return m
@@ -175,9 +184,11 @@ def bootstrap_models_from_arrays(
     """
    
     p = X_arr.shape[1]  
+   
     X_feat = X_arr[:, :]  
 
     seeds = list(range(n_resamples))
+   
     models = Parallel(n_jobs=-1)(
         delayed(_fit_one_bootstrap)(base_model, X_feat, y_arr, seed)
         for seed in seeds
@@ -198,6 +209,7 @@ def scenario_matrix(
     """
 
     rev_items = list(rev_covs.items())
+   
     eps_items = list(eps_covs.items())
 
     rev_labels, _ = zip(*rev_items)
@@ -205,7 +217,7 @@ def scenario_matrix(
 
     idx = pd.MultiIndex.from_product(
         [rev_labels, eps_labels],
-        names=["rev_lbl", "eps_lbl"]
+        names = ["rev_lbl", "eps_lbl"]
     )
 
     df = pd.DataFrame(index=idx).reset_index()
@@ -214,14 +226,15 @@ def scenario_matrix(
     eps_map = dict(eps_items)
 
     df["Revenue Growth"] = df["rev_lbl"].map(rev_map)
-    df["EPS Growth"]     = df["eps_lbl"].map(eps_map)
+    df["EPS Growth"] = df["eps_lbl"].map(eps_map)
 
     for col, val in macro_fc.items():
+        
         df[col] = val
 
     keys = (df["rev_lbl"] + "_rev__" + df["eps_lbl"] + "_eps").tolist()
 
-    scen_df = df.drop(columns=["rev_lbl", "eps_lbl"]).reset_index(drop=True)
+    scen_df = df.drop(columns = ["rev_lbl", "eps_lbl"]).reset_index(drop = True)
 
     return scen_df, keys
 
@@ -239,45 +252,62 @@ def process_ticker(
     """
     
     if isinstance(growth, str) or len(growth) < 3:
+        
         logger.warning("Skip %s: Insufficient Growth Data, Returning Zeros", tk)
     
         return {
             "Ticker": tk,
-            "Lowest Predicted Return": 0.0,
-            "Mean Predicted Return": 0.0,
-            "Highest Predicted Return": 0.0,
-            "Return SE": 0.0,
+            "Low Returns": 0.0,
+            "Returns": 0.0,
+            "High Returns": 0.0,
+            "SE": 0.0,
         }
 
-    X_arr, y_arr, feature_cols = _clean_df_once(growth)    
-    base_model = fit_base_model_from_arrays(X_arr, y_arr, feature_cols)
+    X_arr, y_arr, feature_cols = _clean_df_once(
+        df = growth
+    )    
+  
+    base_model = fit_base_model_from_arrays(
+        X_arr = X_arr, 
+        y_arr = y_arr, 
+        feature_cols = feature_cols
+    )
     
     bs_models = bootstrap_models_from_arrays(
-        base_model,
-        X_arr,
-        y_arr,
-        feature_cols,
-        n_resamples=n_boot
+        base_model = base_model,
+        X_arr = X_arr,
+        y_arr = y_arr,
+        feature_cols = feature_cols,
+        n_resamples = n_boot
     )
 
     rev_covs, eps_covs = fin_forecast 
-    scen_df, keys = scenario_matrix(rev_covs, eps_covs, macro_forecasts)
+ 
+    scen_df, keys = scenario_matrix(
+        rev_covs = rev_covs, 
+        eps_covs = eps_covs, 
+        macro_fc = macro_forecasts
+    )
 
-    scen_df = scen_df.reindex(columns=feature_cols, fill_value=0.0)
+    scen_df = scen_df.reindex(columns = feature_cols, fill_value = 0.0)
+ 
     scen_arr = scen_df.to_numpy() 
     
     preds_base = base_model.predict(scen_arr)
+ 
     preds_bs = np.vstack([m.predict(scen_arr) for m in bs_models]).T
 
-    se_bs = preds_bs.std(ddof=1)
-    scen_var = preds_base.var(ddof=1)
-    se_final = np.sqrt(se_bs**2 + scen_var)
+    se_bs = preds_bs.std(ddof = 1)
+ 
+    scen_var = preds_base.var(ddof = 1)
+ 
+    se_final = np.sqrt(se_bs ** 2 + scen_var)
 
     min_ret = preds_base.min()
     max_ret = preds_base.max()
     avg_ret = preds_base.mean()
 
-    logger.info(f" {tk}: Low: {min_ret:.4f},  Avg: {avg_ret:.4f},  High: {max_ret:.4f}, SE: {se_final:.4f}")
+    logger.info(f" {tk}: Low: {min_ret:.4f}, Avg: {avg_ret:.4f}, High: {max_ret:.4f}, SE: {se_final:.4f}")
 
     return {
         "Ticker": tk,
@@ -297,6 +327,7 @@ def main() -> None:
     tickers = r.tickers
 
     growth_hist = fdata.regression_dict()
+    
     macro_forecast = macro.assign_macro_forecasts()
 
     results: List[Dict] = []
@@ -305,33 +336,41 @@ def main() -> None:
    
         ticker_hist = growth_hist.get(ticker, "No Growth Data")
    
-        ticker_forecast = fdata.get_forecast_pct_changes(ticker)
+        ticker_forecast = fdata.get_forecast_pct_changes(
+            ticker = ticker
+        )
    
         ticker_macro_forecast = macro_forecast[ticker]
    
         res = process_ticker(
-            ticker,
-            ticker_hist,
-            ticker_macro_forecast,
-            ticker_forecast,
-            n_boot=50,
+            tk = ticker,
+            growth = ticker_hist,
+            macro_forecast = ticker_macro_forecast,
+            fin_forecast = ticker_forecast,
+            n_boot = 50,
         )
    
         if res:
+            
             results.append(res)
 
     if not results:
+        
         logger.warning("No results produced – exiting")
+        
         return
 
     df = pd.DataFrame(results).set_index("Ticker")
+    
     out_file = Path(config.MODEL_FILE)
     
     with pd.ExcelWriter(out_file, mode="a", engine="openpyxl", if_sheet_exists="replace") as writer:
+    
         df.to_excel(writer, sheet_name="Lin Reg Returns")
 
 
 if __name__ == "__main__":
+   
     logger.info("Starting lin_reg_returns10.py")
+   
     main()
-
