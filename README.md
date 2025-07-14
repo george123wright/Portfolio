@@ -12,6 +12,7 @@ pip install -r requirements.txt
 
 Several scripts expect local Excel files as inputs/outputs (e.g. `Portfolio_Optimisation_Data_YYYY-MM-DD.xlsx`). Update the paths inside the modules if your files live elsewhere.
 
+Financial reports that are imported are obtained from [Stock Analysis ](https://stockanalysis.com/).
 ## Repository Layout
 
 ```
@@ -79,8 +80,7 @@ These scripts populate the Excel workbooks used by later stages.
 * **`returns_reg_pred.py`** – Trains a gradient‑boosting regression model on
   engineered features to predict twelve‑month returns.  Bootstrapping is used
   to build a distribution of possible outcomes.
-* **`relative_valuation_and_capm.py`** – Combines relative valuation ratios, as well as CAPM,
-* Fama-French 3 factor model and Fama-French 5 factor model 
+* **`relative_valuation_and_capm.py`** – Combines relative valuation ratios, as well as CAPM, Fama-French 3 factor model and Fama-French 5 factor model 
   to derive expected returns.
 * **`Combination_Forecast.py`** – Aggregates all of the above model outputs into
   a Bayesian ensemble, applying weights and producing an overall score table.
@@ -103,7 +103,7 @@ These scripts populate the Excel workbooks used by later stages.
 * **`fama_french_3_pred.py` / `fama_french_5_pred.py`** – Estimate expected
   returns using the Fama–French factor models, given simulated future factor
   values.
-* **`factor_simulations.py`** – Uses a VAR model to simulate future factor
+* **`factor_simulations.py`** – Uses a VAR model and cholesky decomposition to simulate future factor
   realisations which feed into the Fama–French forecasts.
 * **`export_forecast.py`** – Writes DataFrames to Excel with conditional
   formatting and table styling.
