@@ -14,13 +14,19 @@ from maps.sector_map import SectorMap
 from functions.export_forecast import export_results
 import config
 
+
 pd.set_option('future.no_silent_downcasting', True)
 
 logger = logging.getLogger(__name__)
+
 logger.setLevel(logging.INFO)
+
 ch = logging.StreamHandler()
+
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+
 ch.setFormatter(formatter)
+
 logger.addHandler(ch)
 
 currency = pd.read_excel(
@@ -35,36 +41,46 @@ usdcny = currency.loc['USDCNY']['Last']
 
 usdcad = currency.loc['USDCAD']['Last']
 
-usdcny = pd.to_numeric(usdcny, errors='coerce')
+usdcny = pd.to_numeric(usdcny, errors = 'coerce')
 
-usdcad = pd.to_numeric(usdcad, errors='coerce')
+usdcad = pd.to_numeric(usdcad, errors = 'coerce')
 
-gbpusd = pd.to_numeric(currency.loc['GBPUSD']['Last'], errors='coerce')
+gbpusd = pd.to_numeric(currency.loc['GBPUSD']['Last'], errors = 'coerce')
 
-eurusd = pd.to_numeric(currency.loc['EURUSD']['Last'], errors='coerce')
+eurusd = pd.to_numeric(currency.loc['EURUSD']['Last'], errors = 'coerce')
 
-usdchf = pd.to_numeric(currency.loc['USDCHF']['Last'], errors='coerce')
+usdchf = pd.to_numeric(currency.loc['USDCHF']['Last'], errors = 'coerce')
 
-usdhkd = pd.to_numeric(currency.loc['USDHKD']['Last'], errors='coerce')
+usdhkd = pd.to_numeric(currency.loc['USDHKD']['Last'], errors = 'coerce')
 
-usdcny = pd.to_numeric(currency.loc['USDCNY']['Last'], errors='coerce')
+usdcny = pd.to_numeric(currency.loc['USDCNY']['Last'], errors = 'coerce')
 
-usddkk = pd.to_numeric(currency.loc['USDDKK']['Last'], errors='coerce')
+usddkk = pd.to_numeric(currency.loc['USDDKK']['Last'], errors = 'coerce')
 
 logger.info("Downloading Analyst Data from Yahoo Finance ...")
 
 try:
 
     close = (
-        pd.read_excel(config.DATA_FILE, sheet_name="Close", index_col=0, parse_dates=True, engine="openpyxl")
-        .sort_index(ascending=True)
+        pd.read_excel(
+            config.DATA_FILE, 
+            sheet_name = "Close", 
+            index_col = 0, 
+            parse_dates = True, 
+            engine = "openpyxl"
+        ).sort_index(ascending=True)
     )
 
     close.columns = close.columns.astype(str)
 
     rets = (
-        pd.read_excel(config.DATA_FILE, sheet_name="Historic Returns", index_col=0, parse_dates=True, engine="openpyxl")
-        .sort_index(ascending=True)
+        pd.read_excel(
+            config.DATA_FILE, 
+            sheet_name = "Historic Returns", 
+            index_col = 0, 
+            parse_dates = True, 
+            engine = "openpyxl"
+        ).sort_index(ascending=True)
     )
 
     rets.columns = rets.columns.astype(str)
@@ -79,7 +95,9 @@ except Exception as e:
     raise
 
 
-def drawdown(return_series: pd.Series) -> pd.DataFrame:
+def drawdown(
+    return_series: pd.Series
+) -> pd.DataFrame:
     """
     Calculate wealth index, previous peaks, and drawdowns.
     """
@@ -93,7 +111,11 @@ def drawdown(return_series: pd.Series) -> pd.DataFrame:
     return pd.DataFrame({"Wealth": wealth_index, "Previous Peak": previous_peaks, "Drawdown": drawdowns})
 
 
-def safe_first_value(df: pd.DataFrame, row_label: str, default: float = np.nan) -> float:
+def safe_first_value(
+    df: pd.DataFrame, 
+    row_label: str, 
+    default: float = np.nan
+) -> float:
     """
     Safely retrieve the first value for a given row label from a DataFrame.
     Logs a warning if the row or index does not exist.
@@ -131,70 +153,101 @@ for ticker in tickers:
         logger.warning("Failed to retrieve info for %s: %s", ticker, e)
 
 desired_keys = [
-    'targetMeanPrice', 'targetMedianPrice', 'targetLowPrice', 'targetHighPrice',
-    'numberOfAnalystOpinions', 'dividendYield', 'beta', 'overallRisk',
-    'recommendationKey', 'sharesShort', 'sharesShortPriorMonth', 'sharesOutstanding',
-    'earningsGrowth', 'revenueGrowth', 'debtToEquity', 'returnOnAssets', 'returnOnEquity',
-    'priceToBook', 'trailingEps', 'forwardEps', 'industryKey', 'sectorKey',
-    'country', 'priceToSalesTrailing12Months', 'enterpriseValue', 'enterpriseToRevenue',
-    'priceEpsCurrentYear', 'forwardPE', 'trailingPE', 'profitMargins', 'fullExchangeName', 
-    'marketCap', 'bookValue', 'lastDividendValue'
+    'targetMeanPrice', 
+    'targetMedianPrice', 
+    'targetLowPrice', 
+    'targetHighPrice',
+    'numberOfAnalystOpinions', 
+    'dividendYield', 
+    'beta', 
+    'overallRisk',
+    'recommendationKey', 
+    'sharesShort', 
+    'sharesShortPriorMonth', 
+    'sharesOutstanding',
+    'earningsGrowth', 
+    'revenueGrowth', 
+    'debtToEquity', 
+    'returnOnAssets', 
+    'returnOnEquity',
+    'priceToBook', 
+    'trailingEps', 
+    'forwardEps', 
+    'industryKey', 
+    'sectorKey',
+    'country', 
+    'priceToSalesTrailing12Months', 
+    'enterpriseValue', 
+    'enterpriseToRevenue',
+    'priceEpsCurrentYear', 
+    'forwardPE', 
+    'trailingPE', 
+    'profitMargins', 
+    'fullExchangeName', 
+    'marketCap', 
+    'bookValue', 
+    'lastDividendValue', 
+    'totalRevenue'
 ]
 
-def get_historical_data(tickers: list) -> Dict[str, Dict[str, pd.DataFrame]]:
-    """
-    Retrieve historical financial, cashflow, and balance sheet data for each ticker.
-    If data shapes differ, each DataFrame is truncated to the minimum number of columns.
-    """
 
+def get_historical_data(
+    tickers
+):
+   
     financial_data = {}
-    
-    for ticker in tickers:
+   
+    for t in tickers:
+        
+        logger.info("Obtaining Data for ticker %s", t)
+        
+        tk = yf.Ticker(t)
+   
+        fin = tk.financials if hasattr(tk, 'financials') else pd.DataFrame()
+        
+        cf = tk.cashflow if hasattr(tk, 'cashflow') else pd.DataFrame()
+        
+        bs = tk.balance_sheet if hasattr(tk, 'balance_sheet') else pd.DataFrame()
 
-        try:
-            
-            logger.info("Obtaining Data for ticker %s", ticker)
+        def one_year_est(
+            df
+        ):
+   
+            try:
+   
+                return df.loc['+1y', ['low', 'avg', 'high', 'numberOfAnalysts']]
+   
+            except Exception:
+   
+                return pd.Series({'low': np.nan,
+                                  'avg': np.nan,
+                                  'high': np.nan,
+                                  'numberOfAnalysts': 0})
 
-            stock = ticker_objs.get(ticker, yf.Ticker(ticker))
+        rev1y = one_year_est(
+            df = tk.revenue_estimate
+        )
+        
+        eps1y = one_year_est(
+            df = tk.earnings_estimate
+        )
 
-            financials = stock.financials
+        financial_data[t] = {
+            'financials': fin,
+            'cashflow': cf,
+            'balance_sheet': bs,
+            'rev_estimate': rev1y,
+            'eps_estimate': eps1y
+        }
 
-            cashflow = stock.cashflow
-
-            balance_sheet = stock.balance_sheet
-
-            rev_estimate = stock.revenue_estimate
-
-            eps_estimate = stock.earnings_estimate
-
-            min_shape = min(financials.shape[1], cashflow.shape[1], balance_sheet.shape[1])
-
-            financials = financials.iloc[:, :min_shape]
-
-            cashflow = cashflow.iloc[:, :min_shape]
-
-            balance_sheet = balance_sheet.iloc[:, :min_shape]
-
-            rev_estimate = rev_estimate.loc['+1y'][['low', 'avg', 'high', 'numberOfAnalysts']]
-
-            eps_estimate = eps_estimate.loc['+1y'][['low', 'avg', 'high', 'numberOfAnalysts']]
-
-            financial_data[ticker] = {
-                'financials': financials,
-                'cashflow': cashflow,
-                'balance_sheet': balance_sheet,
-                'rev_estimate': rev_estimate,
-                'eps_estimate': eps_estimate
-            }
-
-        except Exception as e:
-
-            logger.warning("Error retrieving historical data for %s: %s", ticker, e)
+        time.sleep(1)  
 
     return financial_data
 
 
-financial_data = get_historical_data(tickers)
+financial_data = get_historical_data(
+    tickers = tickers
+)
 
 net_income_dict = {}
 
@@ -284,11 +337,20 @@ for ticker in tickers:
 
             continue
 
-        net_income_val = safe_first_value(financials, 'Net Income')
+        net_income_val = safe_first_value(
+            df = financials, 
+            row_label = 'Net Income'
+        )
 
-        operating_cash_flow_val = safe_first_value(cashflow, 'Operating Cash Flow')
+        operating_cash_flow_val = safe_first_value(
+            df = cashflow, 
+            row_label = 'Operating Cash Flow'
+        )
 
-        total_assets_val = safe_first_value(balance_sheet, 'Total Assets')
+        total_assets_val = safe_first_value(
+            df = balance_sheet, 
+            row_label = 'Total Assets'
+        )
 
         if 'Total Assets' in balance_sheet.index:
 
@@ -318,7 +380,11 @@ for ticker in tickers:
             
             if 'Research And Development' in financials.index:
             
-                rnd = safe_first_value(financials, 'Research And Development', default=0)
+                rnd = safe_first_value(
+                    df = financials, 
+                    row_label = 'Research And Development', 
+                    default = 0
+                )
                 
                 rnd_assets = rnd / total_assets_val if total_assets_val != 0 else np.nan
         
@@ -330,7 +396,11 @@ for ticker in tickers:
             
             if 'Capital Expenditure' in cashflow.index:
             
-                capital_expenditure = safe_first_value(cashflow, 'Capital Expenditure', default=0)
+                capital_expenditure = safe_first_value(
+                    df = cashflow, 
+                    row_label = 'Capital Expenditure', 
+                    default = 0
+                )
                 
                 capex_intensity = capital_expenditure / total_assets_val if total_assets_val != 0 else np.nan
             
@@ -342,7 +412,11 @@ for ticker in tickers:
                 
             if 'EBIT' in financials.index:
                 
-                ebit = safe_first_value(financials, 'EBIT', default=0)
+                ebit = safe_first_value(
+                    df = financials, 
+                    row_label = 'EBIT', 
+                    default = 0
+                )
                 
                 ebit_assets = ebit / total_assets_val if total_assets_val != 0 else np.nan
             
@@ -396,7 +470,11 @@ for ticker in tickers:
             
         if 'Working Capital' in balance_sheet.index:
             
-            working_capital = safe_first_value(balance_sheet, 'Working Capital', default=0)
+            working_capital = safe_first_value(
+                df = balance_sheet, 
+                row_label = 'Working Capital', 
+                default = 0
+            )
         
         else:
             
@@ -458,7 +536,11 @@ for ticker in tickers:
 
         if 'Long Term Debt' in balance_sheet.index:
 
-            long_term_debt_val = safe_first_value(balance_sheet, 'Long Term Debt', default=0)
+            long_term_debt_val = safe_first_value(
+                df = balance_sheet, 
+                row_label = 'Long Term Debt', 
+                efault = 0
+            )
 
             try:
 
@@ -476,9 +558,17 @@ for ticker in tickers:
 
         if 'Current Assets' in balance_sheet.index and 'Current Liabilities' in balance_sheet.index:
 
-            current_assets_val = safe_first_value(balance_sheet, 'Current Assets', default=0)
+            current_assets_val = safe_first_value(
+                df = balance_sheet, 
+                row_label = 'Current Assets', 
+                default = 0
+            )
 
-            current_liabilities_val = safe_first_value(balance_sheet, 'Current Liabilities', default=0)
+            current_liabilities_val = safe_first_value(
+                df = balance_sheet, 
+                row_label = 'Current Liabilities', 
+                default = 0
+            )
 
             try:
 
@@ -529,7 +619,11 @@ for ticker in tickers:
 
         if 'Issuance Of Capital Stock' in cashflow.index:
 
-            new_shares_issued_val = safe_first_value(cashflow, 'Issuance Of Capital Stock', default=0)
+            new_shares_issued_val = safe_first_value(
+                df = cashflow, 
+                row_label = 'Issuance Of Capital Stock', 
+                default = 0
+            )
 
         else:
 
@@ -537,9 +631,17 @@ for ticker in tickers:
 
         if 'Gross Profit' in financials.index and 'Total Revenue' in financials.index:
 
-            total_revenue = safe_first_value(financials, 'Total Revenue', default=0)
+            total_revenue = safe_first_value(
+                df = financials, 
+                row_label = 'Total Revenue', 
+                default = 0
+            )
 
-            gross_profit = safe_first_value(financials, 'Gross Profit', default=0)
+            gross_profit = safe_first_value(
+                df = financials, 
+                row_label = 'Gross Profit', 
+                default = 0
+            )
 
             gross_margin_val = gross_profit / total_revenue if total_revenue != 0 else 0
 
@@ -566,7 +668,11 @@ for ticker in tickers:
             
         if 'Tax Rate For Calcs' in financials.index:
 
-            tax_rate = safe_first_value(financials, 'Tax Rate For Calcs', default=0)
+            tax_rate = safe_first_value(
+                df = financials, 
+                row_label = 'Tax Rate For Calcs', 
+                default = 0
+            )
 
         else:
 
@@ -574,7 +680,11 @@ for ticker in tickers:
 
         if 'Total Revenue' in financials.index and 'Current Assets' in balance_sheet.index:
 
-            total_revenue = safe_first_value(financials, 'Total Revenue', default=0)
+            total_revenue = safe_first_value(
+                df = financials, 
+                row_label = 'Total Revenue', 
+                default = 0
+            )
 
             try:
 
@@ -729,7 +839,9 @@ targets_df.columns = targets_df.columns.astype(str)
 
 targets_df = targets_df.reindex(sorted(targets_df.index))
 
-def map_yfinance_industry(yf_industry: str) -> str:
+def map_yfinance_industry(
+    yf_industry: str
+) -> str:
     """
     Map a yfinance industry string to a high-level industry name.
     Defaults to "Diversified" if not recognized.
@@ -737,7 +849,9 @@ def map_yfinance_industry(yf_industry: str) -> str:
 
     return IndustryMap.get(yf_industry, "Diversified")
 
-def map_yfinance_sector(yf_sector: str) -> str:
+def map_yfinance_sector(
+    yf_sector: str
+) -> str:
     """
     Map a yfinance sector string to a high-level sector name.
     Defaults to "Other" if not recognized.
@@ -913,19 +1027,32 @@ targets_df.rename(
     inplace=True
 )
 
-def compute_z_score(n: int) -> float:
+def compute_z_score(
+    n: int
+) -> float:
     """
     Compute z-score given a count of opinions (number of analysts).
     """
     if n == 2:
+     
         n += 1
+    
     alpha = 1 / n
+    
     return st.norm.ppf(1 - alpha)
 
 
-def rets_variable_yahoo(meanY: float, medianY: float, minY: float, maxY: float,
-                        nY: float, price: float, beta: float, div: float = 0,
-                        threshold: float = 0.10) -> Tuple[float, float, float, float]:
+def rets_variable_yahoo(
+    meanY: float, 
+    medianY: float, 
+    minY: float, 
+    maxY: float,
+    nY: float, 
+    price: float, 
+    beta: float, 
+    div: float = 0,
+    threshold: float = 0.10
+) -> Tuple[float, float, float, float]:
     """
     Compute expected return, volatility, and related statistics based on analyst data.
     """
@@ -958,7 +1085,9 @@ def rets_variable_yahoo(meanY: float, medianY: float, minY: float, maxY: float,
 
         expected_return = ((meanY / price)) - 1
 
-        z_score = compute_z_score(int(nY))
+        z_score = compute_z_score(
+            n = int(nY)
+        )
 
         sigma_return = (maxY - minY) / (2 * z_score * price)
 
@@ -1005,8 +1134,14 @@ for ticker in tickers:
             continue
 
         analyst_results[ticker] = rets_variable_yahoo(
-            meanY, medianY, minY, maxY,
-            nY, price, beta, div
+            meanY = meanY, 
+            medianY = medianY, 
+            minY = minY, 
+            maxY = maxY,
+            nY = nY, 
+            price = price, 
+            beta = beta, 
+            div = div
         )
 
 Analyst_Target_Data = []
@@ -1037,6 +1172,8 @@ sheets_to_write = {
     "Analyst Target": Analyst_Target_df,
 }
 
-export_results(sheets_to_write)
+export_results(
+    sheets = sheets_to_write
+)
 
 logger.info("Data has been uploaded to Excel with conditional formatting applied, and all sheets are now tables.")
