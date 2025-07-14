@@ -323,7 +323,9 @@ def main() -> None:
     fdata = FinancialForecastData()
 
     macro = fdata.macro
+    
     r = macro.r
+    
     tickers = r.tickers
 
     growth_hist = fdata.regression_dict()
@@ -345,7 +347,7 @@ def main() -> None:
         res = process_ticker(
             tk = ticker,
             growth = ticker_hist,
-            macro_forecast = ticker_macro_forecast,
+            macro_forecasts = ticker_macro_forecast,
             fin_forecast = ticker_forecast,
             n_boot = 50,
         )
@@ -364,9 +366,17 @@ def main() -> None:
     
     out_file = Path(config.MODEL_FILE)
     
-    with pd.ExcelWriter(out_file, mode="a", engine="openpyxl", if_sheet_exists="replace") as writer:
+    with pd.ExcelWriter(
+        out_file, 
+        mode = "a",
+        engine = "openpyxl", 
+        if_sheet_exists = "replace"
+    ) as writer:
     
-        df.to_excel(writer, sheet_name="Lin Reg Returns")
+        df.to_excel(
+            writer, 
+            sheet_name = "Lin Reg Returns"
+        )
 
 
 if __name__ == "__main__":
