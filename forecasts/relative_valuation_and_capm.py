@@ -14,245 +14,335 @@ Runs relative‑valuation models
 as well as the cost‑of‑equity calculation.
 """
 
-import datetime as dt
 import numpy as np
 import pandas as pd
 import logging
+
 from maps.index_mapping import INDEX_MAPPING
 from functions.black_litterman_model import black_litterman
 from functions.capm import capm_model
 from rel_val.price_to_sales import price_to_sales_price_pred
 from rel_val.pe import pe_price_pred
 from rel_val.ev import ev_to_sales_price_pred
-from rel_val.pbv import price_to_book_pred 
+from rel_val.pbv import price_to_book_pred
 from data_processing.ratio_data import RatioData
-from data_processing.financial_forecast_data import FinancialForecastData
+from data_processing.financial_forecast_data4 import FinancialForecastData
 from functions.export_forecast import export_results
 from rel_val.graham_model import graham_number
 from rel_val.relative_valuation import rel_val_model
 from maps.currency_mapping import country_to_pair
 from functions.coe import calculate_cost_of_equity
-from data_processing.macro_data import MacroData
+from data_processing.macro_data3 import MacroData
+from fetch_data.factor_data import load_factor_data
+from functions.factor_simulations import factor_sim
+from functions.fama_french_5_pred import ff5_pred
+from functions.fama_french_3_pred import ff3_pred
 import config
-
 
 logger = logging.getLogger(__name__)
 
-def run_black_litterman_on_indexes(indr: RatioData,
-                                   annual_index_ret: pd.Series,
-                                   tau=1,
-                                   delta=2.5):
 
-    idx_df = indr.load_index_pred()
+def run_black_litterman_on_indexes(
+    annual_ret: pd.Series,
+    hist_ret: pd.DataFrame,
+    future_q_rets: pd.DataFrame,
+    tau: float = None,
+    delta: float = None
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Runs Black–Litterman for each forecast quarter:
+      - Uses historical covariance (annualized)
+      - Uses identity P for independent views
+      - Prior (pi) = quarterlyized annual returns
+      - Default tau and delta if not supplied
+    Returns: bl_df (posterior returns) and last sigma_bl
+    """
 
-    for col in idx_df.columns:
+    assets = annual_ret.index.intersection(future_q_rets.index)
 
-        idx_df[col] = pd.to_numeric(idx_df[col].astype(str).str.replace(',', '', regex=False), errors='coerce')
+    pi_ann = annual_ret.loc[assets]
 
-    mapped_idx = [INDEX_MAPPING.get(name, name) for name in idx_df.index]
-
-    idx_df.index = pd.Index(mapped_idx, name=idx_df.index.name)
-
-    idx_df['Q4_Return'] = (idx_df['Q1/26'] / idx_df['Last']) - 1
-
-    logger.info("Q4/25 implied returns:\n%s", idx_df['Q4_Return'])
-
-    common_idx = idx_df.index.intersection(annual_index_ret.index)
-
-    if len(common_idx) == 0:
-
-        logger.warning("No common indexes between predictions and annual market returns. BL cannot proceed.")
-
-        return None, None
-
-    idx_df = idx_df.loc[common_idx]
-
-    prior = annual_index_ret.loc[common_idx]
-
-    _, weekly_returns = indr.index_returns()
-
-    common_cov_idx = idx_df.index.intersection(weekly_returns.columns)
-
-    if len(common_cov_idx) == 0:
-
-        logger.warning("No common indexes for covariance. Falling back to diagonal covariance.")
-
-        n_idx = len(idx_df)
-
-        sigma_prior = pd.DataFrame(np.diag([0.05] * n_idx), index=idx_df.index, columns=idx_df.index)
-
-    else:
-
-        sigma_prior = weekly_returns[common_cov_idx].cov() * 52
-
-    sigma_prior_diag = pd.DataFrame(np.diag(np.diag(sigma_prior.values)),
-                                    index=sigma_prior.index,
-                                    columns=sigma_prior.columns)
-
-    n_idx = len(idx_df)
-
-    w_prior = pd.Series(1.0 / n_idx, index=idx_df.index, name='w_prior')
-
-    P = pd.DataFrame(np.eye(n_idx), index=idx_df.index, columns=idx_df.index)
-
-    Q = idx_df['Q4_Return']
-
-    mu_bl, sigma_bl = black_litterman(
-        w_prior=w_prior,
-        sigma_prior=sigma_prior_diag,
-        p=P,
-        q=Q,
-        omega=None,
-        delta=delta,
-        tau=tau,
-        prior=prior
-    )
-
-    bl_df = pd.DataFrame({
-        'Prior Market Return': prior,
-        'View Return (Q4)': Q,
-        'Posterior Market Return': mu_bl
-    })
+    pi_q = (1 + pi_ann) ** (1/4) - 1
     
-    bl_df.index.name = 'Index'
+    cov_hist = hist_ret[assets].cov()
+  
+    sigma_prior = cov_hist * 52/4
+        
+    k = len(assets)
+    
+    if delta is None:
 
-    logger.info("Black–Litterman posterior market returns:\n%s", bl_df)
+        w_eq = pd.Series(1.0 / k, index = assets)
+        
+        delta = float(pi_q.dot(w_eq) / (w_eq.T.dot(sigma_prior).dot(w_eq)))
+
+    if tau is None:
+        
+        tau = 1.0 / (len(hist_ret) - k - 1)
+
+    w_prior = pd.Series(1.0 / len(assets), index=assets)
+
+    bl_post = {}
+    sigma_bl = None
+    
+    common = future_q_rets.index.intersection(annual_ret.index)
+    
+    future_q_rets = future_q_rets.loc[common]
+            
+    P = pd.DataFrame(np.eye(len(assets)), index = assets, columns = assets)
+
+    for col in future_q_rets.columns:
+        
+        Q = future_q_rets[col].loc[assets]
+
+        mu, sigma_bl = black_litterman(
+            w_prior = w_prior,
+            sigma_prior = sigma_prior,
+            p = P,
+            q = Q,
+            omega = None,
+            delta = delta,
+            tau = tau,
+            prior = pi_q, 
+            confidence = 0.1
+        )
+       
+        bl_post[col] = mu
+
+    bl_df = pd.DataFrame(bl_post)
+
+    bl_df['Ann'] = (1 + bl_df).prod(axis=1) - 1
 
     return bl_df, sigma_bl
 
 
-def blend_fx_returns(hist_series, annual_forecast, weight=0.5):
-    """
-    Return a weighted average of historical and forecast FX returns.
-    """
-    
+def blend_fx_returns(
+    hist_series: pd.Series,
+    annual_forecast: pd.Series,
+    weight: float = 0.5
+) -> pd.Series:
+  
     hist_series.index = hist_series.index.str.replace(r'=X$', '', regex=True)
-
-    hist, fc = hist_series.align(annual_forecast, join='inner')
-    blended = (weight * hist) + ((1 - weight) * fc)
-    
-    return blended
+  
+    h, f = hist_series.align(annual_forecast, join='inner')
+  
+    return weight * h + (1 - weight) * f
 
 
 def main():
-    
-    s5 = np.sqrt(5)
+   
+    s5  = np.sqrt(5)
     s52 = np.sqrt(52)
 
-    logger.info("Importing Data from Excel")
-    
+    logger.info("Importing data…")
+   
     macro = MacroData()
-
+   
     r = RatioData()
-    
+   
     crp = r.crp()
-    
-    print("CRP", crp)
-            
+   
+    print("CRP:\n", crp)
+
     fdata = FinancialForecastData()
+
+    overall_ann_rets, overall_weekly_rets, overall_quarter_rets = r.index_returns()
+
+    idx_levels = r.load_index_pred()
+   
+    for col in idx_levels.columns:
+   
+        idx_levels[col] = pd.to_numeric(
+            idx_levels[col].astype(str).str.replace(',', '', regex = False),
+            errors = 'coerce'
+        )
+        
+    idx_levels.index = [INDEX_MAPPING.get(i, i) for i in idx_levels.index]
+
+    future_q_rets = (
+        idx_levels
+        .div(idx_levels.shift(axis=1))
+        .sub(1)
+        .iloc[:, 1:]
+    )
     
-    overall_ann_rets, overall_weekly_rets = r.index_returns()
+    future_q_rets.columns = [f"Q{i+1}" for i in range(future_q_rets.shape[1])]
+
+    bl_df, bl_cov = run_black_litterman_on_indexes(
+        annual_ret = overall_ann_rets,
+        hist_ret = overall_weekly_rets,
+        future_q_rets = future_q_rets,
+        tau = None,
+        delta = None
+    )
     
-    bl_df, bl_cov = run_black_litterman_on_indexes(r, overall_ann_rets)     
+    print("BL posterior:\n", bl_df)
     
-    print('bl_df', bl_df)
+    print("BL covariance:\n", bl_cov)
 
     tickers = r.tickers
     
     weekly_ret = r.weekly_rets
     
     temp_analyst = r.analyst
-
+    
     latest_prices = r.last_price
-
+    
     stock_exchange = temp_analyst['fullExchangeName']
     
-    enterprise_value = temp_analyst['enterpriseValue']
+    enterprise_val = temp_analyst['enterpriseValue']
     
-    marketCap = temp_analyst['marketCap']
+    market_cap = temp_analyst['marketCap']
     
     country = temp_analyst['country']
     
-    mc_ev = enterprise_value / marketCap
-    
-    bl_market_dict = bl_df['Posterior Market Return'] if bl_df is not None else None
-    
-    capm_bl_data = []
-    capm_hist = []
+    mc_ev = enterprise_val / market_cap
 
+    bl_market_dict = bl_df['Ann']
+
+    capm_bl_list = []
+    capm_hist_list = []
+    
     beta = temp_analyst['beta']
 
     for ticker in tickers:
         
-        exchange = stock_exchange.loc[ticker]
+        exch = stock_exchange.loc[ticker]
 
-        matched_index_ret_bl, matched_index_weekly_bl = r.match_index_rets(
-            exchange,
-            overall_ann_rets,
-            overall_weekly_rets,
-            bl_market_returns=bl_market_dict
-        )
-        
-        matched_index_ret, matched_index_weekly = r.match_index_rets(
-            exchange,
-            overall_ann_rets,
-            overall_weekly_rets
+        ann_bl, weekly_bl = r.match_index_rets(
+            exchange = exch,
+            index_rets = overall_ann_rets,
+            index_weekly_rets = overall_weekly_rets,
+            index_quarter_rets = overall_quarter_rets,
+            bl_market_returns = bl_market_dict,
+            freq = "annual"
         )
 
-        market_vol = np.sqrt(matched_index_weekly_bl.var())
+        ann_hist, weekly_hist = r.match_index_rets(
+            exchange = exch,
+            index_rets = overall_ann_rets,
+            index_weekly_rets = overall_weekly_rets,
+            index_quarter_rets = overall_quarter_rets
+        )
 
+        vol_market = np.sqrt(weekly_bl.var())
+       
         b_stock = beta.get(ticker, 1.0)
 
-        vol_capm_bl, ret_capm_bl = capm_model(b_stock, market_vol, config.RF, matched_index_ret_bl, weekly_ret[ticker], matched_index_weekly_bl)
-                
-        vol_capm_hist, ret_capm_hist = capm_model(b_stock, market_vol, config.RF, matched_index_ret, weekly_ret[ticker], matched_index_weekly)
-                
-        cur_price = latest_prices.get(ticker, np.nan)
+        vol_bl, ret_bl = capm_model(
+            beta_stock = b_stock, 
+            market_volatility = vol_market, 
+            risk_free_rate = config.RF,
+            market_return = ann_bl, 
+            weekly_ret = weekly_ret[ticker], 
+            index_weekly_ret = weekly_bl
+        )
+        
+        vol_hist, ret_hist = capm_model(
+            beta_stock = b_stock, 
+            market_volatility = vol_market, 
+            risk_free_rate = config.RF,
+            market_return = ann_hist, 
+            weekly_ret = weekly_ret[ticker], 
+            index_weekly_ret = weekly_hist
+        )
 
-        capm_bl_data.append({
+        price = latest_prices.get(ticker, np.nan)
+        
+        capm_bl_list.append({
             "Ticker": ticker,
-            "Current Price": cur_price,
-            "Avg Price": cur_price * (1 + ret_capm_bl) if not pd.isna(cur_price) else np.nan,
-            "Returns": ret_capm_bl,
-            "Daily Volatility": vol_capm_bl / s5,
-            "SE": vol_capm_bl * s52
+            "Current Price": price,
+            "Avg Price": price * (1 + ret_bl) if not pd.isna(price) else np.nan,
+            "Returns": ret_bl,
+            "Daily Volatility": vol_bl / s5,
+            "SE": vol_bl * s52
         })
         
-        capm_hist.append({
+        capm_hist_list.append({
             "Ticker": ticker,
-            "Current Price": cur_price,
-            "Avg Price": cur_price * (1 + ret_capm_hist) if not pd.isna(cur_price) else np.nan,
-            "Returns": ret_capm_hist,
-            "Daily Volatility": vol_capm_hist / s5,
-            "SE": vol_capm_hist * s52
+            "Current Price": price,
+            "Avg Price": price * (1 + ret_hist) if not pd.isna(price) else np.nan,
+            "Returns": ret_hist,
+            "Daily Volatility": vol_hist / s5,
+            "SE": vol_hist * s52
         })
         
-    hist_ann_fx, fx_rets = r.get_currency_annual_returns(country_to_pair)
-    fx_fc = macro.convert_to_gbp_rates(current_col='Last', future_col='Q1/26')
-    pred_fx_growth = fx_fc['Pred Change (%)']
-        
-    pred_cur_growth = blend_fx_returns(
-        hist_series=hist_ann_fx,
-        annual_forecast=pred_fx_growth,
-        weight=0.5
+    capm_bl_pred_df = pd.DataFrame(capm_bl_list).set_index("Ticker")
+   
+    capm_hist_df = pd.DataFrame(capm_hist_list).set_index("Ticker")
+
+    hist_ann_fx, fx_rets = r.get_currency_annual_returns(
+        country_to_pair = country_to_pair
     )
-    
-    spx_ret = bl_df.at['^GSPC', 'Posterior Market Return']
+   
+    fx_fc = macro.convert_to_gbp_rates(
+        current_col = 'Last', 
+        future_col = 'Q1/26'
+    )
+   
+    pred_fx_growth = fx_fc['Pred Change (%)']
+   
+    blended_fx = blend_fx_returns(
+        hist_series = hist_ann_fx, 
+        annual_forecast = pred_fx_growth
+    )
 
-    capm_bl_pred_df = pd.DataFrame(capm_bl_data).set_index("Ticker")
-    capm_hist_df = pd.DataFrame(capm_hist).set_index("Ticker")
+    spx_ret = bl_df.loc['^GSPC']
+    
+    spx_ret_series = bl_df.loc['^GSPC', ['Q1','Q2','Q3','Q4']]
+
+    index_close = r.index_close['^GSPC'].sort_index()
     
     coe_df = calculate_cost_of_equity(
-        tickers=tickers,
-        rf=config.RF,
-        beta_series=beta,
-        spx_expected_return=spx_ret,
-        crp_df=crp,
-        currency_bl_df=pred_cur_growth,
-        country_to_pair=country_to_pair,
-        ticker_country_map=country,        
+        tickers = tickers,
+        rf = config.RF,
+        returns = weekly_ret,
+        index_close = index_close,
+        spx_expected_return = spx_ret['Ann'],
+        crp_df = crp,
+        currency_bl_df = blended_fx,
+        country_to_pair = country_to_pair,
+        ticker_country_map = country
+    )
+
+    ff5_m, ff3_m, ff5_q, ff3_q = load_factor_data()
+    
+    cov5, E5_q, sims_5 = factor_sim(
+        factor_data = ff5_q, 
+        num_factors = 5, 
+        n_sims = 1_000, 
+        horizon = 4
+    )
+
+    cov3, E3_q, sims_3 = factor_sim(
+        factor_data = ff3_q, 
+        num_factors = 3, 
+        n_sims = 1_000, 
+        horizon = 4
+    )
+        
+    ff5_results = ff5_pred(
+        tickers = tickers,
+        factor_data = ff5_q,
+        weekly_ret = r.quarterly_rets,
+        Cov_tv = cov5,
+        E_factors_12m = E5_q,
+        E_mkt_ret = spx_ret_series,
+        sims = sims_5,
+        rf = config.RF
     )
     
+    ff3_results = ff3_pred(
+        tickers = tickers,
+        factor_data = ff3_q,
+        weekly_ret = r.quarterly_rets,
+        Cov_tv = cov3,
+        E_factors_12m = E3_q,
+        E_mkt_ret = spx_ret_series,
+        sims = sims_3,
+        rf = config.RF
+    )
+
     low_rev_y = temp_analyst['Low Revenue Estimate']
     avg_rev_y = temp_analyst['Avg Revenue Estimate']
     high_rev_y = temp_analyst['High Revenue Estimate']
@@ -260,43 +350,49 @@ def main():
     low_eps_y = temp_analyst['Low EPS Estimate']
     avg_eps_y = temp_analyst['Avg EPS Estimate']
     high_eps_y = temp_analyst['High EPS Estimate']
-   
+
     ps = temp_analyst['priceToSalesTrailing12Months']
     cpe = temp_analyst['priceEpsCurrentYear']
     tpe = temp_analyst['trailingPE']
+    
     evts = temp_analyst['enterpriseToRevenue'].copy()
+
+    shares_out = temp_analyst['sharesOutstanding']
     
-    shares_outstanding = temp_analyst['sharesOutstanding']
     dps = temp_analyst['lastDividendValue']
-    ptb_y = temp_analyst['priceToBook']
     
+    ptb_y = temp_analyst['priceToBook']
+
     results = r.dicts()
 
-    pe_pred_list = []
-    evs_pred_list = []
-    ps_pred_list = []
-    pbv_pred_list = []
-    graham_pred_list = []
-    rel_val_list = []
+    pe_pred_list, evs_pred_list, ps_pred_list, pbv_pred_list, graham_pred_list, rel_val_list = ([] for _ in range(6))
 
     for ticker in tickers:
-                
-        forecast_df = fdata.forecast[ticker][['low_eps', 'avg_eps', 'high_eps', 'low_rev', 'avg_rev', 'high_rev']].iloc[0]
-                
-        kpis = fdata.kpis[ticker][["exp_pe", "exp_ps", "exp_ptb", "exp_evs", "bvps_0"]].iloc[0]
-                
+       
+        forecast_df = (
+            fdata.forecast[ticker]
+            [['low_eps', 'avg_eps', 'high_eps', 'low_rev', 'avg_rev', 'high_rev']]
+            .iloc[0]
+        )
+        
+        kpis = (
+            fdata.kpis[ticker]
+            [["exp_pe", "exp_ps", "exp_ptb", "exp_evs", "bvps_0"]]
+            .iloc[0]
+        )
+        
         r_pe = pe_price_pred(
-            forecast_df['low_eps'],
-            forecast_df['avg_eps'],
-            forecast_df['high_eps'],
-            low_eps_y.get(ticker, np.nan),
-            avg_eps_y.get(ticker, np.nan),
-            high_eps_y.get(ticker, np.nan),
-            cpe.get(ticker, np.nan),
-            tpe.get(ticker, np.nan),
-            results['PE'][ticker],
-            kpis['exp_pe'],
-            latest_prices.get(ticker, 0)
+            eps_low = forecast_df['low_eps'],
+            eps_avg = forecast_df['avg_eps'],
+            eps_high = forecast_df['high_eps'],
+            eps_low_y = low_eps_y.get(ticker, np.nan),
+            eps_avg_y = avg_eps_y.get(ticker, np.nan),
+            eps_high_y = high_eps_y.get(ticker, np.nan),
+            pe_c = cpe.get(ticker, np.nan),
+            pe_t = tpe.get(ticker, np.nan),
+            pe_ind = results['PE'][ticker],
+            avg_pe_fs = kpis['exp_pe'],
+            price = latest_prices.get(ticker, 0)
         )
      
         pe_pred_list.append({
@@ -311,18 +407,18 @@ def main():
         })
     
         r_evs = ev_to_sales_price_pred(
-            latest_prices.get(ticker, 0),
-            forecast_df['low_rev'],
-            forecast_df['avg_rev'],
-            forecast_df['high_rev'],
-            low_rev_y.get(ticker, np.nan),
-            avg_rev_y.get(ticker, np.nan),
-            high_rev_y.get(ticker, np.nan),
-            shares_outstanding.get(ticker, 0),
-            evts[ticker],
-            kpis['exp_evs'], 
-            results['EVS'][ticker],
-            mc_ev.get(ticker, 1),
+            price = latest_prices.get(ticker, 0),
+            low_rev = forecast_df['low_rev'],
+            avg_rev = forecast_df['avg_rev'],
+            high_rev = forecast_df['high_rev'],
+            low_rev_y = low_rev_y.get(ticker, np.nan),
+            avg_rev_y = avg_rev_y.get(ticker, np.nan),
+            high_rev_y = high_rev_y.get(ticker, np.nan),
+            shares_outstanding = shares_out.get(ticker, 0),
+            evs = evts[ticker],
+            avg_fs_ev = kpis['exp_evs'], 
+            ind_evs = results['EVS'][ticker],
+            mc_ev = mc_ev.get(ticker, 1),
         )
     
         evs_pred_list.append({
@@ -337,17 +433,17 @@ def main():
         })
     
         r_ps = price_to_sales_price_pred(
-            latest_prices.get(ticker, 0),
-            low_rev_y.get(ticker, np.nan),
-            avg_rev_y.get(ticker, np.nan),
-            high_rev_y.get(ticker, np.nan),
-            forecast_df['low_rev'],
-            forecast_df['avg_rev'],
-            forecast_df['high_rev'],
-            shares_outstanding.get(ticker, 0),
-            ps[ticker],
-            kpis['exp_ps'],
-            results['PS'][ticker],
+            price = latest_prices.get(ticker, 0),
+            low_rev_y = low_rev_y.get(ticker, np.nan),
+            avg_rev_y = avg_rev_y.get(ticker, np.nan),
+            high_rev_y = high_rev_y.get(ticker, np.nan),
+            low_rev = forecast_df['low_rev'],
+            avg_rev = forecast_df['avg_rev'],
+            high_rev = forecast_df['high_rev'],
+            shares_outstanding = shares_out.get(ticker, 0),
+            ps = ps[ticker],
+            avg_ps_fs = kpis['exp_ps'],
+            ind_ps = results['PS'][ticker],
         )
     
         ps_pred_list.append({
@@ -361,19 +457,19 @@ def main():
             "Avg PS": r_ps[5]
         })
 
-        r_pbv =  price_to_book_pred(
-            forecast_df['low_eps'],
-            forecast_df['avg_eps'],
-            forecast_df['high_eps'],
-            low_eps_y.get(ticker, np.nan),
-            avg_eps_y.get(ticker, np.nan),
-            high_eps_y.get(ticker, np.nan),
-            ptb_y[ticker],
-            kpis['exp_ptb'],
-            results['PB'][ticker],
-            kpis['bvps_0'],
-            dps.get(ticker, 0),
-            latest_prices.get(ticker, 0)
+        r_pbv = price_to_book_pred(
+            low_eps = forecast_df['low_eps'],
+            avg_eps = forecast_df['avg_eps'],
+            high_eps = forecast_df['high_eps'],
+            low_eps_y = low_eps_y.get(ticker, np.nan),
+            avg_eps_y = avg_eps_y.get(ticker, np.nan),
+            high_eps_y = high_eps_y.get(ticker, np.nan),
+            ptb = ptb_y[ticker],
+            avg_ptb_fs = kpis['exp_ptb'],
+            ptb_ind = results['PB'][ticker],
+            book_fs = kpis['bvps_0'],
+            dps = dps.get(ticker, 0),
+            price = latest_prices.get(ticker, 0)
         )
       
         pbv_pred_list.append({
@@ -388,17 +484,17 @@ def main():
         })
         
         r_graham = graham_number(
-            results['PE'][ticker],
-            forecast_df['low_eps'],
-            forecast_df['avg_eps'],
-            forecast_df['high_eps'],
-            latest_prices.get(ticker, 0),
-            results['PB'][ticker],
-            kpis['bvps_0'],
-            dps.get(ticker, 0),
-            low_eps_y.get(ticker, np.nan),
-            avg_eps_y.get(ticker, np.nan),
-            high_eps_y.get(ticker, np.nan)
+            pe_ind = results['PE'][ticker],
+            eps_low = forecast_df['low_eps'],
+            eps_avg = forecast_df['avg_eps'],
+            eps_high = forecast_df['high_eps'],
+            price = latest_prices.get(ticker, 0),
+            pb_ind = results['PB'][ticker],
+            bvps_0 = kpis['bvps_0'],
+            dps = dps.get(ticker, 0),
+            low_eps_y = low_eps_y.get(ticker, np.nan),
+            avg_eps_y = avg_eps_y.get(ticker, np.nan),
+            high_eps_y = high_eps_y.get(ticker, np.nan)
         )
         
         graham_pred_list.append({
@@ -412,36 +508,36 @@ def main():
         })
         
         r_rel_val = rel_val_model(
-            forecast_df['low_eps'],
-            forecast_df['avg_eps'],
-            forecast_df['high_eps'],
-            low_eps_y.get(ticker, np.nan),
-            avg_eps_y.get(ticker, np.nan),
-            high_eps_y.get(ticker, np.nan),
-            forecast_df['low_rev'],
-            forecast_df['avg_rev'],
-            forecast_df['high_rev'],
-            low_rev_y.get(ticker, np.nan),
-            avg_rev_y.get(ticker, np.nan),
-            high_rev_y.get(ticker, np.nan),
-            cpe.get(ticker, np.nan),
-            tpe.get(ticker, np.nan),
-            results['PE'][ticker],
-            kpis['exp_pe'],
-            ps[ticker],
-            kpis['exp_ps'],
-            results['PS'][ticker],
-            ptb_y[ticker],
-            kpis['exp_ptb'],
-            results['PB'][ticker],
-            evts[ticker],
-            kpis['exp_evs'], 
-            results['EVS'][ticker],
-            mc_ev.get(ticker, 1),
-            kpis['bvps_0'],
-            dps.get(ticker, 0),
-            shares_outstanding.get(ticker, 0),
-            latest_prices.get(ticker, 0)
+            low_eps = forecast_df['low_eps'],
+            avg_eps = forecast_df['avg_eps'],
+            high_eps = forecast_df['high_eps'],
+            low_eps_y = low_eps_y.get(ticker, np.nan),
+            avg_eps_y = avg_eps_y.get(ticker, np.nan),
+            high_eps_y = high_eps_y.get(ticker, np.nan),
+            low_rev = forecast_df['low_rev'],
+            avg_rev = forecast_df['avg_rev'],
+            high_rev = forecast_df['high_rev'],
+            low_rev_y = low_rev_y.get(ticker, np.nan),
+            avg_rev_y = avg_rev_y.get(ticker, np.nan),
+            high_rev_y = high_rev_y.get(ticker, np.nan),
+            pe_c = cpe.get(ticker, np.nan),
+            pe_t = tpe.get(ticker, np.nan),
+            pe_ind = results['PE'][ticker],
+            avg_pe_fs = kpis['exp_pe'],
+            ps = ps[ticker],
+            avg_ps_fs = kpis['exp_ps'],
+            ind_ps = results['PS'][ticker],
+            ptb = ptb_y[ticker],
+            avg_ptb_fs = kpis['exp_ptb'],
+            ptb_ind = results['PB'][ticker],
+            evs = evts[ticker],
+            avg_fs_ev = kpis['exp_evs'], 
+            ind_evs = results['EVS'][ticker],
+            mc_ev = mc_ev.get(ticker, 1),
+            bvps_0 = kpis['bvps_0'],
+            dps = dps.get(ticker, 0),
+            shares_outstanding = shares_out.get(ticker, 0),
+            price = latest_prices.get(ticker, 0)
         )
         
         rel_val_list.append({
@@ -453,28 +549,38 @@ def main():
             "Returns": r_rel_val[3],
             "SE": r_rel_val[4]
         })
-    
+
     pe_pred_df = pd.DataFrame(pe_pred_list).set_index("Ticker")
     evs_pred_df = pd.DataFrame(evs_pred_list).set_index("Ticker")
     ps_pred_df = pd.DataFrame(ps_pred_list).set_index("Ticker")
     pbv_pred_df = pd.DataFrame(pbv_pred_list).set_index("Ticker")
     graham_pred_df = pd.DataFrame(graham_pred_list).set_index("Ticker")
     rel_val_pred_df = pd.DataFrame(rel_val_list).set_index("Ticker")
-    
-    sheets_to_write = {
+        
+    rel_val_sheets = {
         'BL Index Preds': bl_df,
-        'CAPM Pred': capm_hist_df,
-        'CAPM BL Pred': capm_bl_pred_df,
+        'CAPM BL Pred': capm_hist_df,
         'PS Price Pred': ps_pred_df,
         'EVS Price Pred': evs_pred_df,
         'PE Pred': pe_pred_df,
         'PBV Pred': pbv_pred_df,
         'Graham Pred': graham_pred_df,
+    }
+    export_results(
+        sheets = rel_val_sheets, 
+        output_excel_file = config.REL_VAL_FILE
+    )
+
+    sheets_to_write = {
+        'CAPM BL Pred': capm_bl_pred_df,
         'Rel Val Pred': rel_val_pred_df,
         'COE': coe_df,
+        'FF3 Pred': ff3_results,
+        'FF5 Pred': ff5_results
     }
-    
-    export_results(sheets_to_write)
+    export_results(
+        sheets = sheets_to_write
+    )
 
 
 if __name__ == "__main__":
