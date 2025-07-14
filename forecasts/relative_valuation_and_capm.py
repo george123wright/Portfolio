@@ -26,7 +26,7 @@ from rel_val.pe import pe_price_pred
 from rel_val.ev import ev_to_sales_price_pred
 from rel_val.pbv import price_to_book_pred
 from data_processing.ratio_data import RatioData
-from data_processing.financial_forecast_data4 import FinancialForecastData
+from data_processing.financial_forecast_data import FinancialForecastData
 from functions.export_forecast import export_results
 from rel_val.graham_model import graham_number
 from rel_val.relative_valuation import rel_val_model
