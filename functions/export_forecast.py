@@ -6,16 +6,20 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from openpyxl.formatting.rule import CellIsRule, FormulaRule, ColorScaleRule
 from openpyxl.utils import get_column_letter
+from openpyxl.cell.cell import MergedCell
 from openpyxl.worksheet.table import Table, TableStyleInfo
 import pandas as pd
-import datetime as dt
-
+import os
 import config
 
 
-def export_results(sheets, output_excel_file=None):
+def export_results(
+    sheets, 
+    output_excel_file = None
+):
     
     if not output_excel_file:
+        
         output_excel_file = config.FORECAST_FILE
         
     with pd.ExcelWriter(
@@ -26,6 +30,7 @@ def export_results(sheets, output_excel_file=None):
     ) as writer:
         
         for name, df in sheets.items():
+          
             df.to_excel(writer, sheet_name=name, index=True)
 
     wb = load_workbook(output_excel_file)
@@ -40,10 +45,13 @@ def export_results(sheets, output_excel_file=None):
         ws = wb[sheet_name]  
 
         for cell in ws[1]:
+        
             if isinstance(cell, MergedCell):
+        
                 continue
 
             if not isinstance(cell.value, str):
+        
                 cell.value = "" if cell.value is None else str(cell.value)
      
         max_row = ws.max_row
@@ -56,19 +64,27 @@ def export_results(sheets, output_excel_file=None):
         }
 
         cp_col  = header_map.get('Current Price')
+        
         low_col = header_map.get('Low Price')
         avg_col = header_map.get('Avg Price')
         med_col = header_map.get('Median Price')
         high_col = header_map.get('High Price')
+        
         ret_col = header_map.get('Returns')
         low_ret_col = header_map.get('Low Returns')
         high_ret_col = header_map.get('High Returns')
+        
         score_col = header_map.get('Score')
+        
         buy_col = header_map.get('Buy')
         sell_col = header_map.get('Sell')
+        
         msr_col = header_map.get('MSR')
+        
         sortino_col = header_map.get('Sortino')
+        
         mir_col = header_map.get('MIR')
+        
         comb_col = header_map.get('Combination')
                 
         if ret_col:
@@ -276,7 +292,6 @@ def export_results(sheets, output_excel_file=None):
         ws.add_table(table)
 
     wb.save(output_excel_file)
-    wb.close()
-    
+   
     wb.close()
     
