@@ -7,7 +7,6 @@ import re
 import time
 import logging
 import requests
-import datetime as dt
 import pandas as pd
 from collections import Counter
 from typing import List, Dict, Any
@@ -60,7 +59,9 @@ NOTTICKERS = {
 }
 
 
-def get_wsb_posts(limit: int = 100) -> List[Dict[str, Any]]:
+def get_wsb_posts(
+    limit: int = 100
+) -> List[Dict[str, Any]]:
     """
     Fetch posts from r/wallstreetbets via Reddit’s public API. If rate-limited or any request
     exception occurs, logs a warning and returns an empty list.
@@ -93,7 +94,9 @@ def get_wsb_posts(limit: int = 100) -> List[Dict[str, Any]]:
     return data.get("data", {}).get("children", [])
 
 
-def get_comments_for_post(post_id: str) -> List[str]:
+def get_comments_for_post(
+    post_id: str
+) -> List[str]:
     """
     Fetch all top-level and nested comments from a given post ID in r/wallstreetbets.
     Employs a small retry loop with exponential backoff if rate-limited.
@@ -157,7 +160,9 @@ def get_comments_for_post(post_id: str) -> List[str]:
 
     comments = []
 
-    def extract_comments(comments_list: List[Dict[str, Any]]) -> None:
+    def extract_comments(
+        comments_list: List[Dict[str, Any]]
+    ) -> None:
         """
         Recursively traverse comment threads and collect comment bodies.
         """
@@ -180,14 +185,20 @@ def get_comments_for_post(post_id: str) -> List[str]:
 
                 next_children = replies.get("data", {}).get("children", [])
 
-                extract_comments(next_children)
+                extract_comments(
+                    comments_list = next_children
+                )
 
-    extract_comments(comment_data)
+    extract_comments(
+        comments_list = comment_data
+    )
 
     return comments
 
 
-def extract_tickers(text: str) -> List[str]:
+def extract_tickers(
+    text: str
+) -> List[str]:
     """
     Extract potential stock ticker symbols from a given text, ignoring items from NOTTICKERS.
 
@@ -205,7 +216,9 @@ def extract_tickers(text: str) -> List[str]:
     return [ticker for ticker in tickers if ticker not in NOTTICKERS]
 
 
-def extract_words(text: str) -> List[str]:
+def extract_words(
+    text: str
+) -> List[str]:
     """
     Extract lowercased words from text, filtering out a predefined set of stopwords.
 
@@ -221,7 +234,10 @@ def extract_words(text: str) -> List[str]:
     return [word for word in words if word not in STOPWORDS]
 
 
-def format_sheet_as_table(excel_file: str, sheet_name: str) -> None:
+def format_sheet_as_table(
+    excel_file: str, 
+    sheet_name: str
+) -> None:
     """
     Formats an existing sheet in an Excel file as a table for improved readability.
 
@@ -286,7 +302,9 @@ def main() -> None:
 
     logger.info("Scraping WallStreetBets posts...")
 
-    posts = get_wsb_posts(limit=100)
+    posts = get_wsb_posts(
+        limit=100
+    )
 
     if not posts:
 
@@ -338,13 +356,17 @@ def main() -> None:
 
         combined_post_text = f"{title} {selftext}"
 
-        post_tickers = extract_tickers(title)
+        post_tickers = extract_tickers(
+            text = title
+        )
 
         if post_tickers:
 
             sentiment_scores = sia.polarity_scores(combined_post_text)
 
-            words_in_post = extract_words(combined_post_text)
+            words_in_post = extract_words(
+                text = combined_post_text
+            )
 
             for tkr in post_tickers:
 
@@ -354,11 +376,15 @@ def main() -> None:
 
                 ticker_sentiments.setdefault(tkr, []).append(sentiment_scores['compound'])
 
-        comments = get_comments_for_post(post_id)
+        comments = get_comments_for_post(
+            post_id = post_id
+        )
 
         for comment_text in comments:
 
-            comment_tickers = extract_tickers(comment_text)
+            comment_tickers = extract_tickers(
+                text = comment_text
+            )
 
             if not comment_tickers:
 
@@ -366,7 +392,9 @@ def main() -> None:
 
             comment_sentiment = sia.polarity_scores(comment_text)['compound']
 
-            comment_words = extract_words(comment_text)
+            comment_words = extract_words(
+                text = comment_text
+            )
 
             for tkr in comment_tickers:
 
@@ -441,18 +469,18 @@ def main() -> None:
 
             max_row = ws.max_row
 
-            red_fill = PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')
+            red_fill = PatternFill(start_color = 'FFC7CE', end_color = 'FFC7CE', fill_type = 'solid')
 
-            green_fill = PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid')
+            green_fill = PatternFill(start_color = 'C6EFCE', end_color = 'C6EFCE', fill_type = 'solid')
 
             ws.conditional_formatting.add(
                 f"{col_letter}2:{col_letter}{max_row}",
-                CellIsRule(operator='lessThan', formula=['0'], fill=red_fill)
+                CellIsRule(operator = 'lessThan', formula = ['0'], fill = red_fill)
             )
          
             ws.conditional_formatting.add(
                 f"{col_letter}2:{col_letter}{max_row}",
-                CellIsRule(operator='greaterThan', formula=['0'], fill=green_fill)
+                CellIsRule(operator = 'greaterThan', formula = ['0'], fill = green_fill)
             )
 
         logger.info("Sentiment findings successfully saved to Excel in '%s'.", config.FORECAST_FILE)
@@ -461,7 +489,10 @@ def main() -> None:
       
         logger.error("Failed to write sentiment findings to Excel: %s", exc)
 
-    format_sheet_as_table(config.FORECAST_FILE, 'Sentiment Findings')
+    format_sheet_as_table(
+        excel_file = config.FORECAST_FILE, 
+        sheet_name = 'Sentiment Findings'
+    )
 
 
 if __name__ == "__main__":
