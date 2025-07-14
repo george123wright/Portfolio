@@ -738,5 +738,3 @@ class FinancialForecastData:
 
         return growth    
 
-        return growth    
-
