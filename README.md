@@ -1,6 +1,6 @@
 # Portfolio Optimisation Toolkit
 
-This repository contains a collection of scripts for building equity return forecasts and constructing optimised portfolios. The code pulls data from online sources, generates valuation models and exports the results to Excel workbooks.
+This repository hosts a set of Python scripts for constructing equity portfolios using a range of quantitative valuation models and optimisation techniques. The workflow pulls market and fundamental data, generates forecasts with multiple statistical approaches and produces optimised portfolio allocations. The results are written to Excel workbooks for inspection or further analysis.
 
 ## Installation
 
@@ -15,39 +15,157 @@ Several scripts expect local Excel files as inputs/outputs (e.g. `Portfolio_Opti
 ## Repository Layout
 
 ```
-fetch_data/       - Utilities that download analyst fundamentals, price history and macro data
-data_processing/  - Cleaning functions and ratio loaders used by the forecasting models
-forecasts/        - Forecasting models (DCF, DCFE, Prophet, SARIMAX, regression) and the combined forecast
-functions/        - Reusable helpers: regression, CAPM/Black–Litterman, covariance utilities, Excel export
-Optimiser/        - Portfolio optimisation routines and the main optimisation script
-indicators/       - Technical analysis scores and Reddit sentiment scrapers
+fetch_data/       - Download analyst fundamentals, historical prices and macro data
+data_processing/  - Load and clean financial statements, ratios and macro series
+forecasts/        - Forecasting and valuation models (DCF, DCFE, Prophet, SARIMAX, etc.)
+functions/        - Reusable utilities (regression, Black–Litterman, CAPM, covariance)
+Optimiser/        - Portfolio optimisation routines and reporting
+indicators/       - Technical indicators and Reddit sentiment scrapers
 maps/             - Mapping tables for currencies, sectors and indexes
 rel_val/          - Relative valuation models (PE, PS, PBV, EV/Sales, Graham, etc.)
 ```
 
 ## Typical Workflow
+The major components are described below.
 
-1. **Download data**
-   - `python fetch_data/financial_data.py` retrieves analyst information, financial statements and historical prices via Yahoo Finance.
-   - `python fetch_data/fetch_macro_data.py` downloads macroeconomic time series from FRED and major index prices.
+## Data Collection (`fetch_data`)
 
-2. **Generate indicators**
-   - `python indicators/technical_indicators.py` calculates EMA, MACD, Bollinger Bands, RSI and other signals and writes them back to the workbook.
-   - `python indicators/wallstreetbets_scrapping.py` scrapes r/wallstreetbets posts to gauge sentiment.
+* **`financial_data.py`** – Retrieves analyst estimates and financial statements
+  via `yfinance`.  Processes historical draws and exports metrics such as EPS,
+  revenue growth and analyst price targets.
+* **`fetch_macro_data.py`** – Downloads macroeconomic time series (interest
+  rates, CPI, GDP, unemployment) from FRED and major index prices.
+* **`factor_data.py`** – Loads Fama–French factor returns from the Fama–French
+  database for use in factor models.
+* **`collecting_data.py`** – Downloads historical OHLCV data, computes basic
+  technical indicators with the `ta` package and scrapes economic forecasts from
+  Trading Economics.
 
-3. **Create forecasts**
-   - Run individual models such as `forecasts/prophet_model.py`, `forecasts/Sarimax.py`, `forecasts/dcf.py`, `forecasts/dcfe.py` and `forecasts/ri.py` to produce price/return predictions.
-   - `forecasts/Combination_Forecast.py` aggregates the outputs from all models and produces a blended forecast plus a scoring table.
+These scripts populate the Excel workbooks used by later stages.
 
-4. **Optimise the portfolio**
-   - Execute `python Optimiser/Portfolio_Optimisation.py` to calculate covariance matrices, apply a range of optimisers (max Sharpe, Sortino, MIR, etc.) and export portfolio weights, performance metrics and breakdown tables.
+## Data Processing (`data_processing`)
 
-Intermediate data and results are written to dated Excel files so they can be inspected or further processed outside Python.
+* **`financial_forecast_data.py`** – Handles per‑ticker financial statements and
+  analyst forecasts.  Provides convenience methods for currency adjustment,
+  outlier removal and generating forward‑looking KPIs used by the models.
+* **`macro_data.py`** – Wrapper around macroeconomic series giving easy access to
+  inflation, GDP growth and other regressors.
+* **`ratio_data.py`** – Loads historical financial ratios and derives growth
+  metrics used for regressions.
+* **`ind_data_processing.py`** – Cleans the stock screener output and aggregates
+  industry/region level data.
+
+## Forecast Models (`forecasts`)
+
+* **`prophet_model.py`** – Uses Facebook Prophet with additional financial and
+  macro regressors.  Revenue/EPS scenarios are fed in to produce probabilistic
+  price paths.  Cross‑validation is performed via Prophet's utilities to select
+  optimal seasonality and changepoint parameters.
+* **`Sarimax.py`** – Fits SARIMAX models with exogenous macro factors.  Future
+  macro scenarios are generated by fitting a VAR model; Monte‑Carlo, through Cholesky decomposition, draws are
+  then propagated through the SARIMAX to produce price simulations.
+* **`lstm.py`** – Builds an LSTM network on rolling windows of returns and
+  engineered factors.  Bootstrapped datasets are used to create many
+  predictions that are averaged for robustness.
+* **`dcf.py`** – Performs discounted cash‑flow valuation.  Cash flows are
+  forecast using elastic‑net regression (see `fast_regression.py`) and then
+  discounted.  Monte‑Carlo scenarios for growth and discount rates generate a
+  distribution of intrinsic values.
+* **`dcfe.py`** – Similar to `dcf.py` but values equity directly via
+  discounted cash‑flow to equity.  Constrained regression ensures realistic
+  relationships between drivers.
+* **`ri.py`** – Implements a residual income model where future book value is
+  grown and excess returns are discounted using the cost of equity.
+* **`returns_reg_pred.py`** – Trains a gradient‑boosting regression model on
+  engineered features to predict twelve‑month returns.  Bootstrapping is used
+  to build a distribution of possible outcomes.
+* **`relative_valuation_and_capm.py`** – Combines relative valuation ratios, as well as CAPM,
+* Fama-French 3 factor model and Fama-French 5 factor model 
+  to derive expected returns.
+* **`Combination_Forecast.py`** – Aggregates all of the above model outputs into
+  a Bayesian ensemble, applying weights and producing an overall score table.
+
+## Utility Functions (`functions`)
+
+* **`fast_regression.py`** – An elastic‑net solver using CVXPY with
+  grid‑search cross‑validation.  Supports constraints to ensure coefficients meet
+  accounting logic.
+* **`cov_functions.py`** – Provides covariance estimators including constant
+  correlation, Ledoit‑Wolf shrinkage, predicted covariances derived from
+  multi‑horizon scaling, and an extended Stein Shrinkage.
+* **`black_litterman_model.py`** – Implements the Black–Litterman update to
+  combine market equilibrium returns with user views.  Outputs posterior mean
+  returns and covariance matrices.
+* **`capm.py`** – Standard CAPM helper computing expected return given beta and
+  market parameters.
+* **`coe.py`** – Calculates cost of equity per ticker accounting for country and
+  currency risk premiums.
+* **`fama_french_3_pred.py` / `fama_french_5_pred.py`** – Estimate expected
+  returns using the Fama–French factor models, given simulated future factor
+  values.
+* **`factor_simulations.py`** – Uses a VAR model to simulate future factor
+  realisations which feed into the Fama–French forecasts.
+* **`export_forecast.py`** – Writes DataFrames to Excel with conditional
+  formatting and table styling.
+* **`read_pred_file.py`** – Reads previously generated forecast sheets and
+  updates them with latest market prices.
+
+## Technical Indicators and Sentiment (`indicators`)
+
+* **`technical_indicators.py`** – Calculates EMA, MACD, Bollinger Bands, RSI and
+  other classic technical indicators, scoring each ticker and saving results to
+  Excel.
+* **`wallstreetbets_scrapping.py`** – Scrapes posts and comments from
+  r/wallstreetbets.  Ticker mentions are analysed with NLTK’s VADER sentiment
+  classifier and aggregated scores are saved.
+
+## Relative Valuation (`rel_val`)
+
+Provides multiple models blending peer multiples and fundamental data:
+
+* **`pe.py`, `price_to_sales.py`, `pbv.py`, `ev.py`** – Compute valuations based on
+  industry‑average P/E, P/S, P/BV and EV/Sales multiples.
+* **`graham_model.py`** – Implements a Graham‑style intrinsic value combining
+  earnings and book value metrics.
+* **`relative_valuation.py`** – Consolidates all relative valuation signals into a
+  single fair value estimate.
+
+## Portfolio Optimisation (`Optimiser`)
+
+* **`portfolio_functions.py`** – Utility functions for portfolio return,
+  volatility, tracking error, downside deviation and a variety of risk metrics.
+* **`portfolio_optimisers.py`** – Implements optimisers including maximum Sharpe,
+  Sortino, mean/variance with bounds, equal‑risk contribution and custom
+  information ratio objectives using `scipy.optimize`.
+* **`Portfolio_Optimisation.py`** – Main orchestration script.  Loads price
+  history and forecasts, computes bounds from market cap and sector limits,
+  runs the optimisers and writes detailed results (weights, attribution,
+  performance statistics) back to Excel.
+
+## Running the Toolkit
+
+A typical end‑to‑end workflow is:
+
+1. **Data download** – Run the scripts under `fetch_data/` to gather the latest
+   market, fundamental and macro data.
+2. **Indicator generation** – Execute the scripts in `indicators/` to compute
+   technical and sentiment indicators.
+3. **Forecasting** – Produce valuation forecasts using the models in
+   `forecasts/`.  Individual models may take time depending on the amount of
+   data and the number of Monte‑Carlo simulations.
+4. **Portfolio optimisation** – Run
+   `python Optimiser/Portfolio_Optimisation.py` to build the covariance matrix
+   and produce optimised portfolios.
+
+Intermediate results are written to dated Excel files such as
+`Portfolio_Optimisation_Forecast_<date>.xlsx` for transparency.
 
 ## Notes
 
-Some scripts reference absolute paths under the author's home directory. Adjust these paths to match your environment before running the code. A few models rely on historical files that are not included in the repository.
+Some modules reference absolute paths tailored to my own machine
+and expect input Excel workbooks that are not part of this repository.  Adjust
+`config.py` to point at your own data locations before running the scripts.
 
 ## License
 
-This project is provided as-is under the MIT License.
+This project is released under the MIT License.
