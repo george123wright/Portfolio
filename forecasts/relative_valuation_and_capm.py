@@ -8,6 +8,8 @@ Runs relative‑valuation models
 - Graham, 
 - CAPM
 - CAPM with Black–Litterman market views
+- FF3
+- FF5
 
 as well as the cost‑of‑equity calculation.
 """
