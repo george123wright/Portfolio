@@ -50,7 +50,6 @@ functions/        - Reusable utilities (regression, Black–Litterman, CAPM, cov
 Optimiser/        - Portfolio optimisation routines and reporting
 indicators/       - Technical indicators and Reddit sentiment scrapers
 maps/             - Mapping tables for currencies, sectors and indexes
-rel_val/          - Relative valuation models (PE, PS, PBV, EV/Sales, Graham, etc.)
 ```
 
 ## Typical Workflow
@@ -93,7 +92,7 @@ The major components are described below.
 
 ## Forecast Models (`forecasts`)
 
-### Machine-Learning:
+### Machine-Learning (`machine_learning`):
 
 * **`prophet_model.py`** – Utilises Facebook Prophet with piecewise linear and logistic trends.
 
@@ -123,7 +122,7 @@ The major components are described below.
 
   Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
 
-### Intrinsic Valuation:
+### Intrinsic Valuation (`intrinsic_value`):
 
 * **`dcf.py`** – Performs discounted cash‑flow valuation to determine the enterprise value. Cash flows are forecast using elastic‑net regression (see `fast_regression.py`) and then discounted.
 
