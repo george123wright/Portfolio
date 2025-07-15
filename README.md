@@ -46,19 +46,19 @@ The major components are described below.
 
   It assigns a standard error metric for the average price prediction via the equation
 
-  $$
-  \mathrm{SE}
-  = \frac{\max\!\bigl(\text{Price Prediction}\bigr) \;-\; \min\!\bigl(\text{Price Prediction}\bigr)}
-         {2\,Z \,\times\, P}
-  $$
+$$
+\mathrm{SE}
+= \frac{\max\!\bigl(\text{Price Prediction}\bigr) \;-\; \min\!\bigl(\text{Price Prediction}\bigr)}
+       {2\,Z \,\times\, P}
+$$
 
   where
 
-  $$
-  \alpha \;=\;\frac{1}{N_{\text{analysts}}}
-  \quad\Longrightarrow\quad
-  Z = Z_{1 - \alpha/2}.
-  $$
+$$
+\alpha \;=\;\frac{1}{N_{\text{analysts}}}
+\quad\Longrightarrow\quad
+Z = Z_{1 - \alpha/2}.
+$$
 
   alpha for the Z-score is calculated using alpha = $\displaystyle \frac{1}{\text{number of analysts}}$.
   
