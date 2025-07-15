@@ -226,13 +226,18 @@ $$
 
 ## Utility Functions (`functions`)
 
-* **`fast_regression.py`** – An elastic‑net solver built with CVXPY used to forecast cash flows in `dcf.py` and `dcfe.py`. It applies Huber loss and L1 (Lasso) / L2 (Ridge) penalties and performs grid‑search cross‑validation, optionally enforcing accounting sign constraints.
+* **`fast_regression.py`** – An elastic‑net solver built with CVXPY used to forecast cash flows in `dcf.py` and `dcfe.py`.
 
-* **`cov_functions.py`** – Implements covariance estimators including constant‑correlation and Ledoit–Wolf shrinkage. Predicted covariances are derived from multi‑horizon scaling with an extended Stein shrinkage variant.
+  It applies Huber loss and L1 (Lasso) / L2 (Ridge) penalties and performs grid‑search cross‑validation, optionally enforcing accounting sign constraints.
+
+* **`cov_functions.py`** – Implements covariance estimators including constant‑correlation and Ledoit–Wolf shrinkage.
+
+  Predicted covariances are derived from multi‑horizon scaling with an extended Stein shrinkage variant.
 
 * **`black_litterman_model.py`** – Implements the Black–Litterman Bayesian update combining equilibrium market returns with subjective views to obtain posterior means and covariances.
 
-* **`capm.py`** – Helper implementing the CAPM formula: 
+* **`capm.py`** – Helper implementing the CAPM formula:
+
 $$
 \mathbb{E}[R_i]
 = R_f \;+\;
@@ -244,9 +249,7 @@ $$
 
 * **`coe.py`** – Calculates the cost of equity per ticker by combining country risk premiums and currency risk with the standard CAPM estimate.
 
-* **`fama_french_3_pred.py` / `fama_french_5_pred.py`** – Estimate expected
-  returns using the Fama–French factor models using OLS Betas and simulated future factor
-  values.
+* **`fama_french_3_pred.py` / `fama_french_5_pred.py`** – Estimate expected returns using the Fama–French factor models using OLS Betas and simulated future factor values.
   
 * **`factor_simulations.py`** – Generates future factor realisations by fitting a VAR model and applying Cholesky shocks. These simulated paths feed into the Fama–French forecasts.
   
@@ -274,7 +277,11 @@ $$
 
  Buy and Sell signals are given a score of ±1
  
-* **`wallstreetbets_scrapping.py`** – Scrapes posts and comments from r/wallstreetbets. Ticker mentions are analysed with NLTK’s (Natural Language Toolkit) VADER (Valence Aware Dictionary and Sentioment Reasoner) sentiment classifier and aggregated scores are saved. I have tuned this dictionary to account for relevant slang and market related terms frequently used. For example, "bullish", "buy the dip" and "yolo".
+* **`wallstreetbets_scrapping.py`** – Scrapes posts and comments from r/wallstreetbets.
+
+  Ticker mentions are analysed with NLTK’s (Natural Language Toolkit) VADER (Valence Aware Dictionary and Sentioment Reasoner) sentiment classifier and aggregated scores are saved.
+
+  I have tuned this dictionary to account for relevant slang and market related terms frequently used. For example, "bullish", "buy the dip" and "yolo".
 
 ## Relative Valuation (`rel_val`)
 
