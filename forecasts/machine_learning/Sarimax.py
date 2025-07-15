@@ -19,6 +19,7 @@ from data_processing.macro_data import MacroData
 import config
 
 
+
 BASE_REGRESSORS = ['Interest', 'Cpi', 'Gdp', 'Unemp']
 SHOCK_INTERVAL = 13   
 N_SIMS = 1000
@@ -27,18 +28,30 @@ CANDIDATE_ORDERS = [(1,1,0), (0,1,1), (1,1,1)]
 
 
 def configure_logger() -> logging.Logger:
+    
     logger = logging.getLogger(__name__)
+    
     logger.setLevel(logging.INFO)
+    
     if not logger.handlers:
+    
         ch = logging.StreamHandler()
+    
         fmt = '%(asctime)s - %(levelname)s - %(message)s'
+    
         ch.setFormatter(logging.Formatter(fmt))
+    
         logger.addHandler(ch)
+    
     return logger
+
 
 logger = configure_logger()
 
-def compute_alpha_from_residuals(vr: VAR) -> float:
+
+def compute_alpha_from_residuals(
+    vr: VAR
+) -> float:
     """
     Compute α = trace(Σ̂_ε) / trace(Σ_u)
      - Σ̂_ε: empirical covariance of one‐step VAR residuals
@@ -48,11 +61,12 @@ def compute_alpha_from_residuals(vr: VAR) -> float:
     resid = vr.resid
 
     cov_eps = np.cov(resid, rowvar=False, ddof=0)
-    cov_u   = vr.sigma_u
+    cov_u = vr.sigma_u
 
-    alpha    = np.trace(cov_eps) / np.trace(cov_u)
+    alpha = np.trace(cov_eps) / np.trace(cov_u)
 
     return alpha
+
 
 def prepare_sarimax_ensemble(
     df_model: pd.DataFrame,
@@ -66,36 +80,45 @@ def prepare_sarimax_ensemble(
     aics = []
 
     y = df_model['y']
+    
     exog = df_model[regressors]
 
     for order in CANDIDATE_ORDERS:
+    
         try:
+    
             model = SARIMAX(
                 y,
-                order=order,
-                seasonal_order=(0,0,0,0),
-                exog=exog,
-                enforce_stationarity=False,
-                enforce_invertibility=False
+                order = order,
+                seasonal_order = (0,0,0,0),
+                exog = exog,
+                enforce_stationarity = False,
+                enforce_invertibility = False
             )
 
             with warnings.catch_warnings():
+            
                 warnings.simplefilter('ignore', ConvergenceWarning)
+            
                 fit = model.fit(disp=False, method='lbfgs', maxfun=5000)
 
             fits.append(fit)
             aics.append(fit.aic)
 
         except Exception:
+          
             continue
 
     if not fits:
+       
         raise RuntimeError("No SARIMAX fits succeeded")
 
     aics = np.array(aics)
 
     delta = aics - aics.min()
+   
     weights = np.exp(-0.5 * delta)
+   
     probs = weights / weights.sum()
 
     return fits, probs
@@ -117,6 +140,7 @@ def evaluate_sarimax_cv(
     N = len(df_scaled)
 
     if N <= horizon:
+   
         return np.nan
 
     max_splits = max(1, N - horizon - 1)
@@ -126,6 +150,7 @@ def evaluate_sarimax_cv(
     fold_size = (N - horizon) // (n_splits + 1)
 
     if fold_size < 1:
+   
         return np.nan
 
     sq_errors = []
@@ -141,11 +166,13 @@ def evaluate_sarimax_cv(
         ]
    
         if len(exog_h) < horizon:
+   
             break
 
         fit = fits[np.argmin([f.aic for f in fits])]
    
         pred = fit.get_forecast(steps=horizon, exog=exog_h)
+   
         r_pred = pred.predicted_mean.values
 
         r_true = df_scaled['y'].iloc[
@@ -153,7 +180,9 @@ def evaluate_sarimax_cv(
         ].values
 
         P_pred = P0 * np.exp(np.sum(r_pred))
+   
         P_true = P0 * np.exp(np.sum(r_true))
+   
         sq_errors.append((P_true - P_pred) ** 2)
 
     return np.sqrt(np.mean(sq_errors)) if sq_errors else np.nan
@@ -168,18 +197,25 @@ def simulate_macro_scenarios(
 ) -> np.ndarray:
     
     if alpha is None:
-        alpha = compute_alpha_from_residuals(vr)
+   
+        alpha = compute_alpha_from_residuals(
+            vr = vr
+        )
         
     Su = vr.sigma_u
+   
     k = Su.shape[0]
  
     cov = (Su + Su.T) / 2
+   
     cov_w = alpha * cov
+   
     cov_q = shock_interval * cov
  
     jitter = 1e-6 * np.eye(k)
  
     L_w = np.linalg.cholesky(cov_w + jitter)
+   
     L_q = np.linalg.cholesky(cov_q + jitter)
 
     sims = np.zeros((N_SIMS, steps, k), float)
@@ -193,8 +229,11 @@ def simulate_macro_scenarios(
             y_hat = sum(vr.coefs[j] @ hist[-j-1] for j in range(vr.k_ar))
  
             if (t % shock_interval) == 0:
+   
                 eps = L_q @ np.random.randn(k)
+   
             else:
+   
                 eps = L_w @ np.random.randn(k)
  
             nxt = y_hat + eps
@@ -204,6 +243,7 @@ def simulate_macro_scenarios(
             hist.append(nxt)
  
     for i in range(half, N_SIMS):
+   
         sims[i] = 2*last_vals - sims[i - half]  
  
     return sims
@@ -236,16 +276,19 @@ def simulate_price_path(
         fb = pd.DataFrame({'ds': future_dates})
  
         for j, name in enumerate(BASE_REGRESSORS):
+   
             fb[name] = macro_path[:, j]
  
         fb['shock_dummy'] = ((np.arange(len(future_dates)) % SHOCK_INTERVAL) == 0).astype(float)
 
         exog_macro = scaler.transform(fb[BASE_REGRESSORS].values)
+   
         exog = np.hstack([exog_macro, fb[['shock_dummy']].values])
 
         fc = fit.get_forecast(steps=len(future_dates), exog=exog)
  
         mu  = fc.predicted_mean
+   
         var = fc.var_pred_mean
  
         r_sim = mu + np.random.randn(len(mu)) * np.sqrt(var)
@@ -255,20 +298,26 @@ def simulate_price_path(
         return np.clip(path, lb, ub)
 
     finally:
+   
         fit.params = orig_params
 
 
 def main() -> None:
  
     macro = MacroData()
+   
     r = macro.r
+   
     tickers = r.tickers
+   
     forecast_period = 52
+   
     cv_splits = 3
 
     close = r.weekly_close
  
     latest_prices = r.last_price
+   
     analyst = r.analyst
     
     lb = config.lbr * latest_prices
@@ -308,12 +357,18 @@ def main() -> None:
         vr = VAR(dfm).fit(maxlags=1)
   
         if vr.k_ar < 1:
+   
             country_paths[ctry] = None
+   
             continue
   
         last_vals = dfm.values[-vr.k_ar:]
   
-        sims = simulate_macro_scenarios(vr, last_vals, forecast_period)
+        sims = simulate_macro_scenarios(
+            vr = vr, 
+            last_vals = last_vals, 
+            steps = forecast_period
+        )
   
         country_paths[ctry] = sims
 
@@ -326,14 +381,17 @@ def main() -> None:
         cp = latest_prices.get(tk, np.nan)
   
         if pd.isna(cp):
+        
             logger.warning("No price for %s, skipping", tk); continue
 
         dfp = pd.DataFrame({'ds': close.index, 'price': close[tk].values})
+        
         dfp['y'] = np.log(dfp['price']).diff(); dfp.dropna(inplace=True)
   
         tm = raw_macro[raw_macro['ticker']==tk][['ds']+BASE_REGRESSORS]
   
         dfm = pd.merge_asof(dfp.sort_values('ds'), tm.sort_values('ds'), on='ds')
+        
         dfm = dfm.set_index('ds').asfreq('W-SUN').ffill().bfill().dropna()
 
         df_price = dfm[['price']].copy(); df_price['y']=np.log(dfm['price']).diff(); df_price.dropna(inplace=True)
@@ -343,29 +401,49 @@ def main() -> None:
         df_comb = pd.concat([df_price, df_macro], axis=1).dropna()
   
         if df_comb.empty:
+        
             logger.warning("Insufficient data for %s, skipping", tk); continue
 
         scaler = StandardScaler().fit(df_comb[BASE_REGRESSORS].values)
   
         df_scaled = df_comb.copy()
+        
         df_scaled[BASE_REGRESSORS] = scaler.transform(df_comb[BASE_REGRESSORS].values)
+        
         df_scaled['shock_dummy'] = ((np.arange(len(df_scaled)) % SHOCK_INTERVAL) == 0).astype(float)
   
         regressors = BASE_REGRESSORS + ['shock_dummy']
 
-        fits, probs = prepare_sarimax_ensemble(df_scaled, regressors)
-        rmse = evaluate_sarimax_cv(df_scaled, regressors, fits, probs, n_splits=cv_splits, horizon=forecast_period)
+        fits, probs = prepare_sarimax_ensemble(
+            df_model = df_scaled, 
+            regressors = regressors
+        )
+        
+        rmse = evaluate_sarimax_cv(
+            df_scaled = df_scaled, 
+            regressors = regressors, 
+            fits = fits, 
+            probs = probs, 
+            n_splits = cv_splits, 
+            horizon = forecast_period
+        )
 
         last_date = df_scaled.index.max()
+       
         future_dates = pd.date_range(start=last_date+pd.Timedelta(weeks=1), periods=forecast_period, freq='W-SUN')
+       
         country = country_map.get(tk)
+       
         macro_sims = country_paths.get(country)
   
         if macro_sims is None:
+       
             last_obs = dfm[BASE_REGRESSORS].iloc[-1].values
+       
             macro_sims = np.stack([np.tile(last_obs, (forecast_period,1))]*N_SIMS)
 
         price_sims = Parallel(n_jobs=-1)(
+       
             delayed(simulate_price_path)(
                 macro_sims[i], fits, probs, scaler,
                 future_dates, cp, regressors,
@@ -400,8 +478,13 @@ def main() -> None:
         'SE': [results[t]['se'] for t in tickers]
     }).set_index('Ticker')
     
-    export_results({'SARIMAX Monte Carlo': df_out}, config.MODEL_FILE)
+    export_results(
+        sheets = {'SARIMAX Monte Carlo': df_out}, 
+        output_excel_file = config.MODEL_FILE
+    )
+   
     logger.info("Run completed.")
 
 if __name__ == '__main__':
     main()
+
