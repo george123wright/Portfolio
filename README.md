@@ -59,8 +59,6 @@ $$
 \quad\Longrightarrow\quad
 Z = Z_{1 - \alpha/2}.
 $$
-
-  alpha for the Z-score is calculated using alpha = $\displaystyle \frac{1}{\text{number of analysts}}$.
   
 * **`fetch_macro_data.py`** – Downloads macroeconomic time series (interest
   rates, CPI, GDP, unemployment) from FRED and major index prices.
@@ -131,7 +129,9 @@ These scripts populate the Excel workbooks used by later stages.
   
 * **`dcfe.py`** – Similar to `dcf.py` but values equity directly via
   discounted cash‑flow to equity.  Constrained regression ensures realistic
-  relationships between drivers. Monte-Carlo simulation is used for the aformentioned reason.
+  relationships between drivers.
+
+  Monte-Carlo simulation is used for the aformentioned reason.
   
 * **`ri.py`** – Implements a residual income model where future book value is
   grown and excess returns are discounted using the cost of equity.
@@ -150,13 +150,13 @@ These scripts populate the Excel workbooks used by later stages.
 
   Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e.
 
-  $$
-  w_i
-  = \frac{\bigl(\mathrm{forecast}_i \times \mathrm{SE}_i\bigr)^{-1}}
-         {\displaystyle\sum_{n=1}^{N_{\mathrm{valid}}}
-              \bigl(\mathrm{forecast}_n \times \mathrm{SE}_n\bigr)^{-1}
-         }.
-  $$
+$$
+w_i
+= \frac{\bigl(\mathrm{forecast}_i \times \mathrm{SE}_i\bigr)^{-1}}
+       {\displaystyle\sum_{n=1}^{N_{\mathrm{valid}}}
+            \bigl(\mathrm{forecast}_n \times \mathrm{SE}_n\bigr)^{-1}
+       }.
+$$
 
   These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $ \frac{1}{\text{number of valid models}}$.
 
@@ -350,14 +350,10 @@ The lower and upper portfolio weight constraints are then given by:
 
 $$
 \mathrm{Upper}_i
-= \sqrt{\tilde{w}_i}
-  \;\times\;
-  \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}},
+= \sqrt{\tilde{w}_i} * \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}},
 \qquad
 \mathrm{Lower}_i
-= \tilde{w}_i
-  \;\times\;
-  \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}}.
+= \tilde{w}_i * \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}}.
 $$
 
 These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%.
