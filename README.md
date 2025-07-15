@@ -18,7 +18,7 @@
 - [Notes](#Notes)
 - [License](#License)
 
-This repository hosts a set of Python scripts for constructing equity portfolios using a range of quantitative valuation models and optimisation techniques. The workflow pulls market and fundamental data, generates forecasts with multiple statistical approaches and produces optimised portfolio allocations. The results are written to Excel workbooks for inspection or further analysis.
+This repository hosts a set of Python scripts for constructing equity portfolios using a range of quantitative valuation models and optimisation techniques. The workflow pulls market and fundamental data, generates forecasts with multiple statistical approaches and produces optimised portfolio allocations. The results are exported into Excel workbooks for inspection or further analysis.
 
 The repository follows a classical quantitative finance workflow:
 
@@ -78,17 +78,13 @@ The major components are described below.
 * **`financial_forecast_data.py`** – Handles per‑ticker financial statements and
   analyst forecasts.
 
-  Provides convenience methods for currency adjustment,
-  outlier removal and generating forward‑looking KPIs used by the models.
+  Provides convenience methods for currency adjustment, outlier removal and generating forward‑looking KPIs used by the models.
   
-* **`macro_data.py`** – Wrapper around macroeconomic series giving easy access to
-  inflation, GDP growth and other regressors.
+* **`macro_data.py`** – Wrapper around macroeconomic series giving easy access to inflation, GDP growth and other regressors.
   
-* **`ratio_data.py`** – Loads historical financial ratios and derives growth
-  metrics used for regressions.
+* **`ratio_data.py`** – Loads historical financial ratios and derives growth metrics used for regressions.
   
-* **`ind_data_processing.py`** – Cleans the stock screener output and aggregates
-  industry/region level data.
+* **`ind_data_processing.py`** – Cleans the stock screener output and aggregates industry/region level data.
 
 ## Forecast Models (`forecasts`)
 
@@ -98,7 +94,59 @@ The major components are described below.
 
   Financial and macro regressors extend the additive model, and cross-validation tunes changepoints and seasonality. Weekly seasonal trends are enabled. Daily and yearly seasonality is disabled due to the   substantial noise created.
 
-  Scenario draws create probabilistic price paths.
+  The forecast $\(\hat y(t)\)$ is given by
+```math
+  \hat y(t)
+  = g(t)
+  + s_w(t)
+  + \sum_{j=1}^K \beta_j\,X_j(t)
+  + \varepsilon_t,
+```
+where $g(t)$ is a piecewise-linear trend, $s_w(t)$ is weekly seasonality, $X_j(t)$ are external regressors, and $\varepsilon_t\sim N(0,\sigma^2)$. Using changepoints $\{\tau_\ell\}$ and indicators $a_\ell(t)=\mathbf{1}\{t\ge\tau_\ell\}$ gives:
+```math
+
+  g(t)
+  = \Bigl(k + \sum_{\ell=1}^L \delta_\ell\,a_\ell(t)\Bigr)\,t
+    \;+\;
+    \Bigl(m - \sum_{\ell=1}^L \delta_\ell\,\tau_\ell\Bigr),
+  \quad
+  \delta_\ell\sim N\bigl(0,\sigma_{\delta}^2\bigr).
+```
+For weekly seasonality, a fourier series of order $N$ with Gaussian priors on the Fourier coeficients is used:
+```math
+  s_w(t)
+  = \sum_{n=1}^N
+    \Bigl[
+      a_n\cos\!\bigl(2\pi n\,t/7\bigr)
+      + b_n\sin\!\bigl(2\pi n\,t/7\bigr)
+    \Bigr],
+  \quad
+  a_n,b_n\sim N(0,\sigma_{\rm seas}^2).
+```
+Each regressor $X_j(t)$ enters linearly:
+```math
+  \hat y(t) \supset \beta_j\,X_j(t),
+  \quad
+  \beta_j\sim N(0,\sigma_{\beta}^2).
+```
+All regressors are standardized prior to fitting. Using initial window $T_0$, period $\Delta$, horizon $H$ MSE is averaged and used to report RMSE:
+```math
+  \mathrm{MSE}^{(k)}
+  = \frac1{|I_{\text{test}}^{(k)}|}
+    \sum_{i\in I_{\text{test}}^{(k)}}(y_i-\hat y_i)^2,
+  \quad
+  \mathrm{RMSE}=\sqrt{\mathrm{MSE}}.
+```
+The series from $x_1$ to $x_H$ over $H$ points is given by:
+```math
+  x_t
+  = x_1 + \frac{t-1}{H-1}\,(x_H - x_1),
+  \quad t=1,\dots,H.
+```
+Forecasts over all $(revenue, eps)$ scenarios are computed to give probabilistic price paths. Scenario SE is given by $\sigma_{\text{scen}}/\sqrt{N_{\rm analysts}}$ and is combined with CV uncertainty to give the Total SE as:
+```math
+\mathrm{SE}_{\rm total} = \sqrt{\sigma_{\text{scen}}^2 + (\mathrm{RMSE})^2}
+```
 
 * **`Sarimax.py`** – Fits SARIMAX (Seasonal Autoregressive Integrated Moving Average + Exogenous Variables) time-series models with exogenous macro factors.
 
@@ -124,15 +172,25 @@ The major components are described below.
 
 ### Intrinsic Valuation (`intrinsic_value`):
 
-* **`dcf.py`** – Performs discounted cash‑flow valuation to determine the enterprise value. Cash flows are forecast using elastic‑net regression (see `fast_regression.py`) and then discounted.
-
+* **`dcf.py`** – Performs discounted cash‑flow valuation to determine the enterprise value given by:
+```math
+Enterprise Value = \sum_{i=1}^{n-1} \frac{FCFE_i}{\bigl(1 + WACC\bigr)^{\frac{t_i - t_0}{365}}} + \frac{TV}{\bigl(1 + WACC\bigr)^{\frac{t_n - t_0}{365}}}
+```
+  where $t_0$ is todays date, $t_i$ is the date of the i'th cash flow forecast and $t_n$ is the date of the terminal forecast date.
+  Cash flows are forecast using elastic‑net regression (see `fast_regression.py`) and then discounted.
   Monte‑Carlo scenarios for growth generate a distribution of intrinsic values. The scenarios are used to help gauge the uncertainty of the valuation.
   
-* **`dcfe.py`** – Similar to `dcf.py` but values equity directly via discounted cash‑flow to equity.  Constrained regression ensures realistic relationships between drivers.
-
+* **`dcfe.py`** – Similar to `dcf.py` but values equity directly via discounted cash‑flow to equity.  Constrained regression ensures realistic relationships between drivers. Equity value is given by:
+```math
+Equity Value = \sum_{i=1}^{n-1} \frac{FCFF_i}{\bigl(1 + COE\bigr)^{\frac{t_i - t_0}{365}}} + \frac{TV}{\bigl(1 + COE\bigr)^{\frac{t_n - t_0}{365}}}
+```
   Monte-Carlo simulation is used for the aformentioned reason.
   
-* **`ri.py`** – Implements a residual income model where future book value is grown and excess returns are discounted using the cost of equity.
+* **`ri.py`** – Implements a residual income model where future book value is grown and excess returns are discounted using the cost of equity. Equity value is given by:
+```math
+Equity Value = BVPS_0 + \sum_{i=1}^{n-1} \frac{EPS_i - \bigl(COE \cdot BVPS_{i-1} \bigr)}{\bigl(1 + COE\bigr)^{\frac{t_i - t_0}{365}}} + \frac{TV}{\bigl(1 + COE\bigr)^{\frac{t_n - t_0}{365}}}
+```
+
 
   Monte-Carlo simulation is once again used for the aformentioned reason.
 
@@ -157,7 +215,7 @@ Provides multiple models blending peer multiples and fundamental data:
 * **`Combination_Forecast.py`** – Fuses all of the model return forecasts and standard errors into
   a Bayesian ensemble, applying weights and producing an overall score.
 
-  Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e.
+  Weights are assigned for each models prediction based on the inverse of the standard error or volatility, i.e.
 
 $$
 w_i = \frac{\frac{1}{\mathrm{SE}_i^2}}{\sum{\frac{1}{{SE}_i^2}}}
@@ -179,7 +237,7 @@ $$
   8. Higher year on year Gross Margin $\Rightarrow$ + 1
   9. Higher Asset Turnover Ratio year on year Growth $\Rightarrow$ + 1
 
-  I adapt this in the following way
+  I have adapted this in the following way:
 
   - Negative Return on Assets $\Rightarrow$- 1
   - Return on Assets > Industry Average $\Rightarrow$ + 1
@@ -187,7 +245,7 @@ $$
   - Previous Return on Assets < Current Return on Assets $\Rightarrow$ - 1
   - Previous Current Ratio > Current Ratio $\Rightarrow$ - 1
 
-  I then add the following scores relating to financials as well. These were back tested to see the significance.
+  I then added the following scores relating to financials as well. These were back tested to see the significance.
 
   - 5% increase in percentage of shares shorted month on month $\Rightarrow$ - 1
   - 5% decrease in percentage of shares shorted month on month $\Rightarrow$ + 1
@@ -214,13 +272,13 @@ $$
   - Forward Price to Earnings < Trailing 12 month Price to Earnings $\Rightarrow$ + 1
   - Forward Price to Earnings > Trailing 12 month Price to Earnings $\Rightarrow$ - 1
 
-  I then consider Analyst recommendations, to gather a sense of professional sentiment:
+  Then I considered Analyst recommendations, to gather a sense of professional sentiment:
 
   - Strong Buy Recommendation $\Rightarrow$ + 3
   - Hold Recommendation $\Rightarrow$ - 1
   - Sell or Strong Sell Recommendation $\Rightarrow$ - 5
  
-  I then consider the stock prices movement within the market:
+  I further consider the stock prices movement within the market:
 
   - Positive Skewness based on last 5 years weekly returns $\Rightarrow$ + 1
   - Sharpe Ratio based on last year weekly returns > 1.0 $\Rightarrow$ + 1
@@ -235,7 +293,7 @@ $$
   - Negative Jensens Alpha over last 5 years with respect to the S&P500 $\Rightarrow$ - 1
   - Negative Predicted Jensen's Alpha $\Rightarrow$ - 5
  
-  I then consider daily sentiment scores from webscraping r/wallstreetbets. This is to capture the sentiment amongst retail investors, which have an increasing importance in influencing the market:
+  I also consider daily sentiment scores from webscraping r/wallstreetbets. This is to capture the sentiment amongst retail investors, which have an increasing importance in influencing the market:
 
   - Positive Average Sentiment $\Rightarrow$ + 1
   - Negative Average Sentiment $\Rightarrow$ - 1
@@ -254,11 +312,125 @@ $$
 
   It applies Huber loss and L1 (Lasso) / L2 (Ridge) penalties and performs grid‑search cross‑validation, optionally enforcing accounting sign constraints.
 
+Given data $\(\{(x_i, \quad y_i)\}_{i=1}^n\)$ with $\(x_i \in \mathbb{R}^p\)$, we augment with an intercept by defining  
+
+```math
+X = 
+\begin{pmatrix}
+1 & x_1^\top\\
+\vdots & \vdots\\
+1 & x_n^\top
+\end{pmatrix}
+\;\in\;\mathbb{R}^{n\times(p+1)},
+\quad
+\beta = (\beta_0,\beta_1,\dots,\beta_p)^\top.
+```
+
+The residuals are $r_i = \bigl(X \beta\bigr)_i - y_i$ . For a threshold $\(M>0\)$, the Huber loss on a scalar residual $\(r\)$ is
+```math
+h_M(r) = 
+\begin{cases}
+\dfrac{1}{2}\,r^2, & |r|\le M,\\[1em]
+M\bigl(|r| - \tfrac{1}{2}M\bigr), & |r|>M.
+\end{cases}
+```
+Thus the total data‐fit term is
+```math
+\mathcal{L}_{\mathrm{huber}}(\beta)
+\;=\;
+\sum_{i=1}^n h_M\bigl(r_i\bigr).
+```
+Let $\(\lambda>0\)$ and $\(\alpha\in[0,1]\)$. The elastic‐net penalty with a tiny “ridge‐epsilon” $\(\varepsilon=10^{-8}\)$ added for numerical stability is:
+```math
+\mathcal{P}(\beta)
+=\;
+\lambda\!\bigl(\alpha\lVert\beta\rVert_1 + (1-\alpha)\lVert\beta\rVert_2^2\bigr)
+\;+\;\varepsilon\,\lVert\beta\rVert_2^2.
+```
+For the constrained regression, non-negativity is imposed on the coefficients $\beta_j \ge0, j=1,\dots,p$ . This gives the overall convex program as:
+```math
+\min_{\beta\in\mathbb R^{p+1}}
+\quad
+\sum_{i=1}^n h_M\bigl((X\beta)_i - y_i\bigr)
+\;+\;
+\lambda\!\Bigl(\alpha\lVert\beta\rVert_1 + (1-\alpha)\lVert\beta\rVert_2^2\Bigr)
+\;+\;\varepsilon\,\lVert\beta\rVert_2^2
+\quad
+\text{s.t. } \beta_{1:p}\ge0\;\text{(if constrained).}
+```
+To improve conditioning, features and target are scaled before solving:
+1.  Compute
+```math
+\mu_x = \tfrac1n\sum_i x_i,\quad \sigma_x = \sqrt{\tfrac1n\sum_i (x_i-\mu_x)^2},\quad \mu_y = \tfrac1n\sum_i y_i,\quad \sigma_y = \sqrt{\tfrac1n\sum_i (y_i-\mu_y)^2} 
+```
+  replacing any zero $\(\sigma_x\)$ or $\(\sigma_y\)$ by 1.
+2.  Define
+```math
+ x_{i}^s = \frac{x_i - \mu_x}{\sigma_x},\qquad y_i^s = \frac{y_i - \mu_y}{\sigma_y}
+```
+3.  Solve for $\(\beta^s\)$ on $\(\{(x_i^s,y_i^s)\}\)$. Then recover original-scale coefficients:
+```math
+    \beta_j = \frac{\sigma_y}{\sigma_{x_j}}\,\beta^s_j,\quad
+    \beta_0 = \mu_y + \sigma_y\,\beta^s_0 \;-\;\sum_{j=1}^p \beta_j\,\mu_{x_j}
+```
+Results are searched over triples $\((\alpha,\lambda,M)\)$ by $\(K\)$-fold CV:
+
+1.  Split indices into $\(\{I_{\text{train}}^{(k)},I_{\text{test}}^{(k)}\}_{k=1}^K\)$.
+2.  For each $\((\alpha,\lambda,M)\)$ and each fold $k$, fit $\beta^{(k)}$ on the training set, predict $\hat y_i = (X\beta^{(k)})_i\)$ in the test set, and compute the mean-squared error
+```math
+    \mathrm{MSE}^{(k)}(\alpha,\lambda,M)
+    = \frac1{\lvert I_{\text{test}}^{(k)}\rvert}
+      \sum_{i\in I_{\text{test}}^{(k)}}(y_i - \hat y_i)^2.
+```
+3.  Average over folds:
+```math
+\overline{\mathrm{MSE}}(\alpha,\lambda,M) = \frac1K\sum_{k=1}^K \mathrm{MSE}^{(k)} $
+```
+4.  Select $\((\alpha^*,\lambda^*,M^*)\)$ minimizing $\(\overline{\mathrm{MSE}}\)$, then re-fit on all data.
+
 * **`cov_functions.py`** – Implements covariance estimators including constant‑correlation and Ledoit–Wolf shrinkage.
 
   Predicted covariances are derived from multi‑horizon scaling with an extended Stein shrinkage variant.
 
 * **`black_litterman_model.py`** – Implements the Black–Litterman Bayesian update combining equilibrium market returns with subjective views to obtain posterior means and covariances.
+
+Let:
+- $n$ = number of assets  
+- $\Sigma\in\mathbb{R}^{n\times n}$ = prior covariance  
+- $w\in\mathbb{R}^n$ = benchmark (market‐cap) weights  
+- $\delta>0$ = risk aversion coefficient  
+- $\tau>0$ = scaling factor for the prior covariance  
+- $P\in\mathbb{R}^{k\times n}$ = “pick” matrix encoding \(k\) views  
+- $q\in\mathbb{R}^k$ = view returns  
+- $\kappa>0$ = confidence scalar (higher $\kappa$ ⟶ more confidence)  
+
+```math
+\pi \;=\;\delta\,\Sigma\,w
+```
+```math
+\tilde\Sigma \;=\;\tau\,\Sigma
+\quad,\quad
+\Omega \;=\;\frac{\mathrm{diag}\bigl(P\,\tilde\Sigma\,P^\top\bigr)}{\kappa}
+```
+where $\Omega\in\mathbb{R}^{k\times k}$ is diagonal. Define $A = P\, \tilde\Sigma\, P^\top + \Omega$ . Then the adjusted expected returns are
+```math
+\mu_{BL}
+\;=\;
+\pi
+\;+\;
+\tilde\Sigma\,P^\top\,A^{-1}\,\bigl(q \;-\; P\,\pi\bigr)
+```
+with $\mu_{BL}\in\mathbb{R}^n\$ .
+```math
+\Sigma_{BL}
+\;=\;
+\Sigma
+\;+\;
+\tilde\Sigma
+\;-\;
+\tilde\Sigma\,P^\top\,A^{-1}\,P\,\tilde\Sigma
+```
+
 
 * **`capm.py`** – Helper implementing the CAPM formula:
 
@@ -298,7 +470,7 @@ $$
 
 ## Technical Indicators and Sentiment (`indicators`)
 
-* **`technical_indicators.py`** – Calculates technical Buy and Sell stock indicators, scoring each ticker and saving results to
+* **`technical_indicators.py`** – Calculates technical Buy and Sell stock indicators, scoring each ticker and saving the results to
   Excel.
 
   These indicators include:
@@ -311,7 +483,7 @@ $$
   - ATR (Average True Range) Breakout with ATR window of 14, ATR Breakout window of 20 and ATR Multiplier of 1.5.
   - OBV (On-Balance Volume) Divergence with OBV lookback of 20.
   - True Wilder ADX (Average Directional Index) with ADX window and ADX threshold of 14 and 25 respectively.
-  - MFI (Money Flow Index) with MDI window of 14 and Buy and Sell thresholds of 20 and 80 respectively.
+  - MFI (Money Flow Index) with MFI window of 14 and Buy and Sell thresholds of 20 and 80 respectively.
   - VWAP (Volume Weighted Average Price) with VWAP window of 14
 
  Buy and Sell signals are given a score of ± 1
@@ -385,22 +557,15 @@ $$
 
   There is also my proprietary function for portfolio constraints to minimise portfolio risk and return forecast errors. Each ticker that has a positive expected return and a positive score is assigned an initial weight value of the s of the square root of the tickers market cap / forecasting standard error.
   
-  The sum of all of these values is the calculated and each ticker is assigned a value corresponding to:
-
-$$
-\tilde{w}_i
-= \frac{\frac{\sqrt{\mathrm{Market Cap}_i}}{\mathrm{SE}_i}}{\sum{\frac{\sqrt{\mathrm{Market Cap}_i}}{{SE}_i}}}
-$$
-
   The lower and upper portfolio weight constraints are then given by:
 
 
 $$
 \mathrm{Lower}_i
-= \tilde{w}_i \cdot \frac{\mathrm{score}_i}{\max \mathrm{score}},
+= \frac{\frac{\sqrt{\mathrm{Market Cap}_i}}{\mathrm{SE}_i}}{\sum{\frac{\sqrt{\mathrm{Market Cap}_i}}{{SE}_i}}} \cdot \frac{\mathrm{score}_i}{\max \mathrm{score}},
 \qquad
 \mathrm{Upper}_i
-= \sqrt{\tilde{w}_i} \cdot \frac{\mathrm{score}_i}{\max \mathrm{score}}.
+= \sqrt{\frac{\frac{\sqrt{\mathrm{Market Cap}_i}}{\mathrm{SE}_i}}{\sum{\frac{\sqrt{\mathrm{Market Cap}_i}}{{SE}_i}}}} \cdot \frac{\mathrm{score}_i}{\max \mathrm{score}}.
 $$
 
   These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%. 
