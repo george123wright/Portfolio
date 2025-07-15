@@ -42,9 +42,11 @@ The major components are described below.
 
 * **`financial_data.py`** – Retrieves analyst estimates and financial statements
   via `yfinance`.  Processes historical draws and exports metrics such as EPS,
-  revenue growth and analyst price targets. It assigns a standard error metric for the average price prediction via the equation
+  revenue growth and analyst price targets.
 
-$\displaystyle \frac{\text{Max Price Prediction} - \text{Min Price Prediction}}{2\, Z \cdot \text{Price}}$ 
+  It assigns a standard error metric for the average price prediction via the equation
+
+  $\displaystyle \frac{\text{Max Price Prediction} - \text{Min Price Prediction}}{2\, Z \cdot \text{Price}}$ 
 
   where alpha for the Z-score is calculated using alpha 1 / number of analysts.
   
@@ -52,7 +54,7 @@ $\displaystyle \frac{\text{Max Price Prediction} - \text{Min Price Prediction}}{
   rates, CPI, GDP, unemployment) from FRED and major index prices.
 * **`factor_data.py`** – Loads Fama–French factor returns from the Fama–French
   database for use in factor models.
-* **`collecting_data.py`** – Downloads historical OHLCV data, computes basic
+* **`collecting_data.py`** – Downloads historical open, close, low, high and volume data, computes basic
   technical indicators with the `ta` package and scrapes economic forecasts from
   Trading Economics. 
 
@@ -61,37 +63,53 @@ These scripts populate the Excel workbooks used by later stages.
 ## Data Processing (`data_processing`)
 
 * **`financial_forecast_data.py`** – Handles per‑ticker financial statements and
-  analyst forecasts.  Provides convenience methods for currency adjustment,
+  analyst forecasts.
+
+  Provides convenience methods for currency adjustment,
   outlier removal and generating forward‑looking KPIs used by the models.
+  
 * **`macro_data.py`** – Wrapper around macroeconomic series giving easy access to
   inflation, GDP growth and other regressors.
+  
 * **`ratio_data.py`** – Loads historical financial ratios and derives growth
   metrics used for regressions.
+  
 * **`ind_data_processing.py`** – Cleans the stock screener output and aggregates
   industry/region level data.
 
 ## Forecast Models (`forecasts`)
 
-Machine-Learning
+#### Machine-Learning:
+
 * **`prophet_model.py`** – Utilises Facebook Prophet with piecewise linear and logistic trends.
 
-Financial and macro regressors extend the additive model, and cross-validation tunes changepoints and seasonality. Weekly seasonalal trends is enabled. Daily and yearly seasonality is disabled due to the substantial noise created.
+  Financial and macro regressors extend the additive model, and cross-validation tunes changepoints and seasonality. Weekly seasonalal trends is enabled. Daily and yearly seasonality is disabled due to the   substantial noise created.
 
-Scenario draws create probabilistic price paths.
-* 
+  Scenario draws create probabilistic price paths.
+
 * **`Sarimax.py`** – Fits SARIMAX (Seasonal Autoregressive Integrated Moving Average + Exogenous Variables) time-series models with exogenous macro factors.
 
-Candidate ARIMA (Autoregressive Integrated Moving Average) orders are weighted by AIC (Akaike Information Criterion) to form an ensemble. 
+  Candidate ARIMA (Autoregressive Integrated Moving Average) orders are weighted by AIC (Akaike Information Criterion) to form an ensemble. 
 
-Future macro scenarios are drawn from a VAR (Vector Auto Regressive) process via Cholesky simulation.and propagated through the model.
+  Future macro scenarios are drawn from a VAR (Vector Auto Regressive) process via Cholesky simulation.and propagated through the model.
 
-Monte-Carlo simulaion is then used to generate correlated draws from the VAR models output
-* 
-* **`lstm.py`** – Builds a recurrent LSTM (Long Short-Term Memory) network on rolling windows of returns and engineered factors. Robust scaling, dropout layers and early stopping help regularise the model. Bootstrapped datasets yield an ensemble of forecasts for each ticker. Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
-* 
-* **`returns_reg_pred.py`** – Trains a gradient‑boosting regression on engineered features to predict twelve‑month returns. Hyperparameters are tuned with grid search, and bootstrapped samples produce an ensemble of models. Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
+  Monte-Carlo simulaion is then used to generate correlated draws from the VAR models output
+  
+* **`lstm.py`** – Builds a recurrent LSTM (Long Short-Term Memory) network on rolling windows of returns and engineered factors.
 
-Intrinsic Valuation:
+  Robust scaling, dropout layers and early stopping help regularise the model.
+
+  Bootstrapped datasets yield an ensemble of forecasts for each ticker.
+
+  Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
+  
+* **`returns_reg_pred.py`** – Trains a gradient‑boosting regression on engineered features to predict twelve‑month returns.
+
+  Hyperparameters are tuned with grid search, and bootstrapped samples produce an ensemble of models.
+
+  Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
+
+#### Intrinsic Valuation:
 
 * **`dcf.py`** – Performs discounted cash‑flow valuation to determine the enterprise value. Cash flows are
   forecast using elastic‑net regression (see `fast_regression.py`) and then
@@ -104,21 +122,26 @@ Intrinsic Valuation:
   relationships between drivers. Monte-Carlo simulation is used for the aformentioned reason.
   
 * **`ri.py`** – Implements a residual income model where future book value is
-  grown and excess returns are discounted using the cost of equity. Monte-Carlo simulation is once again used for the aformentioned reason.
+  grown and excess returns are discounted using the cost of equity.
+
+  Monte-Carlo simulation is once again used for the aformentioned reason.
 
 
-Relative Valuation and Factor Models:
+#### Relative Valuation and Factor Models:
 
-* **`relative_valuation_and_capm.py`** – A script to compute the relative value and then the stock price via valuation ratios and analyst earnings and revenue estimates. The script also computes factor model forecasts (CAPM, Fama-French 3 factor model and Fama-French 5 factor model) to derive expected returns. Betas are estimated by OLS, factor paths are simulated with VAR, and Black–Litterman views adjust expected market returns.
+* **`relative_valuation_and_capm.py`** – A script to compute the relative value and then the stock price via valuation ratios and analyst earnings and revenue estimates.
+
+  The script also computes factor model forecasts (CAPM, Fama-French 3 factor model and Fama-French 5 factor model) to derive expected returns. Betas are estimated by OLS, factor paths are simulated with VAR, and Black–Litterman views adjust expected market returns.
 
 * **`Combination_Forecast.py`** – Aggregates all of the above model outputs into
   a Bayesian ensemble, applying weights and producing an overall score table.
 
-  Weights are are assigned for each models prediction based on the inverse of the standard error or volatility. These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is 1 / number of valid models.
+  Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e. $ \frac{\frac{1}{\text{forecast_i SE}}}{\[ \sum_{n=1}^{\text{Number of Valid Models}{\frac{1}{\text{forecast_i SE}}}\]}$. These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $ \frac{1}{\text{number of valid models}}
 
   The score is inspired by the Pitroski F-score.
 
-  It includes all 9 of the Pitroski F-Score variables
+  It includes all 9 of the Pitroski F-Score variables:
+
   1: Positive ROA
   2: Positive Operating Cash Flow
   3: ROA year on year growth
@@ -174,16 +197,14 @@ Relative Valuation and Factor Models:
   - Positive Jensen's Alpha over last 5 years with respect to the S&P500 -> +1, Negative Jensens Alpha over last 5 years with respect to the S&P500 -> -1
   - Negative Predicted Jensen's Alpha -> -5
  
-  I then consider daily sentiment scores from webscraping r/wallstreetbets. This is to capture the sentiment ammongst Retail Investors, which have an increasing importance in influencing the market:
+  I then consider daily sentiment scores from webscraping r/wallstreetbets. This is to capture the sentiment ammongst retail investors, which have an increasing importance in influencing the market:
 
   - Positive Average Sentiment -> +1, Negative Average Sentiment -> -1
   - Positive Average Sentiment and over 4 mentions -> +1, Negative Average Sentiment and over 4 mentions -> -1
   - Average Sentiment > 0.2 and over 4 mentions -> +1, Average Sentiment < 0.2 and over 4 mentions -> -1
   - Average Sentiment > 0.2 and over 10 mentions -> +1, Average Sentiment < 0.2 and over 10 mentions -> -1
 
-I then add the scores from the technical buy and sell indicators to these scores.
-
-  For 
+  I then add the scores from the technical buy and sell indicators to these scores.
 
 ## Utility Functions (`functions`)
 
