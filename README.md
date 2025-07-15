@@ -2,12 +2,12 @@
 
 This repository hosts a set of Python scripts for constructing equity portfolios using a range of quantitative valuation models and optimisation techniques. The workflow pulls market and fundamental data, generates forecasts with multiple statistical approaches and produces optimised portfolio allocations. The results are written to Excel workbooks for inspection or further analysis.
 
-The repository follows a classical quantitive finance qorkflow:
+The repository follows a classical quantitative finance workflow:
 
-1) Data Ingestion: Acquiring market, fundamental, and alternative data.
-2) Signal Generation: Using various models to forecast equity returns and buy and sell signals.
-3) Portfolio Construction: Optimising asset weights based on the forecasts and risk models.
-4) Reporting: Analysisng chasrateristics of the resulting portfolio.
+1) Acquire market, fundamental, and alternative data.
+2) Use various models to forecast equity returns and buy and sell signals.
+3) Optimising asset weights based on the forecasts and risk models.
+4) Analysing characteristics of the resulting portfolio.
 
 The techniques used are a sophisticated blend of traditional financial modeling, econometric time series analysis, modern machine learning and my own proprietary models
 
@@ -46,9 +46,21 @@ The major components are described below.
 
   It assigns a standard error metric for the average price prediction via the equation
 
-  $\displaystyle \frac{\text{Max Price Prediction } - \text{ Min Price Prediction}}{2\, Z \cdot \text{Price}}$ 
+  $$
+  \mathrm{SE}
+  = \frac{\max\!\bigl(\text{Price Prediction}\bigr) \;-\; \min\!\bigl(\text{Price Prediction}\bigr)}
+         {2\,Z \,\times\, P}
+  $$
 
-  where alpha for the Z-score is calculated using alpha = $\displaystyle \frac{1}{\text{number of analysts}}$.
+  where
+
+  $$
+  \alpha \;=\;\frac{1}{N_{\text{analysts}}}
+  \quad\Longrightarrow\quad
+  Z = Z_{1 - \alpha/2}.
+  $$
+
+  alpha for the Z-score is calculated using alpha = $\displaystyle \frac{1}{\text{number of analysts}}$.
   
 * **`fetch_macro_data.py`** – Downloads macroeconomic time series (interest
   rates, CPI, GDP, unemployment) from FRED and major index prices.
@@ -79,11 +91,11 @@ These scripts populate the Excel workbooks used by later stages.
 
 ## Forecast Models (`forecasts`)
 
-#### Machine-Learning:
+### Machine-Learning:
 
 * **`prophet_model.py`** – Utilises Facebook Prophet with piecewise linear and logistic trends.
 
-  Financial and macro regressors extend the additive model, and cross-validation tunes changepoints and seasonality. Weekly seasonalal trends is enabled. Daily and yearly seasonality is disabled due to the   substantial noise created.
+  Financial and macro regressors extend the additive model, and cross-validation tunes changepoints and seasonality. Weekly seasonal trends are enabled. Daily and yearly seasonality is disabled due to the   substantial noise created.
 
   Scenario draws create probabilistic price paths.
 
@@ -91,9 +103,9 @@ These scripts populate the Excel workbooks used by later stages.
 
   Candidate ARIMA (Autoregressive Integrated Moving Average) orders are weighted by AIC (Akaike Information Criterion) to form an ensemble. 
 
-  Future macro scenarios are drawn from a VAR (Vector Auto Regressive) process via Cholesky simulation.and propagated through the model.
+  Future macro scenarios are drawn from a VAR (Vector Auto Regressive) process via Cholesky simulation and propagated through the model.
 
-  Monte-Carlo simulaion is then used to generate correlated draws from the VAR models output
+  Monte-Carlo simulation is then used to generate correlated draws from the VAR models output
   
 * **`lstm.py`** – Builds a recurrent LSTM (Long Short-Term Memory) network on rolling windows of returns and engineered factors.
 
@@ -109,7 +121,7 @@ These scripts populate the Excel workbooks used by later stages.
 
   Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
 
-#### Intrinsic Valuation:
+### Intrinsic Valuation:
 
 * **`dcf.py`** – Performs discounted cash‑flow valuation to determine the enterprise value. Cash flows are
   forecast using elastic‑net regression (see `fast_regression.py`) and then
@@ -127,7 +139,7 @@ These scripts populate the Excel workbooks used by later stages.
   Monte-Carlo simulation is once again used for the aformentioned reason.
 
 
-#### Relative Valuation and Factor Models:
+### Relative Valuation and Factor Models:
 
 * **`relative_valuation_and_capm.py`** – A script to compute the relative value and then the stock price via valuation ratios and analyst earnings and revenue estimates.
 
@@ -138,7 +150,13 @@ These scripts populate the Excel workbooks used by later stages.
 
   Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e.
 
-  $$\displaystyle \frac{\dfrac{1}{\mathrm{forecast}_i\,SE}}{\sum_{n=1}^{N_{\text{valid}}}\dfrac{1}{\mathrm{forecast}_n\,SE}}$$
+  $$
+  w_i
+  = \frac{\bigl(\mathrm{forecast}_i \times \mathrm{SE}_i\bigr)^{-1}}
+         {\displaystyle\sum_{n=1}^{N_{\mathrm{valid}}}
+              \bigl(\mathrm{forecast}_n \times \mathrm{SE}_n\bigr)^{-1}
+         }.
+  $$
 
   These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $ \frac{1}{\text{number of valid models}}$.
 
@@ -185,7 +203,7 @@ These scripts populate the Excel workbooks used by later stages.
 
   - Strong Buy Recommendation -> +3
   - Hold Recommendation -> -1
-  - Sell or Strong Sell Recomendation -> -5
+  - Sell or Strong Sell Recommendation -> -5
  
   I then consider the stock prices movement within the market:
 
@@ -201,7 +219,7 @@ These scripts populate the Excel workbooks used by later stages.
   - Positive Jensen's Alpha over last 5 years with respect to the S&P500 -> +1, Negative Jensens Alpha over last 5 years with respect to the S&P500 -> -1
   - Negative Predicted Jensen's Alpha -> -5
  
-  I then consider daily sentiment scores from webscraping r/wallstreetbets. This is to capture the sentiment ammongst retail investors, which have an increasing importance in influencing the market:
+  I then consider daily sentiment scores from webscraping r/wallstreetbets. This is to capture the sentiment amongst retail investors, which have an increasing importance in influencing the market:
 
   - Positive Average Sentiment -> +1, Negative Average Sentiment -> -1
   - Positive Average Sentiment and over 4 mentions -> +1, Negative Average Sentiment and over 4 mentions -> -1
@@ -235,7 +253,7 @@ These scripts populate the Excel workbooks used by later stages.
   
   - MACD (Moving Average Convergence/Divergence)
   - RSI (Relative Strength Index) with Buy and Sell thresholds of 30 and 70 respectively over a 14 day period window.
-  - EMA (Expenential Moving Average) Crossover Signals with Fast and Slow moving averages of 12 and 26 respectively.
+  - EMA (Exponential Moving Average) Crossover Signals with Fast and Slow moving averages of 12 and 26 respectively.
   - Bollinger Signals with a Bollinger Band window of 20 with Bollinger Band standard deviation of 2.
   - Stochastic Signals with Slow and Fast windows of 14 and 3 respectively, and with buy and sell values of 20 and 80 respectively.
   - ATR (Average True Range) Breakout with ATR window of 14, ATR Breakout window of 20 and ATR Multiplier of 1.5.
@@ -309,7 +327,7 @@ Provides multiple models blending peer multiples and fundamental data:
 - Max Risk Adjusted Score Portfolio
 - Custom Portfolio
 
-The custom portfolio maximise's the scaled Sharpe Ratio, Sortino Ratio and the Sharpe Ratio using Black Litterman returns and covariance, and then adds a penalty term for deviations from the Max Information Ratio Portfolio. This optimiser uses empirical CDF transform for scalling.
+The custom portfolio maximise's the scaled Sharpe Ratio, Sortino Ratio and the Sharpe Ratio using Black Litterman returns and covariance, and then adds a penalty term for deviations from the Max Information Ratio Portfolio. This optimiser uses empirical CDF transform for scaling.
 
 I have also included constraint on sectors, with the a maximum of 15% of the portfolio being in a single sector, with the exception of Healthcare, which has a upper limit of 10% and Technology which has a limit of 30%.
 
@@ -319,30 +337,34 @@ There is also my proprietary function for portfolio constraints to minimise port
 
 The sum of all of these values is the calculated and an initial weight of 
 
-$$\displaystyle
+$$
 \tilde{w}_i
-  = \frac{\frac{\sqrt{\text{Market Cap}_i}}{\text{Forecast Standard Error}_i}
-         { \displaystyle \sum_i \frac{\sqrt{ \text{Market Cap}_i}}{\text{Forecast Standard Error}_i } }
+= \frac{\sqrt{\mathrm{MarketCap}_i}\,/\,\mathrm{SE}_i}
+       {\displaystyle\sum_{j}
+            \sqrt{\mathrm{MarketCap}_j}\,/\,\mathrm{SE}_j
+       }.
 $$
 
-The lower and upper portfolio weight constraints are given by:
+The lower and upper portfolio weight constraints are then given by:
 
 
-$$\displaystyle
-\text{Upper}_i
-  = \sqrt{ \tilde{w}_i } \times
-    \frac{ \text{score}_i }{ \max_j \{ \text{score}_j \} },
+$$
+\mathrm{Upper}_i
+= \sqrt{\tilde{w}_i}
+  \;\times\;
+  \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}},
 \qquad
-\text{Lower}_i
-  = \tilde{w}_i \times
-    \frac{ \text{score}_i }{ \max_j \{ \text{score}_j \} }
+\mathrm{Lower}_i
+= \tilde{w}_i
+  \;\times\;
+  \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}}.
 $$
 
-These bounds are subject to contstraints. I have a minimum value of $\displaystyle \frac{2}{\text{Money in Portfolio}}$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%.
+These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%.
 
 ## Running the Toolkit
 
-A typical end‑to‑end workflow is:
+A typical end-to-end workflow is:
 
 1. **Data download** – Run the scripts under `fetch_data/` to gather the latest
    market, fundamental and macro data.
