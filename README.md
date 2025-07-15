@@ -1,5 +1,23 @@
 # Portfolio Optimisation Toolkit
 
+## Table of Contents
+- [Installation](#Installation)
+- [Repository Layout](#Repository-Layout)
+- [Data Collection](#Data-Collection)
+- [Data Processing](#Data-Processing)
+- [Forecast Models](#Forecast-Models)
+- [Machine-Learning](#Machine-Learning)
+- [Intrinsic Valuation](#Intrinsic-Valuation)
+- [Relative Valuation and Factor Models](#Relative-Valuation-and-Factor-Models)
+- [Relative Valuation](#Relative-Valuation)
+- [Forecast Ensemble and Score](#Forecast-Ensemble-and-Score)
+- [Utility Functions](#Utility-Functions)
+- [Technical Indicators and Sentiment](#Technical-Indicators-and-Sentiment)
+- [Portfolio Optimisation](#Portfolio-Optimisation)
+- [Running the Toolkit](#Running-the-Toolkit)
+- [Notes](#Notes)
+- [License](#License)
+
 This repository hosts a set of Python scripts for constructing equity portfolios using a range of quantitative valuation models and optimisation techniques. The workflow pulls market and fundamental data, generates forecasts with multiple statistical approaches and produces optimised portfolio allocations. The results are written to Excel workbooks for inspection or further analysis.
 
 The repository follows a classical quantitative finance workflow:
@@ -125,6 +143,19 @@ The major components are described below.
 * **`relative_valuation_and_capm.py`** – A script to compute the relative value and then the stock price via valuation ratios and analyst earnings and revenue estimates.
 
   The script also computes factor model forecasts (CAPM, Fama-French 3 factor model and Fama-French 5 factor model) to derive expected returns. Betas are estimated by OLS, factor paths are simulated with VAR, and Black–Litterman views adjust expected market returns.
+
+## Relative Valuation (`rel_val`)
+
+Provides multiple models blending peer multiples and fundamental data:
+
+* **`pe.py`, `price_to_sales.py`, `pbv.py`, `ev.py`** – Compute valuations using peer multiples such as P/E, P/S, P/BV and EV/Sales based on industry and regional medians as well as the own tickers respective metric.
+  
+* **`graham_model.py`** – Implements a Graham‑style intrinsic value combining earnings and book value metrics. This does not use 22.5, and instead uses the industry averages.
+  
+* **`relative_valuation.py`** – Consolidates all relative valuation signals into a single fair value estimate.
+
+
+## Forecast Ensemble and Score
 
 * **`Combination_Forecast.py`** – Fuses all of the model return forecasts and standard errors into
   a Bayesian ensemble, applying weights and producing an overall score.
@@ -294,15 +325,7 @@ $$
 
   I have tuned this dictionary to account for relevant slang and market related terms frequently used. For example, "bullish", "buy the dip" and "yolo".
 
-## Relative Valuation (`rel_val`)
 
-Provides multiple models blending peer multiples and fundamental data:
-
-* **`pe.py`, `price_to_sales.py`, `pbv.py`, `ev.py`** – Compute valuations using peer multiples such as P/E, P/S, P/BV and EV/Sales based on industry and regional medians as well as the own tickers respective metric.
-  
-* **`graham_model.py`** – Implements a Graham‑style intrinsic value combining earnings and book value metrics. This does not use 22.5, and instead uses the industry averages.
-  
-* **`relative_valuation.py`** – Consolidates all relative valuation signals into a single fair value estimate.
 
 ## Portfolio Optimisation (`Optimiser`)
 
