@@ -44,21 +44,7 @@ The major components are described below.
   via `yfinance`.  Processes historical draws and exports metrics such as EPS,
   revenue growth and analyst price targets.
 
-  It assigns a standard error metric for the average price prediction via the equation
-
-$$
-\mathrm{SE}
-= \frac{\max\bigl(\text{Price Prediction}\bigr) \-\ \min\bigl(\text{Price Prediction}\bigr)}
-       {2 * Z_{score} * P}
-$$
-
-  where
-
-$$
-\alpha \;=\frac{1}{N_{\text{analysts}}}
-\quad\Longrightarrow\quad
-Z = Z_{1 - \alpha/2}.
-$$
+  It assigns a standard error metric for the average price prediction via the equation $\displaystyle \sigma = \frac{\text{Max Price Prediction } - \text{ Min Price Prediction}}{2 \cdot Z \cdot \text{Price}}$ where $\alpha \;=\frac{1}{N_{\text{analysts}}} \quad\Longrightarrow\quad Z = Z_{1 - \alpha/2}$
   
 * **`fetch_macro_data.py`** – Downloads macroeconomic time series (interest
   rates, CPI, GDP, unemployment) from FRED and major index prices.
@@ -68,7 +54,7 @@ $$
   technical indicators with the `ta` package and scrapes economic forecasts from
   Trading Economics. 
 
-These scripts populate the Excel workbooks used by later stages.
+* These scripts populate the Excel workbooks used in later stages.
 
 ## Data Processing (`data_processing`)
 
@@ -146,9 +132,8 @@ These scripts populate the Excel workbooks used by later stages.
   Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e.
 
 $$
-w_i = \frac{\displaystyle\frac{1}{\mathrm{SE}_i}}{\displaystyle\sum_{n=1}^{N_{\mathrm{valid}}} \frac{1}{\mathrm{SE}_n}}
+w_i = \frac{\frac{1}{\mathrm{SE}_i^2}}{\sum{\frac{1}{{SE}_i^2}}}
 $$
-
 
   These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $ \frac{1}{\text{number of valid models}}$.
 
@@ -168,28 +153,38 @@ $$
 
   I adapt this in the following way
 
-  - Negative Return on Assets -> -1
-  - Return on Assets > Industry Average -> +1, Return on Assets < Industry Average -> -1
-  - Previous Return on Assets < Current Return on Assets -> -1
-  - Previous Current Ratio > Current Ratio -> -1
+  - Negative Return on Assets $\Rightarrow$- 1
+  - Return on Assets > Industry Average $\Rightarrow$ + 1
+  - Return on Assets < Industry Average $\Rightarrow$ - 1
+  - Previous Return on Assets < Current Return on Assets $\Rightarrow$ - 1
+  - Previous Current Ratio > Current Ratio $\Rightarrow$ - 1
 
   I then add the following scores relating to financials as well. These were back tested to see the significance.
 
-  - 5% increase in percentage of shares shorted month on month -> -1, 5% decrease in percentage of shares shorted month on month -> +1
-  - Insider Purchases -> +2, Insider Selling -> -1
-  - Positive Earnings Growth -> +1, Negative Earnings Growth -> -1
-  - Top 25% Earnings Growth -> +1
-  - Earnings Growth > Industry Average Earnings Growth -> +1
-  - Analyst Average Predicted EPS > Current EPS -> +1, Analyst Average Predicted EPS < Current EPS -> -1
-  - Revenue Growth > Industry Average Revenue Growth -> +1, Revenue Growth < Industry Average Revenue Growth -> -1 
-  - Analyst Average Predicted Revenue > Current Revenue -> +1, Analyst Average Predicted Revenue < Current Revenue -> -1
-  - Positive Return on Equity -> +1
-  - ROE > Industry Average Return on Equity -> +1, Return on Equity < Industry Average Return on Equity -> -1
-  - 0 < Price to Book <= 1 -> _1
-  - Negative Price to Book -> -1
-  - Price to Book < Industry Price to Book -> +1, Price to Book > Industry Price to Book -> -1
-  - Trailing 12 month Price to Earnings > Industry Price to Earnings -> -1 
-  - Forward Price to Earnings < Trailing 12 month Price to Earnings -> +1, Forward Price to Earnings > Trailing 12 month Price to Earnings -> -1
+  - 5% increase in percentage of shares shorted month on month $\Rightarrow$ - 1
+  - 5% decrease in percentage of shares shorted month on month $\Rightarrow$ + 1
+  - Insider Purchases $\Rightarrow$ + 2
+  - Insider Selling $\Rightarrow$ - 1
+  - Positive Earnings Growth $\Rightarrow$ + 1
+  - Negative Earnings Growth $\Rightarrow$ - 1
+  - Top 25% Earnings Growth $\Rightarrow$ + 1
+  - Earnings Growth > Industry Average Earnings Growth $\Rightarrow$ + 1
+  - Analyst Average Predicted EPS > Current EPS $\Rightarrow$ + 1
+  - Analyst Average Predicted EPS < Current EPS $\Rightarrow$ - 1
+  - Revenue Growth > Industry Average Revenue Growth $\Rightarrow$ + 1
+  - Revenue Growth < Industry Average Revenue Growth $\Rightarrow$ - 1 
+  - Analyst Average Predicted Revenue > Current Revenue $\Rightarrow$ + 1
+  - Analyst Average Predicted Revenue < Current Revenue $\Rightarrow$ - 1
+  - Positive Return on Equity $\Rightarrow$ + 1
+  - ROE > Industry Average Return on Equity $\Rightarrow$ + 1
+  - Return on Equity < Industry Average Return on Equity $\Rightarrow$ - 1
+  - 0 < Price to Book <= 1 $\Rightarrow$ - 1
+  - Negative Price to Book $\Rightarrow$ - 1
+  - Price to Book < Industry Price to Book $\Rightarrow$ + 1
+  - Price to Book > Industry Price to Book $\Rightarrow$ - 1
+  - Trailing 12 month Price to Earnings > Industry Price to Earnings $\Rightarrow$ - 1 
+  - Forward Price to Earnings < Trailing 12 month Price to Earnings $\Rightarrow$ + 1
+  - Forward Price to Earnings > Trailing 12 month Price to Earnings $\Rightarrow$ - 1
 
   I then consider Analyst recommendations, to gather a sense of professional sentiment:
 
@@ -235,16 +230,32 @@ $$
 * **`capm.py`** – Helper implementing the CAPM formula:
 
 $$
+\quad
 \mathbb{E}[R_i]
-= R_f
-+ \beta_i \left(\mathbb{E}[R_m] - R_f\right),
-\qquad
-\beta_i = \frac{\operatorname{Cov}(R_i, R_m)}{\operatorname{Var}(R_m)}
+= R_f + \beta_i \bigl(\mathbb{E}[R_m] - R_f\bigr),
 $$
+
 
 * **`coe.py`** – Calculates the cost of equity per ticker by combining country risk premiums and currency risk with the standard CAPM estimate.
 
-* **`fama_french_3_pred.py` / `fama_french_5_pred.py`** – Estimate expected returns using the Fama–French factor models using OLS Betas and simulated future factor values.
+* **`fama_french_3_pred.py` / `fama_french_5_pred.py`** – Estimate expected returns using the Fama–French 3 factor and Fama-French 5 factor models using OLS Betas and simulated future factor values.
+
+  Fama-French 3 factor model is given by:
+  
+$$
+\quad
+\mathbb{E}[R_i]
+= R_f + \beta_{i,m} \bigl(\mathbb{E}[R_m] - R_f\bigr) + \beta_{i,\mathrm{SMB}} \mathbb{E}[\mathrm{SMB}] + \beta_{i,\mathrm{HML}} \mathbb{E}[\mathrm{HML}],
+$$
+
+  Fama-French 5 factor model is given by:
+  
+$$
+\quad
+\mathbb{E}[R_i]
+= R_f + \beta_{i,m} \bigl(\mathbb{E}[R_m] - R_f\bigr) + \beta_{i,\mathrm{SMB}} \mathbb{E}[\mathrm{SMB}] + \beta_{i,\mathrm{HML}} \mathbb{E}[\mathrm{HML}] + \beta_{i,\mathrm{RMW}} \mathbb{E}[\mathrm{RMW}] + \beta_{i,\mathrm{CMA}} \mathbb{E}[\mathrm{CMA}],
+$$
+
   
 * **`factor_simulations.py`** – Generates future factor realisations by fitting a VAR model and applying Cholesky shocks. These simulated paths feed into the Fama–French forecasts.
   
@@ -348,7 +359,8 @@ Provides multiple models blending peer multiples and fundamental data:
   The sum of all of these values is the calculated and an initial weight of 
 
 $$
-\tilde{w}_i = \frac{\displaystyle\frac{\sqrt{\mathrm{MarketCap}_i}}{\mathrm{SE}_i}}{\displaystyle\sum_{j=1}^{N} \frac{\sqrt{\mathrm{MarketCap}_j}}{\mathrm{SE}_j}}
+\tilde{w}_i
+= \frac{\frac{\sqrt{\mathrm{Market Cap}_i}}{\mathrm{SE}_i}}{\sum{\frac{\mathrm{Market Cap}_i}{{SE}_i}}}
 $$
 
   The lower and upper portfolio weight constraints are then given by:
@@ -356,10 +368,10 @@ $$
 
 $$
 \mathrm{Upper}_i
-= \sqrt{\tilde{w}_i} * \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}},
+= \sqrt{\tilde{w}_i} \cdot \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}},
 \qquad
 \mathrm{Lower}_i
-= \tilde{w}_i * \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}}.
+= \tilde{w}_i \cdot \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}}.
 $$
 
   These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%.
