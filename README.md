@@ -188,30 +188,34 @@ $$
 
   I then consider Analyst recommendations, to gather a sense of professional sentiment:
 
-  - Strong Buy Recommendation -> +3
-  - Hold Recommendation -> -1
-  - Sell or Strong Sell Recommendation -> -5
+  - Strong Buy Recommendation $\Rightarrow$ + 3
+  - Hold Recommendation $\Rightarrow$ - 1
+  - Sell or Strong Sell Recommendation $\Rightarrow$ - 5
  
   I then consider the stock prices movement within the market:
 
-  - Positive Skewness based on last 5 years weekly returns -> +1
-  - Sharpe Ratio based on last year weekly returns > 1.0 -> +1
-  - Sortin Ratio based on last year weekly returns > 1.0 -> +1
-  - Upside Ratio > 1.5 and Downside Ratio < 0.5 based on last 5 years weekly returns with respect to the S&P500 -> +1
-  - Upside Ratio > 1.0 and Downside Ratio < 0.5 based on last 5 years weekly returns with respect to the S&P500 -> +1
-  - Upside Ratio > 1.0 and Downside Ratio < 1.0 based on last 5 years weekly returns with respect to the S&P500 -> +1
-  - Upside Ratio > 1.5 and Downside Ratio < 1.0 based on last 5 years weekly returns with respect to the S&P500 -> +1
-  - Downside Ratio > 1.0 and Upside Ratio < Downside Ratio based on last 5 years weekly returns with respect to the S&P500 -> -1
-  - Downside Ratio > 1.5 and Upside Ratio < Downside Ratio based on last 5 years weekly returns with respect to the S&P500 -> -1
-  - Positive Jensen's Alpha over last 5 years with respect to the S&P500 -> +1, Negative Jensens Alpha over last 5 years with respect to the S&P500 -> -1
-  - Negative Predicted Jensen's Alpha -> -5
+  - Positive Skewness based on last 5 years weekly returns $\Rightarrow$ + 1
+  - Sharpe Ratio based on last year weekly returns > 1.0 $\Rightarrow$ + 1
+  - Sortin Ratio based on last year weekly returns > 1.0 $\Rightarrow$ + 1
+  - Upside Ratio > 1.5 and Downside Ratio < 0.5 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
+  - Upside Ratio > 1.0 and Downside Ratio < 0.5 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
+  - Upside Ratio > 1.0 and Downside Ratio < 1.0 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
+  - Upside Ratio > 1.5 and Downside Ratio < 1.0 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
+  - Downside Ratio > 1.0 and Upside Ratio < Downside Ratio based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ - 1
+  - Downside Ratio > 1.5 and Upside Ratio < Downside Ratio based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ - 1
+  - Positive Jensen's Alpha over last 5 years with respect to the S&P500 -> +1, Negative Jensens Alpha over last 5 years with respect to the S&P500 $\Rightarrow$ - 1
+  - Negative Predicted Jensen's Alpha $\Rightarrow$ - 5
  
   I then consider daily sentiment scores from webscraping r/wallstreetbets. This is to capture the sentiment amongst retail investors, which have an increasing importance in influencing the market:
 
-  - Positive Average Sentiment -> +1, Negative Average Sentiment -> -1
-  - Positive Average Sentiment and over 4 mentions -> +1, Negative Average Sentiment and over 4 mentions -> -1
-  - Average Sentiment > 0.2 and over 4 mentions -> +1, Average Sentiment < 0.2 and over 4 mentions -> -1
-  - Average Sentiment > 0.2 and over 10 mentions -> +1, Average Sentiment < 0.2 and over 10 mentions -> -1
+  - Positive Average Sentiment $\Rightarrow$ + 1
+  - Negative Average Sentiment $\Rightarrow$ - 1
+  - Positive Average Sentiment and over 4 mentions $\Rightarrow$ + 1
+  - Negative Average Sentiment and over 4 mentions $\Rightarrow$ - 1
+  - Average Sentiment > 0.2 and over 4 mentions $\Rightarrow$ + 1
+  - Average Sentiment < 0.2 and over 4 mentions $\Rightarrow$ - 1
+  - Average Sentiment > 0.2 and over 10 mentions $\Rightarrow$ + 1
+  - Average Sentiment < 0.2 and over 10 mentions $\Rightarrow$ - 1
 
   I then add the scores from the technical buy and sell indicators to these scores.
 
@@ -248,7 +252,7 @@ $$
 = R_f + \beta_{i,m} \bigl(\mathbb{E}[R_m] - R_f\bigr) + \beta_{i,\mathrm{SMB}} \mathbb{E}[\mathrm{SMB}] + \beta_{i,\mathrm{HML}} \mathbb{E}[\mathrm{HML}],
 $$
 
-  Fama-French 5 factor model is given by:
+ Fama-French 5 factor model is given by:
   
 $$
 \quad
