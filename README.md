@@ -42,7 +42,12 @@ The major components are described below.
 
 * **`financial_data.py`** – Retrieves analyst estimates and financial statements
   via `yfinance`.  Processes historical draws and exports metrics such as EPS,
-  revenue growth and analyst price targets. It assigns a standard error metric for the average price prediction via the equation $\displaystyle \frac{\text{Max Price Prediction} - \text{Min Price Prediction}}{2\, Z \cdot \text{Price}}$ where alpha for the Z-score is calculated using alpha 1 / number of analysts.
+  revenue growth and analyst price targets. It assigns a standard error metric for the average price prediction via the equation
+
+$\displaystyle \frac{\text{Max Price Prediction} - \text{Min Price Prediction}}{2\, Z \cdot \text{Price}}$ 
+
+  where alpha for the Z-score is calculated using alpha 1 / number of analysts.
+  
 * **`fetch_macro_data.py`** – Downloads macroeconomic time series (interest
   rates, CPI, GDP, unemployment) from FRED and major index prices.
 * **`factor_data.py`** – Loads Fama–French factor returns from the Fama–French
