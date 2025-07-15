@@ -141,15 +141,15 @@ $$
 
   It includes all 9 of the Pitroski F-Score variables:
 
-  1. Positive Return on Assets
-  2. Positive Operating Cash Flow
-  3. ROA year on year growth
-  4. Operating Cash Flow higher than Net Income
-  5. Negative Long Term Debt year on year Growth
-  6. Current Ratio year on year growth
-  7. No new shares Issued
-  8. Higher year on year Gross Margin
-  9. Higher Asset Turnover Ratio year on year Growth.
+  1. Positive Return on Assets $\Rightarrow$ + 1
+  2. Positive Operating Cash Flow $\Rightarrow$ + 1
+  3. ROA year on year growth $\Rightarrow$ + 1
+  4. Operating Cash Flow higher than Net Income $\Rightarrow$ + 1
+  5. Negative Long Term Debt year on year Growth $\Rightarrow$ + 1
+  6. Current Ratio year on year growth $\Rightarrow$ + 1
+  7. No new shares Issued $\Rightarrow$ + 1
+  8. Higher year on year Gross Margin $\Rightarrow$ + 1
+  9. Higher Asset Turnover Ratio year on year Growth $\Rightarrow$ + 1
 
   I adapt this in the following way
 
@@ -197,12 +197,12 @@ $$
   - Positive Skewness based on last 5 years weekly returns $\Rightarrow$ + 1
   - Sharpe Ratio based on last year weekly returns > 1.0 $\Rightarrow$ + 1
   - Sortin Ratio based on last year weekly returns > 1.0 $\Rightarrow$ + 1
-  - Upside Ratio > 1.5 and Downside Ratio < 0.5 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
-  - Upside Ratio > 1.0 and Downside Ratio < 0.5 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
-  - Upside Ratio > 1.0 and Downside Ratio < 1.0 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
-  - Upside Ratio > 1.5 and Downside Ratio < 1.0 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
-  - Downside Ratio > 1.0 and Upside Ratio < Downside Ratio based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ - 1
-  - Downside Ratio > 1.5 and Upside Ratio < Downside Ratio based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ - 1
+  - Upside Capture Ratio > 1.5 and Downside Capture Ratio < 0.5 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
+  - Upside Capture Ratio > 1.0 and Downside Capture Ratio < 0.5 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
+  - Upside Capture Ratio > 1.0 and Downside Capture Ratio < 1.0 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
+  - Upside Capture Ratio > 1.5 and Downside Capture Ratio < 1.0 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
+  - Downside Capture Ratio > 1.0 and Upside Capture Ratio < Downside Capture Ratio based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ - 1
+  - Downside Capture Ratio > 1.5 and Upside Capture Ratio < Downside Capture Ratio based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ - 1
   - Positive Jensen's Alpha over last 5 years with respect to the S&P500 $\Rightarrow$ + 1
   - Negative Jensens Alpha over last 5 years with respect to the S&P500 $\Rightarrow$ - 1
   - Negative Predicted Jensen's Alpha $\Rightarrow$ - 5
@@ -353,8 +353,12 @@ Provides multiple models blending peer multiples and fundamental data:
   - Max Risk Adjusted Score Portfolio
   - Custom Portfolio
 
-  The custom portfolio maximise's the scaled Sharpe Ratio, Sortino Ratio and the Sharpe Ratio using Black Litterman returns and covariance, and then adds a penalty term for deviations from the Max Information Ratio Portfolio. This optimiser uses empirical CDF transform for scaling.
-  
+  The custom portfolio maximise's the scaled Sharpe Ratio, Sortino Ratio and the Sharpe Ratio using Black Litterman returns and covariance, and then adds a penalty term for deviations from the Max Information Ratio Portfolio. This optimiser uses empirical CDF transform for scaling. The objective function can be written as:
+
+```math
+\max \Biggl[\gamma_{\mathrm{Sharpe}} \Bigl(\frac{\mathbb{E}[R_i] - R_f}{\sigma_i}\Bigr) + \gamma_{\mathrm{Sortino}} \Bigl(\frac{\mathbb{E}[R_i] - R_f}{\mathrm{DD}_i}\Bigr) + \gamma_{\mathrm{Sharpe,BL}} \Bigl(\frac{\mathbb{E}[R_i]^{\mathrm{BL}} - R_f}{\sigma_i^{\mathrm{BL}}}\Bigr) - \gamma_{\mathrm{Information}} \sum_{i}\Bigl(w_i - w_{i,\mathrm{MIR}}\Bigr)^{2}\Biggr]
+```
+ 
   I have also included constraint on sectors, with the a maximum of 15% of the portfolio being in a single sector, with the exception of Healthcare, which has a upper limit of 10% and Technology which has a limit of 30%.
 
 * **`Portfolio_Optimisation.py`** – Orchestrates data loading, covariance estimation and optimisation runs, then exports weights, attribution and performance statistics.
@@ -365,7 +369,7 @@ Provides multiple models blending peer multiples and fundamental data:
 
 $$
 \tilde{w}_i
-= \frac{\frac{\sqrt{\mathrm{Market Cap}_i}}{\mathrm{SE}_i}}{\sum{\frac{\mathrm{Market Cap}_i}{{SE}_i}}}
+= \frac{\frac{\sqrt{\mathrm{Market Cap}_i}}{\mathrm{SE}_i}}{\sum{\frac{\sqrt{\mathrm{Market Cap}_i}}{{SE}_i}}}
 $$
 
   The lower and upper portfolio weight constraints are then given by:
@@ -373,10 +377,10 @@ $$
 
 $$
 \mathrm{Lower}_i
-= \tilde{w}_i \cdot \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}},
+= \tilde{w}_i \cdot \frac{\mathrm{score}_i}{\max \mathrm{score}},
 \qquad
 \mathrm{Upper}_i
-= \sqrt{\tilde{w}_i} \cdot \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}}.
+= \sqrt{\tilde{w}_i} \cdot \frac{\mathrm{score}_i}{\max \mathrm{score}}.
 $$
 
   These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%. 
