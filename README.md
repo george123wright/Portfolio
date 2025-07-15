@@ -126,8 +126,8 @@ The major components are described below.
 
   The script also computes factor model forecasts (CAPM, Fama-French 3 factor model and Fama-French 5 factor model) to derive expected returns. Betas are estimated by OLS, factor paths are simulated with VAR, and Black–Litterman views adjust expected market returns.
 
-* **`Combination_Forecast.py`** – Aggregates all of the above model outputs into
-  a Bayesian ensemble, applying weights and producing an overall score table.
+* **`Combination_Forecast.py`** – Fuses all of the model return forecasts and standard errors into
+  a Bayesian ensemble, applying weights and producing an overall score.
 
   Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e.
 
@@ -135,21 +135,21 @@ $$
 w_i = \frac{\frac{1}{\mathrm{SE}_i^2}}{\sum{\frac{1}{{SE}_i^2}}}
 $$
 
-  These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $ \frac{1}{\text{number of valid models}}$.
+  These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $\displaystyle \frac{1}{\text{number of valid models}}$.
 
   The score is inspired by the Pitroski F-score.
 
   It includes all 9 of the Pitroski F-Score variables:
 
-  1: Positive Return on Assets
-  2: Positive Operating Cash Flow
-  3: ROA year on year growth
-  4: Operating Cash Flow higher than Net Income
-  5: Negative Long Term Debt year on year Growth
-  6: Current Ratio year on year growth
-  7: No new shares Issued
-  8: Higher year on year Gross Margin
-  9: Higher Asset Turnover Ratio year on year Growth.
+  1. Positive Return on Assets
+  2. Positive Operating Cash Flow
+  3. ROA year on year growth
+  4. Operating Cash Flow higher than Net Income
+  5. Negative Long Term Debt year on year Growth
+  6. Current Ratio year on year growth
+  7. No new shares Issued
+  8. Higher year on year Gross Margin
+  9. Higher Asset Turnover Ratio year on year Growth.
 
   I adapt this in the following way
 
@@ -203,7 +203,8 @@ $$
   - Upside Ratio > 1.5 and Downside Ratio < 1.0 based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ + 1
   - Downside Ratio > 1.0 and Upside Ratio < Downside Ratio based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ - 1
   - Downside Ratio > 1.5 and Upside Ratio < Downside Ratio based on last 5 years weekly returns with respect to the S&P500 $\Rightarrow$ - 1
-  - Positive Jensen's Alpha over last 5 years with respect to the S&P500 -> +1, Negative Jensens Alpha over last 5 years with respect to the S&P500 $\Rightarrow$ - 1
+  - Positive Jensen's Alpha over last 5 years with respect to the S&P500 $\Rightarrow$ + 1
+  - Negative Jensens Alpha over last 5 years with respect to the S&P500 $\Rightarrow$ - 1
   - Negative Predicted Jensen's Alpha $\Rightarrow$ - 5
  
   I then consider daily sentiment scores from webscraping r/wallstreetbets. This is to capture the sentiment amongst retail investors, which have an increasing importance in influencing the market:
@@ -285,7 +286,7 @@ $$
   - MFI (Money Flow Index) with MDI window of 14 and Buy and Sell thresholds of 20 and 80 respectively.
   - VWAP (Volume Weighted Average Price) with VWAP window of 14
 
- Buy and Sell signals are given a score of ±1
+ Buy and Sell signals are given a score of ± 1
  
 * **`wallstreetbets_scrapping.py`** – Scrapes posts and comments from r/wallstreetbets.
 
@@ -319,27 +320,27 @@ Provides multiple models blending peer multiples and fundamental data:
   - Drawdown
   - Skewness
   - Kurtosis
+  - VaR (Value at Risk)
   - VaR Gaussian
-  - VaR
-  - CVaR
+  - CVaR (Conditional Value at Risk)
   - Information Ratio
   - Annualised Returns
   - Ucler Index
-  - CDaR
+  - CDaR (Conditional Drawdown at Risk)
   - Jensen's Alpha
   - Capture Ratios
   - Sortino Ratios
   - Calmar Ratio
   - Omega Ratio
   - Modigliani Ratio
-  - MAR Ratio
+  - MAR (Managed Account Reports) Ratio
   - Pain Index
   - Pain Ratio
   - Tail Ratio
-  - RAROC
+  - RAROC (Risk Adjusted Return on Capital)
   - Percentage of Portfolio Positive Streaks
-  - Geometric Brownian Motion
-  - Portfolio Simulation
+  - Geometric Brownian Motion 
+  - Portfolio Simulation 
   - Simulation and Portfolio Metrics Report
 
 * **`portfolio_optimisers.py`** – Implements portfolio optimisers subject to constraints using `scipy.optimize`. These optimisers include:
@@ -371,14 +372,14 @@ $$
 
 
 $$
-\mathrm{Upper}_i
-= \sqrt{\tilde{w}_i} \cdot \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}},
-\qquad
 \mathrm{Lower}_i
-= \tilde{w}_i \cdot \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}}.
+= \tilde{w}_i \cdot \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}},
+\qquad
+\mathrm{Upper}_i
+= \sqrt{\tilde{w}_i} \cdot \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}}.
 $$
 
-  These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%.
+  These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%. 
 
 ## Running the Toolkit
 
