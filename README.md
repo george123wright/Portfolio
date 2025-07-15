@@ -138,13 +138,7 @@ The major components are described below.
   Monte-Carlo simulation is once again used for the aformentioned reason.
 
 
-### Relative Valuation and Factor Models:
-
-* **`relative_valuation_and_capm.py`** – A script to compute the relative value and then the stock price via valuation ratios and analyst earnings and revenue estimates.
-
-  The script also computes factor model forecasts (CAPM, Fama-French 3 factor model and Fama-French 5 factor model) to derive expected returns. Betas are estimated by OLS, factor paths are simulated with VAR, and Black–Litterman views adjust expected market returns.
-
-## Relative Valuation (`rel_val`)
+### Relative Valuation and Factor Models (`rel_val`):
 
 Provides multiple models blending peer multiples and fundamental data:
 
@@ -153,6 +147,10 @@ Provides multiple models blending peer multiples and fundamental data:
 * **`graham_model.py`** – Implements a Graham‑style intrinsic value combining earnings and book value metrics. This does not use 22.5, and instead uses the industry averages.
   
 * **`relative_valuation.py`** – Consolidates all relative valuation signals into a single fair value estimate.
+
+* **`relative_valuation_and_capm.py`** – A script to compute the relative value and then the stock price via valuation ratios and analyst earnings and revenue estimates.
+
+  The script also computes factor model forecasts (CAPM, Fama-French 3 factor model and Fama-French 5 factor model) to derive expected returns. Betas are estimated by OLS, factor paths are simulated with VAR, and Black–Litterman views adjust expected market returns.
 
 
 ## Forecast Ensemble and Score
