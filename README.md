@@ -341,7 +341,7 @@ $$\displaystyle
     \frac{ \text{score}_i }{ \max_j \{ \text{score}_j \} }
 $$
 
-These bounds are subject to contstraints. I have a minimum value of $\displaystyle \frac{2}{\text{Money in Portfolio}}$ constraint on the lower bound and the upper constraint is 0.1, with the excepetion of tickers that are in the Healthcare sector.
+These bounds are subject to contstraints. I have a minimum value of $\displaystyle \frac{2}{\text{Money in Portfolio}}$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%.
 
 ## Running the Toolkit
 
