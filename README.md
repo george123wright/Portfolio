@@ -48,7 +48,7 @@ The major components are described below.
 
   $\displaystyle \frac{\text{Max Price Prediction} - \text{Min Price Prediction}}{2\, Z \cdot \text{Price}}$ 
 
-  where alpha for the Z-score is calculated using alpha $ \frac{1}{\text{number of analysts}}$.
+  where alpha for the Z-score is calculated using alpha $\displaystyle \frac{1}{\text{number of analysts}}$.
   
 * **`fetch_macro_data.py`** – Downloads macroeconomic time series (interest
   rates, CPI, GDP, unemployment) from FRED and major index prices.
@@ -136,7 +136,7 @@ These scripts populate the Excel workbooks used by later stages.
 * **`Combination_Forecast.py`** – Aggregates all of the above model outputs into
   a Bayesian ensemble, applying weights and producing an overall score table.
 
-  Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e. $\frac{\dfrac{1}{\mathrm{forecast}_i\,SE}}{\displaystyle\sum_{n=1}^{N_{\text{valid}}}\dfrac{1}{\mathrm{forecast}_n\,SE}}$.
+  Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e. $\displaystyle \frac{\dfrac{1}{\mathrm{forecast}_i\,SE}}{\displaystyle\sum_{n=1}^{N_{\text{valid}}}\dfrac{1}{\mathrm{forecast}_n\,SE}}$.
 
   These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $ \frac{1}{\text{number of valid models}}$.
 
@@ -213,9 +213,8 @@ These scripts populate the Excel workbooks used by later stages.
 * **`fast_regression.py`** – An elastic‑net solver built with CVXPY used to forecast cash flows in `dcf.py` and `dcfe.py`. It applies Huber loss and L1 (Lasso) / L2 (Ridge) penalties and performs grid‑search cross‑validation, optionally enforcing accounting sign constraints.
 * **`cov_functions.py`** – Implements covariance estimators including constant‑correlation and Ledoit–Wolf shrinkage. Predicted covariances are derived from multi‑horizon scaling with an extended Stein shrinkage variant.
 * **`black_litterman_model.py`** – Implements the Black–Litterman Bayesian update combining equilibrium market returns with subjective views to obtain posterior means and covariances.
-* **`capm.py`** – Helper implementing the CAPM formula: $$
-\operatorname{E}[R_i] = R_f + \beta_i \bigl( \operatorname{E}[R_m] - R_f \bigr )
-$$
+* **`capm.py`** – Helper implementing the CAPM formula: \displaystyle
+\operatorname{E}[R_i] = R_f + \beta_i \bigl( \operatorname{E}[R_m] - R_f \bigr )$
 .
 * **`coe.py`** – Calculates the cost of equity per ticker by combining country risk premiums and currency risk with the standard CAPM estimate.
 * **`fama_french_3_pred.py` / `fama_french_5_pred.py`** – Estimate expected
@@ -318,14 +317,14 @@ I have also included constraint on sectors, with the a maximum of 15% of the por
 
 There is also a custom function for portfolio constraints. For each ticker that has a positive expected return and a positive score is assigned an initial weight value of the s of the square root of the tickers market cap / forecasting standard error.
 
-The sum of all of these values is the calculated and an initial weight of $$
+The sum of all of these values is the calculated and an initial weight of $\displaystyle
 \tilde{w}_i
   = \frac{ \sqrt{\text{MC}_i / \text{SE}_i} }
          { \displaystyle \sum_j \sqrt{ \text{MC}_j / \text{SE}_j } }
-$$ 
+$
 (square root market cap / forecasting standard error) / sum ((square root market cap / forecasting standard error)
 
-This value is the square rooted and multiplied by the score / max score of all the tickers. This is the upper weight constraint. $$
+This value is the square rooted and multiplied by the score / max score of all the tickers. This is the upper weight constraint. $\displaystyle
 \text{Upper}_i
   = \sqrt{ \tilde{w}_i } \times
     \frac{ \text{score}_i }{ \max_j \{ \text{score}_j \} },
@@ -333,7 +332,7 @@ This value is the square rooted and multiplied by the score / max score of all t
 \text{Lower}_i
   = \tilde{w}_i \times
     \frac{ \text{score}_i }{ \max_j \{ \text{score}_j \} }
-$$
+$
 
 The lower weight constraing is this value before square rooting and multipled by the score / max score of all the tickers.
 
