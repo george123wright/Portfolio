@@ -46,9 +46,9 @@ The major components are described below.
 
   It assigns a standard error metric for the average price prediction via the equation
 
-  $\displaystyle \frac{\text{Max Price Prediction} - \text{Min Price Prediction}}{2\, Z \cdot \text{Price}}$ 
+  $\displaystyle \frac{\text{Max Price Prediction } - \text{ Min Price Prediction}}{2\, Z \cdot \text{Price}}$ 
 
-  where alpha for the Z-score is calculated using alpha $\displaystyle \frac{1}{\text{number of analysts}}$.
+  where alpha for the Z-score is calculated using alpha = $\displaystyle \frac{1}{\text{number of analysts}}$.
   
 * **`fetch_macro_data.py`** – Downloads macroeconomic time series (interest
   rates, CPI, GDP, unemployment) from FRED and major index prices.
@@ -136,7 +136,9 @@ These scripts populate the Excel workbooks used by later stages.
 * **`Combination_Forecast.py`** – Aggregates all of the above model outputs into
   a Bayesian ensemble, applying weights and producing an overall score table.
 
-  Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e. $\displaystyle \frac{\dfrac{1}{\mathrm{forecast}_i\,SE}}{\displaystyle\sum_{n=1}^{N_{\text{valid}}}\dfrac{1}{\mathrm{forecast}_n\,SE}}$.
+  Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e.
+
+  $$\displaystyle \frac{\dfrac{1}{\mathrm{forecast}_i\,SE}}{\sum_{n=1}^{N_{\text{valid}}}\dfrac{1}{\mathrm{forecast}_n\,SE}}$$
 
   These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $ \frac{1}{\text{number of valid models}}$.
 
@@ -144,7 +146,7 @@ These scripts populate the Excel workbooks used by later stages.
 
   It includes all 9 of the Pitroski F-Score variables:
 
-  1: Positive ROA
+  1: Positive Return on Assets
   2: Positive Operating Cash Flow
   3: ROA year on year growth
   4: Operating Cash Flow higher than Net Income
@@ -156,9 +158,9 @@ These scripts populate the Excel workbooks used by later stages.
 
   I adapt this in the following way
 
-  - Negative ROA -> -1
-  - ROA > Industry Average -> +1, ROA < Industry Average -> -1
-  - Previous ROA < ROA -> -1
+  - Negative Return on Assets -> -1
+  - Return on Assets > Industry Average -> +1, Return on Assets < Industry Average -> -1
+  - Previous Return on Assets < Current Return on Assets -> -1
   - Previous Current Ratio > Current Ratio -> -1
 
   I then add the following scores relating to financials as well. These were back tested to see the significance.
@@ -171,8 +173,8 @@ These scripts populate the Excel workbooks used by later stages.
   - Analyst Average Predicted EPS > Current EPS -> +1, Analyst Average Predicted EPS < Current EPS -> -1
   - Revenue Growth > Industry Average Revenue Growth -> +1, Revenue Growth < Industry Average Revenue Growth -> -1 
   - Analyst Average Predicted Revenue > Current Revenue -> +1, Analyst Average Predicted Revenue < Current Revenue -> -1
-  - Positive ROE -> +1
-  - ROE > Industry Average ROE -> +1, ROE < Industry Average ROE -> -1
+  - Positive Return on Equity -> +1
+  - ROE > Industry Average Return on Equity -> +1, Return on Equity < Industry Average Return on Equity -> -1
   - 0 < Price to Book <= 1 -> _1
   - Negative Price to Book -> -1
   - Price to Book < Industry Price to Book -> +1, Price to Book > Industry Price to Book -> -1
@@ -297,7 +299,7 @@ Provides multiple models blending peer multiples and fundamental data:
 - Percentage of Portfolio Positive Streaks
 - Geometric Brownian Motion
 - Portfolio Simulation
-- Simulation and Metric Report
+- Simulation and Portfolio Metrics Report
 
 * **`portfolio_optimisers.py`** – Implements portfolio optimisers subject to constraints using `scipy.optimize`. These optimisers include:
 
@@ -317,14 +319,19 @@ I have also included constraint on sectors, with the a maximum of 15% of the por
 
 There is also a custom function for portfolio constraints. For each ticker that has a positive expected return and a positive score is assigned an initial weight value of the s of the square root of the tickers market cap / forecasting standard error.
 
-The sum of all of these values is the calculated and an initial weight of $\displaystyle
+The sum of all of these values is the calculated and an initial weight of 
+
+$$\displaystyle
 \tilde{w}_i
   = \frac{ \sqrt{\text{MC}_i / \text{SE}_i} }
          { \displaystyle \sum_j \sqrt{ \text{MC}_j / \text{SE}_j } }
-$
+$$
 (square root market cap / forecasting standard error) / sum ((square root market cap / forecasting standard error)
 
-This value is the square rooted and multiplied by the score / max score of all the tickers. This is the upper weight constraint. $\displaystyle
+This value is the square rooted and multiplied by the score / max score of all the tickers. This is the upper weight constraint. The lower weight constraint is this value before square rooting and multipled by the score / max score of all the tickers.
+
+
+$$\displaystyle
 \text{Upper}_i
   = \sqrt{ \tilde{w}_i } \times
     \frac{ \text{score}_i }{ \max_j \{ \text{score}_j \} },
@@ -332,11 +339,9 @@ This value is the square rooted and multiplied by the score / max score of all t
 \text{Lower}_i
   = \tilde{w}_i \times
     \frac{ \text{score}_i }{ \max_j \{ \text{score}_j \} }
-$
+$$
 
-The lower weight constraing is this value before square rooting and multipled by the score / max score of all the tickers.
-
-These bounds are subject to contstraints. I have a minimum value of $ \frac{2}{\text{Money in Portfolio}}$ constraint on the lower bound and the upper constraint is 0.1, with the excepetion of tickers that are in the Healthcare sector.
+These bounds are subject to contstraints. I have a minimum value of $\displaystyle \frac{2}{\text{Money in Portfolio}}$ constraint on the lower bound and the upper constraint is 0.1, with the excepetion of tickers that are in the Healthcare sector.
 
 ## Running the Toolkit
 
