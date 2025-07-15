@@ -385,7 +385,7 @@ $$
 
   There is also my proprietary function for portfolio constraints to minimise portfolio risk and return forecast errors. Each ticker that has a positive expected return and a positive score is assigned an initial weight value of the s of the square root of the tickers market cap / forecasting standard error.
   
-  The sum of all of these values is the calculated and an initial weight of 
+  The sum of all of these values is the calculated and each ticker is assigned a value corresponding to:
 
 $$
 \tilde{w}_i
