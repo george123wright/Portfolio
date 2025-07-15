@@ -152,11 +152,12 @@ These scripts populate the Excel workbooks used by later stages.
 
 $$
 w_i
-= \frac{\bigl(\mathrm{forecast}_i \times \mathrm{SE}_i\bigr)^{-1}}
+= \frac{\displaystyle\frac{1}{\mathrm{SE}_i}}
        {\displaystyle\sum_{n=1}^{N_{\mathrm{valid}}}
-            \bigl(\mathrm{forecast}_n \times \mathrm{SE}_n\bigr)^{-1}
-       }.
+            \frac{1}{\mathrm{SE}_n}
+       }
 $$
+
 
   These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $ \frac{1}{\text{number of valid models}}$.
 
@@ -231,22 +232,35 @@ $$
 ## Utility Functions (`functions`)
 
 * **`fast_regression.py`** – An elastic‑net solver built with CVXPY used to forecast cash flows in `dcf.py` and `dcfe.py`. It applies Huber loss and L1 (Lasso) / L2 (Ridge) penalties and performs grid‑search cross‑validation, optionally enforcing accounting sign constraints.
+* 
 * **`cov_functions.py`** – Implements covariance estimators including constant‑correlation and Ledoit–Wolf shrinkage. Predicted covariances are derived from multi‑horizon scaling with an extended Stein shrinkage variant.
+* 
 * **`black_litterman_model.py`** – Implements the Black–Litterman Bayesian update combining equilibrium market returns with subjective views to obtain posterior means and covariances.
-* **`capm.py`** – Helper implementing the CAPM formula: $\displaystyle \operatorname{E}[R_i] = R_f + \beta_i \bigl( \operatorname{E}[R_m] - R_f \bigr )$.
+* **`capm.py`** – Helper implementing the CAPM formula: 
+$$
+\mathbb{E}[R_i]
+= R_f \;+\;
+\beta_i\,\bigl(\mathbb{E}[R_m] - R_f\bigr),
+\qquad
+\beta_i
+= \frac{\operatorname{Cov}(R_i,\,R_m)}{\operatorname{Var}(R_m)}.
+$$
+
 * **`coe.py`** – Calculates the cost of equity per ticker by combining country risk premiums and currency risk with the standard CAPM estimate.
+* 
 * **`fama_french_3_pred.py` / `fama_french_5_pred.py`** – Estimate expected
   returns using the Fama–French factor models using OLS Betas and simulated future factor
   values.
+  
 * **`factor_simulations.py`** – Generates future factor realisations by fitting a VAR model and applying Cholesky shocks. These simulated paths feed into the Fama–French forecasts.
-* **`export_forecast.py`** – Writes DataFrames to Excel with conditional
-  formatting and table styling.
-* **`read_pred_file.py`** – Reads previously generated forecast sheets and
-  updates them with latest market prices.
+  
+* **`export_forecast.py`** – Writes DataFrames to Excel with conditional formatting and table styling.
+  
+* **`read_pred_file.py`** – Reads previously generated forecast sheets and updates them with latest market prices.
 
 ## Technical Indicators and Sentiment (`indicators`)
 
-* **`technical_indicators.py`** – Calculatestechnical indicators, scoring each ticker and saving results to
+* **`technical_indicators.py`** – Calculates technical Buy and Sell stock indicators, scoring each ticker and saving results to
   Excel.
 
   These indicators include:
@@ -264,88 +278,86 @@ $$
 
  Buy and Sell signals are given a score of ±1
  
-* **`wallstreetbets_scrapping.py`** – Scrapes posts and comments from
-  r/wallstreetbets. Ticker mentions are analysed with NLTK’s (Natural Language Toolkit) VADER (Valence Aware Dictionary and Sentioment Reasoner) sentiment
-  classifier and aggregated scores are saved. I have tuned this dictionary to account for relevant slang and market related terms frequently used. For example, "bullish", "buy the dip" and "yolo".
+* **`wallstreetbets_scrapping.py`** – Scrapes posts and comments from r/wallstreetbets. Ticker mentions are analysed with NLTK’s (Natural Language Toolkit) VADER (Valence Aware Dictionary and Sentioment Reasoner) sentiment classifier and aggregated scores are saved. I have tuned this dictionary to account for relevant slang and market related terms frequently used. For example, "bullish", "buy the dip" and "yolo".
 
 ## Relative Valuation (`rel_val`)
 
 Provides multiple models blending peer multiples and fundamental data:
 
 * **`pe.py`, `price_to_sales.py`, `pbv.py`, `ev.py`** – Compute valuations using peer multiples such as P/E, P/S, P/BV and EV/Sales based on industry and regional medians as well as the own tickers respective metric.
-* **`graham_model.py`** – Implements a Graham‑style intrinsic value combining
-  earnings and book value metrics. This does not use 22.5, and instead uses the industry averages.
-* **`relative_valuation.py`** – Consolidates all relative valuation signals into a
-  single fair value estimate.
+  
+* **`graham_model.py`** – Implements a Graham‑style intrinsic value combining earnings and book value metrics. This does not use 22.5, and instead uses the industry averages.
+  
+* **`relative_valuation.py`** – Consolidates all relative valuation signals into a single fair value estimate.
 
 ## Portfolio Optimisation (`Optimiser`)
 
 * **`portfolio_functions.py`** – Utility functions for:
 
-- Portfolio Return
-- Portfolio Volatility,
-- Portfolio Downside Deviation
-- Tracking Error
-- Portfolio Beta
-- Treynor Ratio
-- Portfolio Score
-- Sharpe Ratio
-- Annualised Volatility
-- Drawdown
-- Skewness
-- Kurtosis
-- VaR Gaussian
-- VaR
-- CVaR
-- Information Ratio
-- Annualised Returns
-- Ucler Index
-- CDaR
-- Jensen's Alpha
-- Capture Ratios
-- Sortino Ratios
-- Calmar Ratio
-- Omega Ratio
-- Modigliani Ratio
-- MAR Ratio
-- Pain Index
-- Pain Ratio
-- Tail Ratio
-- RAROC
-- Percentage of Portfolio Positive Streaks
-- Geometric Brownian Motion
-- Portfolio Simulation
-- Simulation and Portfolio Metrics Report
+  - Portfolio Return
+  - Portfolio Volatility,
+  - Portfolio Downside Deviation
+  - Tracking Error
+  - Portfolio Beta
+  - Treynor Ratio
+  - Portfolio Score
+  - Sharpe Ratio
+  - Annualised Volatility
+  - Drawdown
+  - Skewness
+  - Kurtosis
+  - VaR Gaussian
+  - VaR
+  - CVaR
+  - Information Ratio
+  - Annualised Returns
+  - Ucler Index
+  - CDaR
+  - Jensen's Alpha
+  - Capture Ratios
+  - Sortino Ratios
+  - Calmar Ratio
+  - Omega Ratio
+  - Modigliani Ratio
+  - MAR Ratio
+  - Pain Index
+  - Pain Ratio
+  - Tail Ratio
+  - RAROC
+  - Percentage of Portfolio Positive Streaks
+  - Geometric Brownian Motion
+  - Portfolio Simulation
+  - Simulation and Portfolio Metrics Report
 
 * **`portfolio_optimisers.py`** – Implements portfolio optimisers subject to constraints using `scipy.optimize`. These optimisers include:
 
-- Max Sharpe Portfolio
-- Max Sortino Portfolio
-- Max Information Ratio Portfolio
-- Equal Risk Portfolio
-- Max Sharpe Portfolio using Black Litterman returns and covariance
-- Max Risk Adjusted Score Portfolio
-- Custom Portfolio
+  - Max Sharpe Portfolio
+  - Max Sortino Portfolio
+  - Max Information Ratio Portfolio
+  - Equal Risk Portfolio
+  - Max Sharpe Portfolio using Black Litterman returns and covariance
+  - Max Risk Adjusted Score Portfolio
+  - Custom Portfolio
 
-The custom portfolio maximise's the scaled Sharpe Ratio, Sortino Ratio and the Sharpe Ratio using Black Litterman returns and covariance, and then adds a penalty term for deviations from the Max Information Ratio Portfolio. This optimiser uses empirical CDF transform for scaling.
-
-I have also included constraint on sectors, with the a maximum of 15% of the portfolio being in a single sector, with the exception of Healthcare, which has a upper limit of 10% and Technology which has a limit of 30%.
+  The custom portfolio maximise's the scaled Sharpe Ratio, Sortino Ratio and the Sharpe Ratio using Black Litterman returns and covariance, and then adds a penalty term for deviations from the Max Information Ratio Portfolio. This optimiser uses empirical CDF transform for scaling.
+  
+  I have also included constraint on sectors, with the a maximum of 15% of the portfolio being in a single sector, with the exception of Healthcare, which has a upper limit of 10% and Technology which has a limit of 30%.
 
 * **`Portfolio_Optimisation.py`** – Orchestrates data loading, covariance estimation and optimisation runs, then exports weights, attribution and performance statistics.
 
-There is also my proprietary function for portfolio constraints to minimise portfolio risk and return forecast errors. Each ticker that has a positive expected return and a positive score is assigned an initial weight value of the s of the square root of the tickers market cap / forecasting standard error.
-
-The sum of all of these values is the calculated and an initial weight of 
+  There is also my proprietary function for portfolio constraints to minimise portfolio risk and return forecast errors. Each ticker that has a positive expected return and a positive score is assigned an initial weight value of the s of the square root of the tickers market cap / forecasting standard error.
+  
+  The sum of all of these values is the calculated and an initial weight of 
 
 $$
 \tilde{w}_i
-= \frac{\sqrt{\mathrm{MarketCap}_i}\,/\,\mathrm{SE}_i}
-       {\displaystyle\sum_{j}
-            \sqrt{\mathrm{MarketCap}_j}\,/\,\mathrm{SE}_j
+= \frac{\displaystyle\frac{\sqrt{\mathrm{MarketCap}_i}}{\mathrm{SE}_i}}
+       {\displaystyle\sum_{j=1}^{N}
+            \frac{\sqrt{\mathrm{MarketCap}_j}}{\mathrm{SE}_j}
        }.
 $$
 
-The lower and upper portfolio weight constraints are then given by:
+  The lower and upper portfolio weight constraints are then given by:
 
 
 $$
@@ -356,7 +368,7 @@ $$
 = \tilde{w}_i * \frac{\mathrm{score}_i}{\max_i \{\mathrm{score}_i\}}.
 $$
 
-These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%.
+  These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%.
 
 ## Running the Toolkit
 
