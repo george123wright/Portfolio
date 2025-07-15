@@ -49,7 +49,7 @@ The major components are described below.
 $$
 \mathrm{SE}
 = \frac{\max\bigl(\text{Price Prediction}\bigr) \-\ \min\bigl(\text{Price Prediction}\bigr)}
-       {2 * Z-score * P}
+       {2 * Z_score * P}
 $$
 
   where
