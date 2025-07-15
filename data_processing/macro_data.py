@@ -11,7 +11,6 @@ from functools import cached_property
 from ratio_data import RatioData
 import config
 
-
 r = RatioData()
 
 COUNTRY_FALLBACK = {   
@@ -23,9 +22,9 @@ _QVARS = ["Interest", "Cpi", "Gdp", "Unemp"]
 
 _VAR_KEY = {
     "Interest": "Interest_Rate",
-    "Cpi":      "Inflation_Rate",
-    "Gdp":      "Gdp",
-    "Unemp":    "Unemployment_Rate",
+    "Cpi": "Inflation_Rate",
+    "Gdp": "Gdp",
+    "Unemp": "Unemployment_Rate",
 }
 
 
@@ -34,45 +33,63 @@ class MacroData:
     SHEET_INDEXES = "Stock Indexes and Commodities"
     
     _FORECAST_SHEETS = {
-        "Inflation_Rate":      "Inflation_Rate",
-        "Gdp":                 "Gdp",
-        "Unemployment_Rate":   "Unemployment_Rate",
-        "Interest_Rate":       "Interest_Rate",
+        "Inflation_Rate": "Inflation_Rate",
+        "Gdp": "Gdp",
+        "Unemployment_Rate": "Unemployment_Rate",
+        "Interest_Rate": "Interest_Rate",
     }
 
     def __init__(self) -> None:
+        
         self.today = dt.date.today()
-        self.hist_path = Path(config.ROOT_DIR / "macro_and_index_data.xlsx")
+        
+        self.hist_path = Path(config.BASE_DIR / "macro_and_index_data.xlsx")
+        
         self.forecast_path = Path(
-            config.FORECAST_FILE
+            config.DATA_FILE
         )
+        
         self.r = RatioData()
 
 
     @staticmethod
-    def _canon(name: str) -> str:
+    def _canon(
+        name: str
+    ) -> str:
+        
         return name.strip().lower()
 
 
     @staticmethod
-    def _annualise(series: pd.Series, method: str, col: str, pct: str) -> pd.DataFrame:
+    def _annualise(
+        series: pd.Series, 
+        method: str, 
+        col: str, 
+        pct: str
+    ) -> pd.DataFrame:
       
         if isinstance(series.index, pd.PeriodIndex):
+            
             series = series.to_timestamp(how="end")
        
         ann = series.resample("YE").mean() if method == "mean" else series.resample("YE").last()
+        
         ann.index = ann.index.to_period("Y")
        
         df = ann.to_frame(col)
-        df[pct] = df[col].pct_change(fill_method=None)
+       
+        df[pct] = df[col].pct_change(fill_method = None)
        
         return df
 
 
     @staticmethod
-    def _with_us_fallback(df: pd.DataFrame, us: pd.DataFrame) -> pd.DataFrame:
+    def _with_us_fallback(
+        df: pd.DataFrame, 
+        us: pd.DataFrame
+    ) -> pd.DataFrame:
 
-        df = df.reindex(columns=us.columns)
+        df = df.reindex(columns = us.columns)
 
         return df.combine_first(us.loc[df.index])
 
@@ -81,10 +98,13 @@ class MacroData:
     def _sheet_key(self) -> dict[str,str]:
 
         wb = pd.ExcelFile(self.hist_path, engine="openpyxl")
+       
         key = {self._canon("United States"): "United States"}
 
         for s in wb.sheet_names:
+          
             if s not in (self.SHEET_INDEXES, "United States"):
+          
                 key[self._canon(s)] = s
 
         return key
@@ -93,6 +113,7 @@ class MacroData:
     def _sheet_for(self, country: str | None) -> str:
 
         if not country:
+         
             country = "United States"
 
         country = COUNTRY_FALLBACK.get(country, country)
@@ -105,61 +126,105 @@ class MacroData:
       
         wb = pd.ExcelFile(self.hist_path, engine="openpyxl")
 
-        us_q = pd.read_excel(self.hist_path,
-                             sheet_name="United States", index_col=0,
-                             engine="openpyxl", parse_dates=True)
+        us_q = pd.read_excel(
+            self.hist_path,
+            sheet_name = "United States", 
+            index_col = 0,
+            engine = "openpyxl", 
+            parse_dates = True
+        )
 
         us_q.index = us_q.index.to_period("Q")
 
-        us_ir  = self._annualise(us_q["Interest"], "mean",
-                                 "Interest_Rate", "InterestRate_pct_change")
+        us_ir = self._annualise(
+            series = us_q["Interest"], 
+            method = "mean",
+            col = "Interest_Rate", 
+            pct = "InterestRate_pct_change"
+        )
 
-        us_inf = self._annualise(us_q["Cpi"], "mean",
-                                 "CPI", "Inflation_rate")
+        us_inf = self._annualise(
+            series = us_q["Cpi"], 
+            method = "mean",
+            col =  "CPI", 
+            pct = "Inflation_rate"
+        )
 
-        us_gdp = self._annualise(us_q["Gdp"], "last",
-                                 "Gdp", "GDP_growth")
+        us_gdp = self._annualise(
+            series = us_q["Gdp"], 
+            method = "last",
+            col = "Gdp", 
+            pct = "GDP_growth"
+        )
 
-        us_ue  = self._annualise(us_q["Unemp"], "mean",
-                                 "Unemployment_Rate", "Unemployment_pct_change")
+        us_ue = self._annualise(
+            series = us_q["Unemp"], 
+            method = "mean",
+            col = "Unemployment_Rate", 
+            pct = "Unemployment_pct_change"
+        )
 
         us_hist = us_ir.join([
             us_inf["Inflation_rate"],
             us_gdp["GDP_growth"],
             us_ue["Unemployment_pct_change"]
-        ], how="inner")
+        ], how = "inner")
 
         data = {"United States": us_hist}
 
         for sheet in wb.sheet_names:
             
             if sheet in (self.SHEET_INDEXES, "United States"):
+               
                 continue
 
-            df_q = pd.read_excel(self.hist_path,
-                                 sheet_name=sheet, index_col=0,
-                                 engine="openpyxl", parse_dates=True)
+            df_q = pd.read_excel(
+                self.hist_path,
+                sheet_name = sheet, 
+                index_col = 0,
+                engine = "openpyxl", 
+                parse_dates = True
+            )
 
             df_q.index = df_q.index.to_period("Q")
 
             for v in _QVARS:
             
                 if v not in df_q.columns:
+               
                     df_q[v] = us_q[v].loc[df_q.index].values
+               
                 else:
+               
                     df_q[v] = df_q[v].fillna(us_q[v].loc[df_q.index])
 
-            ir  = self._annualise(df_q["Interest"], "mean",
-                                  "Interest_Rate", "InterestRate_pct_change")
+            ir  = self._annualise(
+                series = df_q["Interest"],
+                method = "mean",
+                col = "Interest_Rate", 
+                pct = "InterestRate_pct_change"
+            )
        
-            inf = self._annualise(df_q["Cpi"], "mean",
-                                  "CPI", "Inflation_rate")
+            inf = self._annualise(
+                series = df_q["Cpi"], 
+                method = "mean",
+                col = "CPI", 
+                pct = "Inflation_rate"
+            )
        
-            gdp = self._annualise(df_q["Gdp"], "last",
-                                  "Gdp", "GDP_growth")
+            gdp = self._annualise(
+                series = df_q["Gdp"], 
+                method = "last",
+                col = "Gdp", 
+                pct = "GDP_growth"
+            )
        
-            ue  = self._annualise(df_q["Unemp"], "mean",
-                                  "Unemployment_Rate", "Unemployment_pct_change")
+            ue  = self._annualise(
+                series = df_q["Unemp"], 
+                method = "mean",
+                col = "Unemployment_Rate", 
+                pct = "Unemployment_pct_change"
+            )
 
             df_y = ir.join([
                 inf["Inflation_rate"],
@@ -167,7 +232,10 @@ class MacroData:
                 ue["Unemployment_pct_change"]
             ], how="inner")
        
-            df_y = self._with_us_fallback(df_y, us_hist)
+            df_y = self._with_us_fallback(
+                df = df_y, 
+                us = us_hist
+            )
        
             data[sheet] = df_y
 
@@ -177,14 +245,21 @@ class MacroData:
     @cached_property
     def historical_non_pct(self) -> dict[str,pd.DataFrame]:
        
-        wb = pd.ExcelFile(self.hist_path, engine="openpyxl")
+        wb = pd.ExcelFile(
+            self.hist_path, 
+            engine = "openpyxl"
+        )
        
-        us_q = pd.read_excel(self.hist_path,
-                             sheet_name="United States",
-                             index_col=0, engine="openpyxl",
-                             parse_dates=True)
+        us_q = pd.read_excel(
+            self.hist_path,
+            sheet_name = "United States",
+            index_col = 0, 
+            engine = "openpyxl",
+            parse_dates = True
+        )
        
         us_q.index = us_q.index.to_period("Q")
+       
         us_q = us_q[us_q.index >= pd.Period("2010Q1")]
 
         data = {
@@ -194,19 +269,27 @@ class MacroData:
         for sheet in wb.sheet_names:
        
             if sheet in (self.SHEET_INDEXES, "United States", "FX"):
+              
                 continue
 
-            df_q = pd.read_excel(self.hist_path,
-                                 sheet_name=sheet,
-                                 index_col=0, engine="openpyxl",
-                                 parse_dates=True)
+            df_q = pd.read_excel(
+                self.hist_path,
+                sheet_name = sheet,
+                index_col = 0, 
+                engine = "openpyxl",
+                parse_dates = True
+            )
+            
             df_q.index = df_q.index.to_period("Q")
+           
             df_q = df_q[df_q.index >= pd.Period("2010Q1")]
 
             for v in _QVARS:
+             
                 df_q[v] = df_q.get(v, us_q[v].loc[df_q.index]).ffill().fillna(0)
 
             if sheet in ["CHINA","United Kingdom","Germany"]:
+              
                 df_q["Gdp"] = df_q["Gdp"] / 1e9
 
             data[sheet] = df_q[_QVARS]
@@ -217,11 +300,13 @@ class MacroData:
     @cached_property
     def currency(self) -> pd.Series:
        
-        df = pd.read_excel(self.forecast_path,
-                           sheet_name="Currency",
-                           index_col=0,
-                           engine="openpyxl",
-                           parse_dates=True)
+        df = pd.read_excel(
+            self.forecast_path,
+            sheet_name = "Currency",
+            index_col = 0,
+            engine = "openpyxl",
+            parse_dates = True
+        )
        
         return df["Last"]
 
@@ -229,11 +314,13 @@ class MacroData:
     @cached_property
     def prices(self) -> pd.DataFrame:
        
-        df = pd.read_excel(self.hist_path,
-                           sheet_name=self.SHEET_INDEXES,
-                           index_col=0,
-                           engine="openpyxl",
-                           parse_dates=True)
+        df = pd.read_excel(
+            self.hist_path,
+            sheet_name = self.SHEET_INDEXES,
+            index_col = 0,
+            engine = "openpyxl",
+            parse_dates = True
+        )
        
         df.index = pd.to_datetime(df.index)
        
@@ -245,18 +332,26 @@ class MacroData:
        
         out = {}
        
-        wb = pd.ExcelFile(self.forecast_path, engine="openpyxl")
+        wb = pd.ExcelFile(
+            self.forecast_path, 
+            engine = "openpyxl"
+        )
        
         for var, sheet in self._FORECAST_SHEETS.items():
        
-            df = pd.read_excel(self.forecast_path,
-                               sheet_name=sheet,
-                               index_col=0,
-                               engine="openpyxl")
+            df = pd.read_excel(
+                self.forecast_path,
+                sheet_name = sheet,
+                index_col = 0,
+                engine = "openpyxl"
+            )
        
             try:
+          
                 df.index = pd.to_datetime(df.index, format="%Y").to_period("Y")
+          
             except (ValueError,TypeError):
+          
                 pass
        
             out[var] = df
@@ -269,18 +364,28 @@ class MacroData:
         return out
 
 
-    def _forecast_for(self, country: str) -> str:
+    def _forecast_for(
+        self, 
+        country: str
+    ) -> str:
        
         return self._forecast_key.get(
             self._canon(country), "United States"
         )
 
 
-    def _fc_row(self, var_short: str, sheet: str) -> pd.Series:
+    def _fc_row(
+        self, 
+        var_short: str, 
+        sheet: str
+    ) -> pd.Series:
        
         if sheet in getattr(self, "_hist_fallback", {}):
+         
             country = "United States"
+        
         else:
+        
             country = sheet
        
         return self.forecasts[_VAR_KEY[var_short]].loc[
@@ -288,13 +393,19 @@ class MacroData:
         ]
 
 
-    def get_base_macro_fc(self, country: str | None) -> dict[str, float]:
+    def get_base_macro_fc(
+        self, 
+        country: str | None
+    ) -> dict[str, float]:
        
         sheet = self._sheet_for(country)
 
         ir = self._fc_row("Interest", sheet)
+       
         inf = self._fc_row("Cpi", sheet)
+       
         gdp = self._fc_row("Gdp", sheet)
+       
         ue = self._fc_row("Unemp", sheet)
 
         ir_last, gdp_last, ue_last = ir["Last"], gdp["Last"], ue["Last"]
@@ -344,6 +455,7 @@ class MacroData:
             )
        
             if sheet in self.historical:
+              
                 frames[ticker] = self.historical[sheet]
        
         return pd.concat(frames, names=["ticker", "year"])
@@ -362,6 +474,7 @@ class MacroData:
             )
        
             if sheet in self.historical_non_pct:
+           
                 frames[ticker] = self.historical_non_pct[sheet]
        
         return pd.concat(frames, names=["ticker", "year"])
@@ -377,6 +490,7 @@ class MacroData:
                        if 'country' in self.r.analyst.columns else None)
         
             if country in COUNTRY_FALLBACK:
+           
                 country = COUNTRY_FALLBACK[country]
         
             records[ticker] = self.get_base_macro_fc(country)
@@ -384,14 +498,34 @@ class MacroData:
         return records
 
 
-    def get_base_macro_fc(self, country: str | None) -> dict[str, float]:
+    def get_base_macro_fc(
+        self, 
+        country: str | None
+    ) -> dict[str, float]:
         
-        sheet = self._sheet_for(country)
+        sheet = self._sheet_for(
+            country = country
+        )
 
-        ir = self._fc_row("Interest", sheet)
-        inf = self._fc_row("Cpi", sheet)
-        gdp = self._fc_row("Gdp", sheet)
-        ue = self._fc_row("Unemp", sheet)
+        ir = self._fc_row(
+            var_short = "Interest", 
+            sheet = sheet
+        )
+        
+        inf = self._fc_row(
+            var_short = "Cpi", 
+            sheet = sheet
+        )
+        
+        gdp = self._fc_row(
+            var_short = "Gdp", 
+            sheet = sheet
+        )
+        
+        ue = self._fc_row(
+            var_short = "Unemp",
+            sheet = sheet
+        )
 
         ir_last, gdp_last, ue_last = ir["Last"], gdp["Last"], ue["Last"]
 
@@ -403,10 +537,11 @@ class MacroData:
         }
     
     
-    def convert_to_gbp_rates(self,
-                             current_col: str = 'Last',
-                             future_col:  str = 'Q1/26'
-                            ) -> pd.DataFrame:
+    def convert_to_gbp_rates(
+        self,
+        current_col: str = 'Last',
+        future_col:  str = 'Q1/26'
+    ) -> pd.DataFrame:
 
         df = pd.read_excel(
             self.forecast_path,
@@ -418,8 +553,11 @@ class MacroData:
         )
        
         try:
+           
             gbp_usd = df.at['GBPUSD', current_col]
+      
         except KeyError:
+      
             raise ValueError("Couldn't find a 'GBPUSD' row in the DataFrame.") 
 
         records = []
@@ -427,18 +565,25 @@ class MacroData:
         for pair, row in df.iterrows():
       
             cur = row[current_col]
+      
             fut = row[future_col]
 
             if pair == 'GBPUSD':
+      
                 curr_rate = gbp_usd
+      
                 fut_rate  = df.at['GBPUSD', future_col]
       
             elif pair.endswith('USD'):
+      
                 curr_rate = gbp_usd / cur
+      
                 fut_rate  = gbp_usd / fut
       
             elif pair.startswith('USD'):
+      
                 curr_rate = cur * gbp_usd
+      
                 fut_rate  = fut * gbp_usd
       
             else:
@@ -456,18 +601,24 @@ class MacroData:
         df = pd.DataFrame(records)
 
 
-        def _label(pair: str) -> str:
+        def _label(
+            pair: str
+        ) -> str:
       
             if pair == 'GBPUSD':
+      
                 x = 'USD'
       
             elif pair.endswith('USD'):
+      
                 x = pair[:3]
       
             elif pair.startswith('USD'):
+      
                 x = pair[3:]
       
             else:
+      
                 x = pair
       
             return f"GBP{x}"
