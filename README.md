@@ -48,7 +48,7 @@ The major components are described below.
 
   $\displaystyle \frac{\text{Max Price Prediction} - \text{Min Price Prediction}}{2\, Z \cdot \text{Price}}$ 
 
-  where alpha for the Z-score is calculated using alpha $ \frac{1}{\text{number of analysts}}.
+  where alpha for the Z-score is calculated using alpha $ \frac{1}{\text{number of analysts}}$.
   
 * **`fetch_macro_data.py`** – Downloads macroeconomic time series (interest
   rates, CPI, GDP, unemployment) from FRED and major index prices.
@@ -136,14 +136,9 @@ These scripts populate the Excel workbooks used by later stages.
 * **`Combination_Forecast.py`** – Aggregates all of the above model outputs into
   a Bayesian ensemble, applying weights and producing an overall score table.
 
-  Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e. $\displaystyle
-\frac{ 
-  \displaystyle \frac{1}{\mathrm{forecast}_i\,SE}
-}{
-  \displaystyle \sum_{n=1}^{N_{\rm valid}}
-    \frac{1}{\mathrm{forecast}_n\,SE}
-}$
-. These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $ \frac{1}{\text{number of valid models}}
+  Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e. $\frac{\dfrac{1}{\mathrm{forecast}_i\,SE}}{\displaystyle\sum_{n=1}^{N_{\text{valid}}}\dfrac{1}{\mathrm{forecast}_n\,SE}}$.
+
+  These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $ \frac{1}{\text{number of valid models}}$.
 
   The score is inspired by the Pitroski F-score.
 
