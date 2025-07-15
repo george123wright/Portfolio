@@ -213,7 +213,10 @@ These scripts populate the Excel workbooks used by later stages.
 * **`fast_regression.py`** – An elastic‑net solver built with CVXPY used to forecast cash flows in `dcf.py` and `dcfe.py`. It applies Huber loss and L1 (Lasso) / L2 (Ridge) penalties and performs grid‑search cross‑validation, optionally enforcing accounting sign constraints.
 * **`cov_functions.py`** – Implements covariance estimators including constant‑correlation and Ledoit–Wolf shrinkage. Predicted covariances are derived from multi‑horizon scaling with an extended Stein shrinkage variant.
 * **`black_litterman_model.py`** – Implements the Black–Litterman Bayesian update combining equilibrium market returns with subjective views to obtain posterior means and covariances.
-* **`capm.py`** – Helper implementing the CAPM formula: expected return = risk‑free rate plus beta times the equity risk premium.
+* **`capm.py`** – Helper implementing the CAPM formula: $$
+\operatorname{E}[R_i] = R_f + \beta_i \bigl( \operatorname{E}[R_m] - R_f \bigr )
+$$
+.
 * **`coe.py`** – Calculates the cost of equity per ticker by combining country risk premiums and currency risk with the standard CAPM estimate.
 * **`fama_french_3_pred.py` / `fama_french_5_pred.py`** – Estimate expected
   returns using the Fama–French factor models using OLS Betas and simulated future factor
@@ -315,13 +318,26 @@ I have also included constraint on sectors, with the a maximum of 15% of the por
 
 There is also a custom function for portfolio constraints. For each ticker that has a positive expected return and a positive score is assigned an initial weight value of the s of the square root of the tickers market cap / forecasting standard error.
 
-The sum of all of these values is the calculated and an initial weight of (square root market cap / forecasting standard error) / sum ((square root market cap / forecasting standard error)
+The sum of all of these values is the calculated and an initial weight of $$
+\tilde{w}_i
+  = \frac{ \sqrt{\text{MC}_i / \text{SE}_i} }
+         { \displaystyle \sum_j \sqrt{ \text{MC}_j / \text{SE}_j } }
+$$ 
+(square root market cap / forecasting standard error) / sum ((square root market cap / forecasting standard error)
 
-This value is the square rooted and multiplied by the score / max score of all the tickers. This is the upper weight constraint. 
+This value is the square rooted and multiplied by the score / max score of all the tickers. This is the upper weight constraint. $$
+\text{Upper}_i
+  = \sqrt{ \tilde{w}_i } \times
+    \frac{ \text{score}_i }{ \max_j \{ \text{score}_j \} },
+\qquad
+\text{Lower}_i
+  = \tilde{w}_i \times
+    \frac{ \text{score}_i }{ \max_j \{ \text{score}_j \} }
+$$
 
 The lower weight constraing is this value before square rooting and multipled by the score / max score of all the tickers.
 
-These bounds are subject to contstraints. I have a minimum value of 2 / money in portfolio constrain on the lower bound and the upper constraint is 0.1, with the excepetion of tickers that are in the Healthcare sector.
+These bounds are subject to contstraints. I have a minimum value of $ \frac{2}{\text{Money in Portfolio}}$ constraint on the lower bound and the upper constraint is 0.1, with the excepetion of tickers that are in the Healthcare sector.
 
 ## Running the Toolkit
 
