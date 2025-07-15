@@ -121,20 +121,15 @@ These scripts populate the Excel workbooks used by later stages.
 
 ### Intrinsic Valuation:
 
-* **`dcf.py`** – Performs discounted cash‑flow valuation to determine the enterprise value. Cash flows are
-  forecast using elastic‑net regression (see `fast_regression.py`) and then
-  discounted.
+* **`dcf.py`** – Performs discounted cash‑flow valuation to determine the enterprise value. Cash flows are forecast using elastic‑net regression (see `fast_regression.py`) and then discounted.
 
   Monte‑Carlo scenarios for growth generate a distribution of intrinsic values. The scenarios are used to help gauge the uncertainty of the valuation.
   
-* **`dcfe.py`** – Similar to `dcf.py` but values equity directly via
-  discounted cash‑flow to equity.  Constrained regression ensures realistic
-  relationships between drivers.
+* **`dcfe.py`** – Similar to `dcf.py` but values equity directly via discounted cash‑flow to equity.  Constrained regression ensures realistic relationships between drivers.
 
   Monte-Carlo simulation is used for the aformentioned reason.
   
-* **`ri.py`** – Implements a residual income model where future book value is
-  grown and excess returns are discounted using the cost of equity.
+* **`ri.py`** – Implements a residual income model where future book value is grown and excess returns are discounted using the cost of equity.
 
   Monte-Carlo simulation is once again used for the aformentioned reason.
 
@@ -232,10 +227,11 @@ $$
 ## Utility Functions (`functions`)
 
 * **`fast_regression.py`** – An elastic‑net solver built with CVXPY used to forecast cash flows in `dcf.py` and `dcfe.py`. It applies Huber loss and L1 (Lasso) / L2 (Ridge) penalties and performs grid‑search cross‑validation, optionally enforcing accounting sign constraints.
-* 
+
 * **`cov_functions.py`** – Implements covariance estimators including constant‑correlation and Ledoit–Wolf shrinkage. Predicted covariances are derived from multi‑horizon scaling with an extended Stein shrinkage variant.
-* 
+
 * **`black_litterman_model.py`** – Implements the Black–Litterman Bayesian update combining equilibrium market returns with subjective views to obtain posterior means and covariances.
+
 * **`capm.py`** – Helper implementing the CAPM formula: 
 $$
 \mathbb{E}[R_i]
@@ -247,7 +243,7 @@ $$
 $$
 
 * **`coe.py`** – Calculates the cost of equity per ticker by combining country risk premiums and currency risk with the standard CAPM estimate.
-* 
+
 * **`fama_french_3_pred.py` / `fama_french_5_pred.py`** – Estimate expected
   returns using the Fama–French factor models using OLS Betas and simulated future factor
   values.
