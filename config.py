@@ -29,6 +29,6 @@ lbr, ubr = -0.8, 4
 
 MAX_WEIGHT = 0.1
 
-MONEY_IN_PORTFOLIO = 4000
+MONEY_IN_PORTFOLIO = #Enter Total Ammount to Invest in Portfolio
 
 benchmark = 'SP500'
