@@ -356,7 +356,7 @@ Provides multiple models blending peer multiples and fundamental data:
   The custom portfolio maximise's the scaled Sharpe Ratio, Sortino Ratio and the Sharpe Ratio using Black Litterman returns and covariance, and then adds a penalty term for deviations from the Max Information Ratio Portfolio. This optimiser uses empirical CDF transform for scaling. The objective function can be written as:
 
 ```math
-\max \Biggl[\gamma_{\mathrm{Sharpe}} \Bigl(\frac{\mathbb{E}[R_i] - R_f}{\sigma_i}\Bigr) + \gamma_{\mathrm{Sortino}} \Bigl(\frac{\mathbb{E}[R_i] - R_f}{\mathrm{DD}_i}\Bigr) + \gamma_{\mathrm{Sharpe,BL}} \Bigl(\frac{\mathbb{E}[R_i]^{\mathrm{BL}} - R_f}{\sigma_i^{\mathrm{BL}}}\Bigr) - \gamma_{\mathrm{Information}} \sum_{i}\Bigl(w_i - w_{i,\mathrm{MIR}}\Bigr)^{2}\Biggr]
+\max \Biggl[\gamma_{\mathrm{Sharpe}} \Bigl(\frac{\mathbb{E}[R_i] - R_f}{\sigma_i}\Bigr) \quad + \quad \gamma_{\mathrm{Sortino}} \Bigl(\frac{\mathbb{E}[R_i] - R_f}{\mathrm{DD}_i}\Bigr) \quad + \quad \gamma_{\mathrm{Sharpe,BL}} \Bigl(\frac{\mathbb{E}[R_i]^{\mathrm{BL}} - R_f}{\sigma_i^{\mathrm{BL}}}\Bigr) \quad - \quad \gamma_{\mathrm{Information}} \sum_{i}\Bigl(w_i - w_{i,\mathrm{MIR}}\Bigr)^{2}\Biggr]
 ```
  
   I have also included constraint on sectors, with the a maximum of 15% of the portfolio being in a single sector, with the exception of Healthcare, which has a upper limit of 10% and Technology which has a limit of 30%.
