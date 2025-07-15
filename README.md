@@ -55,7 +55,7 @@ $$
   where
 
 $$
-\alpha \;=\;\frac{1}{N_{\text{analysts}}}
+\alpha \;=\frac{1}{N_{\text{analysts}}}
 \quad\Longrightarrow\quad
 Z = Z_{1 - \alpha/2}.
 $$
