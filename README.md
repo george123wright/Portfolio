@@ -146,11 +146,7 @@ These scripts populate the Excel workbooks used by later stages.
   Weights are are assigned for each models prediction based on the inverse of the standard error or volatility, i.e.
 
 $$
-w_i
-= \frac{\displaystyle\frac{1}{\mathrm{SE}_i}}
-       {\displaystyle\sum_{n=1}^{N_{\mathrm{valid}}}
-            \frac{1}{\mathrm{SE}_n}
-       }
+w_i = \frac{\displaystyle\frac{1}{\mathrm{SE}_i}}{\displaystyle\sum_{n=1}^{N_{\mathrm{valid}}} \frac{1}{\mathrm{SE}_n}}
 $$
 
 
@@ -240,11 +236,10 @@ $$
 
 $$
 \mathbb{E}[R_i]
-= R_f \;+\;
-\beta_i\,\bigl(\mathbb{E}[R_m] - R_f\bigr),
+= R_f
++ \beta_i \left(\mathbb{E}[R_m] - R_f\right),
 \qquad
-\beta_i
-= \frac{\operatorname{Cov}(R_i,\,R_m)}{\operatorname{Var}(R_m)}.
+\beta_i = \frac{\operatorname{Cov}(R_i, R_m)}{\operatorname{Var}(R_m)}
 $$
 
 * **`coe.py`** – Calculates the cost of equity per ticker by combining country risk premiums and currency risk with the standard CAPM estimate.
@@ -353,11 +348,7 @@ Provides multiple models blending peer multiples and fundamental data:
   The sum of all of these values is the calculated and an initial weight of 
 
 $$
-\tilde{w}_i
-= \frac{\displaystyle\frac{\sqrt{\mathrm{MarketCap}_i}}{\mathrm{SE}_i}}
-       {\displaystyle\sum_{j=1}^{N}
-            \frac{\sqrt{\mathrm{MarketCap}_j}}{\mathrm{SE}_j}
-       }.
+\tilde{w}_i = \frac{\displaystyle\frac{\sqrt{\mathrm{MarketCap}_i}}{\mathrm{SE}_i}}{\displaystyle\sum_{j=1}^{N} \frac{\sqrt{\mathrm{MarketCap}_j}}{\mathrm{SE}_j}}
 $$
 
   The lower and upper portfolio weight constraints are then given by:
