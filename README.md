@@ -92,40 +92,40 @@ The major components are described below.
 
 * **`prophet_model.py`**
 
-Utilises Facebook Prophet with piecewise linear and logistic trends.
+Utilises Facebook Prophet with piecewise linear and logistic trends. The Prophet model works by fitting an additive time-series model.
 
-Financial and macro regressors extend the additive model, and cross-validation tunes changepoints and seasonality. Weekly seasonal trends are enabled. Daily and yearly seasonality is disabled due to the   substantial noise created.
+Financial and macro regressors extend the additive model, and cross-validation tunes changepoints and seasonality. Weekly seasonal trends are enabled. Daily and yearly seasonality is disabled due to the substantial noise created.
 
-  The forecast $\(\hat y(t)\)$ is given by
+  The forecast $\hat y(t)$ is given by
 ```math
-  \hat y(t)
-  = g(t)
-  + s_w(t)
-  + \sum_{j=1}^K \beta_j\,X_j(t)
-  + \varepsilon_t,
+  \hat y(t) \quad
+  = \quad g(t) \quad 
+  + \quad s_w(t) \quad 
+  + \quad \sum_{j=1}^K \beta_j\,X_j(t) \quad
+  + \quad \varepsilon_t,
 ```
 where $g(t)$ is a piecewise-linear trend, $s_w(t)$ is weekly seasonality, $X_j(t)$ are external regressors, and $\varepsilon_t\sim N(0,\sigma^2)$. Using changepoints $\{\tau_\ell\}$ and indicators $a_\ell(t)=\mathbf{1}\{t\ge\tau_\ell\}$ gives:
 ```math
 
-  g(t)
-  = \Bigl(k + \sum_{\ell=1}^L \delta_\ell\,a_\ell(t)\Bigr)\,t
-    \;+\;
-    \Bigl(m - \sum_{\ell=1}^L \delta_\ell\,\tau_\ell\Bigr),
+  g(t) \quad 
+  = \quad \Bigl(k \quad + \quad \sum_{\ell=1}^L \delta_\ell\,a_\ell(t)\Bigr)\,t \quad
+    \;+\; \quad 
+    \Bigl(m \quad - \quad \sum_{\ell=1}^L \delta_\ell\,\tau_\ell\Bigr),
   \quad
   \delta_\ell\sim N\bigl(0,\sigma_{\delta}^2\bigr).
 ```
 For weekly seasonality, a fourier series of order $N$ with Gaussian priors on the Fourier coeficients is used:
 ```math
-  s_w(t)
-  = \sum_{n=1}^N
+  s_w(t) \quad
+  = \quad \sum_{n=1}^N
     \Bigl[
-      a_n\cos\!\bigl(2\pi n\,t/7\bigr)
-      + b_n\sin\!\bigl(2\pi n\,t/7\bigr)
+      a_n\cos\!\bigl(2\pi n\,t/7\bigr) \quad
+      + \quad b_n\sin\!\bigl(2\pi n\,t/7\bigr)
     \Bigr],
   \quad
   a_n,b_n\sim N(0,\sigma_{\rm seas}^2).
 ```
-Each regressor $X_j(t)$ enters linearly:
+Each regressor $X_j(t)$ (Interest Rate, Revenue, ...) enters linearly:
 ```math
   \hat y(t) \supset \beta_j\,X_j(t),
   \quad
@@ -133,21 +133,21 @@ Each regressor $X_j(t)$ enters linearly:
 ```
 All regressors are standardized prior to fitting. Using initial window $T_0$, period $\Delta$, horizon $H$ MSE is averaged and used to report RMSE:
 ```math
-  \mathrm{MSE}^{(k)}
-  = \frac1{|I_{\text{test}}^{(k)}|}
+  \mathrm{MSE}^{(k)} \quad 
+  = \quad \frac1{|I_{\text{test}}^{(k)}|}
     \sum_{i\in I_{\text{test}}^{(k)}}(y_i-\hat y_i)^2,
   \quad
-  \mathrm{RMSE}=\sqrt{\mathrm{MSE}}.
+  \mathrm{RMSE} = \sqrt{\mathrm{MSE}}.
 ```
-The series from $x_1$ to $x_H$ over $H$ points is given by:
+I impose linear interpolation for scenarios from $x_1$ to $x_H$ over $H$ points. This is given by:
 ```math
-  x_t
-  = x_1 + \frac{t-1}{H-1}\,(x_H - x_1),
+  x_t \quad
+  = \quad x_1 \quad + \quad \frac{t-1}{H-1}\,(x_H - x_1),
   \quad t=1,\dots,H.
 ```
-Forecasts over all $(revenue, eps)$ scenarios are computed to give probabilistic price paths. Scenario SE is given by $\sigma_{\text{scen}}/\sqrt{N_{\rm analysts}}$ and is combined with CV uncertainty to give the Total SE as:
+Forecasts over all $(revenue, eps)$ scenarios are computed to give probabilistic price paths. Scenario SE is given by $\frac{\sigma_{\text{scen}}}{\sqrt{N_{\rm analysts}}}$ and is combined with CV uncertainty to give the Total SE as:
 ```math
-\mathrm{SE}_{\rm total} = \sqrt{\sigma_{\text{scen}}^2 + (\mathrm{RMSE})^2}
+\mathrm{SE}_{\rm total} \quad = \quad \sqrt{\sigma_{\text{scen}}^2 \quad + \quad (\mathrm{RMSE})^2}
 ```
 
 * **`Sarimax.py`**
@@ -159,7 +159,7 @@ Future macro scenarios are drawn from a VAR (Vector Auto Regressive) process via
 
 Monte-Carlo simulation is then used to generate correlated draws from the VAR models output
 
-Fit $VAR(p)$ residuals $\varepsilon_t$ and implied covariance $\Sigma_u$. Compute
+To estimate the residual scaling factor $\alpha$ I fit $VAR(p)$ on the macro factor differences to obtain residuals $\varepsilon_t$ and model-implied covariance $\Sigma_u$. Then
 ```math
 \alpha
 = \frac{\mathrm{tr}\bigl(\widehat\Sigma_\varepsilon\bigr)}
@@ -168,48 +168,106 @@ Fit $VAR(p)$ residuals $\varepsilon_t$ and implied covariance $\Sigma_u$. Comput
 \widehat\Sigma_\varepsilon
 = \frac{1}{T}\sum_t \varepsilon_t\varepsilon_t^\top.
 ```
-For each model $m$ with $\mathrm{AIC}_m$, let $\Delta_m = \mathrm{AIC}_m - \min_j \mathrm{AIC}_j$.  Then
+For each model $m$ with $\mathrm{AIC}_m$, let $\Delta_m = \mathrm{AIC}_m - \min_j \Bigl(\mathrm{AIC}_j \Bigr)$. Then the ensemble weight is:
 ```math
 w_m
 = \frac{\exp(-\tfrac12\,\Delta_m)}
        {\sum_j \exp(-\tfrac12\,\Delta_j)}.
 ```
-Forecast log-returns $\hat r_{t+1:\,t+H}$ and set
+Forecast log-returns, $\hat r_{t+1:\,t+H}$ , for each fold and compute:
 ```math
 P_{\mathrm{pred}}
-= P_t \exp\Bigl(\sum_{h=1}^H \hat r_{t+h}\Bigr).
-```
-Over $F$ folds,  
-```math
-\mathrm{RMSE}
-= \sqrt{\frac1F\sum_{f=1}^F\bigl(P_{\mathrm{true}}^{(f)}-P_{\mathrm{pred}}^{(f)}\bigr)^2}.
+= P_t \exp\Bigl(\sum_{h=1}^H \hat r_{t+h}\Bigr),
+\quad
+\mathrm{RMSE} \quad 
+= \quad \sqrt{\frac1F\sum_{f=1}^F\bigl(P_{\mathrm{true}}^{(f)} \quad - \quad P_{\mathrm{pred}}^{(f)}\bigr)^2}.
 ```
 $VAR(p)$ dynamics are:
 ```math
 x_{t+h}
-= c + \sum_{\ell=1}^p A_\ell\,x_{t+h-\ell} + \varepsilon_{t+h}.
+= c \quad + \quad \sum_{\ell=1}^p A_\ell\,x_{t+h-\ell} \quad + \quad \varepsilon_{t+h}.
 ```
 Two shock covariances:
 ```math
 \Sigma_w = \alpha\,\Sigma_u,\quad
 \Sigma_q = S\,\Sigma_u,
 ```
-with $S$ =shock interval. Draw $\varepsilon\sim N(0,\Sigma_q)$ every $S$ steps, else $N(0,\Sigma_w)$. Use antithetic sampling: $\tilde x^{(j+N/2)} = 2\,x_{\rm last}-x^{(j)}$.
-
+with $S$ = shock interval. Shocks are drawn $\varepsilon\sim N(0,\Sigma_q)$ every $S$ steps, else $N(0,\Sigma_w)$. Use antithetic sampling over N paths: $\tilde x^{(j + N/2)} = 2 x_{\rm last}-x^{(j)}$.
 
 For each macro path:
 1. Sample model $m$ with $\Pr(m)=w_m$.  
 2. Draw parameters $\beta^*\sim N(\hat\beta_m,\mathrm{Cov}(\hat\beta_m))$.  
-3. Forecast $\{\mu_{t+h},\sigma^2_{t+h}\}$, simulate $r_{t+h} = \mu_{t+h} + \sigma_{t+h}\,z_{t+h},\quad z_{t+h}\sim N(0,1)$
-4. Propagate $P_{t+h} = P_{t+h-1}\,\exp(r_{t+h})$, then clip $P$ into $[\ell,u]$.
+3. Forecast $\{\mu_{t+h},\sigma^2_{t+h}\}$, simulate
+```math
+r_{t+h} = \mu_{t+h} + \sigma_{t+h}\,z_{t+h},\quad z_{t+h}\sim N(0,1)
+```
+5. Propagate $P_{t+h} = P_{t+h-1}\,\exp(r_{t+h})$, then clip $P$ into $[\ell,u]$.
   
-* **`lstm.py`** – Builds a recurrent LSTM (Long Short-Term Memory) network on rolling windows of returns and engineered factors.
+* **`lstm.py`** –
+Builds a recurrent LSTM (Long Short-Term Memory) network on rolling windows of returns and engineered factors.
 
-  Robust scaling, dropout layers and early stopping help regularise the model.
+Robust scaling, dropout layers and early stopping help regularise the model.
 
-  Bootstrapped datasets yield an ensemble of forecasts for each ticker.
+Bootstrapped datasets yield an ensemble of forecasts for each ticker.
 
-  Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
+Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
+Log returns are computed $r_t = \log(y_t) - \log(y_{t-1})$ and for each regressor $R_t^j$ its log difference is given by 
+```math
+\Delta R^j_t = \log(R^j_t) - \log(R^j_{t-1})
+```
+A robust scaler to $r_t$ for each $\delta R^j_t $ is fitted, giving:
+```math
+\begin{aligned}
+\tilde r_t = \frac{r_t - m_r}{s_r} \\
+\tilde{\Delta R}^j_t = (\Delta R^j_t - m_j)/s_j
+\end{aligned}
+```
+For history $H_{\rm hist}$ and horizon $H_{\rm hor}$, sliding windows of length $L = H_{hist} + H_{hor}$ are built, which gives:  
+```math
+    X_i \in \mathbb R^{(H_{\rm hist}+H_{\rm hor})\times(1+n_{\rm regs})},
+    \quad
+    y_i \in \mathbb R^{H_{\rm hor}}.
+```
+At each time $t$, the sequence $X_i$ is fed intow two stacked LSTM layers satisfying:
+```math
+\begin{aligned}
+f_t = \sigma(W_f x_t + U_f h_{t-1} + b_f) \\
+i_t = \sigma(W_i x_t + U_i h_{t-1} + b_i) \\
+o_t = \sigma(W_o x_t + U_o h_{t-1} + b_o) \\
+\tilde c_t = \tanh(W_c x_t + U_c h_{t-1} + b_c) \\
+c_t = f_t\circ c_{t-1} + i_t\circ \tilde c_t \\
+h_t = o_t\circ\tanh(c_t)
+\end{aligned}
+```
+- Layer 1: 64 units, returns full sequence, dropout 0.1  
+- Layer 2: 32 units, dropout 0.1  
+- Output: $\hat y = W_{\rm out}h_L + b_{\rm out}\in\mathbb R^{H_{\rm hor}}$.
+
+The training objective is to minimise the Huber loss with threshold £\delta=1\$:
+```math
+\ell_\delta(r) =
+\begin{cases}
+\tfrac12 r^2,&|r|\le\delta,\\
+\delta\bigl(|r|-\tfrac12\delta\bigr),&|r|>\delta,
+\end{cases}
+\quad r=y-\hat y.
+```
+Add $L^2$ penalties of strength $\lambda=10^{-4}$ on all kernels and recurrent weights. 
+Optimization via Adam $(\mathrm{Learning Rate}=5\times10^{-4})$, batch size 64, up to 30 epochs, with early stopping (patience 5) and LR‐reduction on plateau. This is low due to the time complexity and can be increased.
+Scneario forcasting and price simulation follow the following layout
+1. Generate future regressors $\{R_t\}$ via VAR shocks or fixed forecasts.  
+2. Build input sequences $X^{(s,j)}$ for each scenario $s$ and sim $j$.  
+3. Predict scaled returns $\hat r^{(s,j)}$, add Gaussian noise $\sigma_{\rm model}$.  
+4. Invert scaling:
+```math
+r^{(s,j)}_t = \sigma_r\,\hat r^{(s,j)}_t + m_r
+```
+5. Compute the price paths:
+```math
+P^{(s,j)}_t = P_0\exp(\sum_{k=1}^t r^{(s,j)}_k)
+```
+6. Across all $(s,j)$, report the 2.5%, 50%, 97.5% percentiles of $P_{H_{\rm hor}}$, plus mean return and its standard error.
+
   
 * **`returns_reg_pred.py`**
 
@@ -219,21 +277,25 @@ Hyperparameters are tuned with grid search, and bootstrapped samples produce an 
 
 Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
 
-The model fits $M$ successive trees:
+The model fits an ensemble of $M$ successive decision trees %\{h_m(x)}_{m=1}^M$ in a stagewise fashion to minimise squared error loss. The prediction after $m$ iterations is denoted by:
 ```math
   F_m(x) = F_{m-1}(x) + \nu\,h_m(x),
   \quad
   F_0(x) = \bar y,
 ```
 
-where each tree $h_m$ is fit to the residuals $r_i^{(m)} = y_i - F_{m-1}(x_i)$, and $\nu$ is the learning rate. For hyper-parameter selection via time-series cross validation, it searchs over $M\in\{100,200\},\quad \nu\in\{0.05,0.10\}$ using forward-chaining splits. For each setting, the following is computed and the combination with minimising the cross-validated MSE is selected $\mathrm{MSE} = \frac1N\sum_{i=1}^N\bigl(y_i - \hat y_i\bigr)^2$ . $B$ bootstrap samples are drawn, and $F^{(b)}$ is fitted to each, then at any $x$:
+where each tree $h_m$ is fit to the residuals $r_i^{(m)} = y_i - F_{m-1}(x_i)$, and $\nu$ is the learning rate. 
+
+For hyper-parameter selection via time-series cross validation, the model searchs over $M\in\{100,200\},\quad \nu\in\{0.05,0.10\}$ using forward-chaining splits. 
+
+For each $(M, \nu)$ setting, the following is computed and the combination with minimising the cross-validated MSE is selected $\mathrm{MSE} = \frac1N\sum_{i=1}^N\bigl(y_i - \hat y_i\bigr)^2$ . $B$ bootstrap samples are drawn, and a boosted model $F^{(b)}$ is fitted to each. Then at any $x$ , the standard eroor is:
 ```math
   \mathrm{SE}_{\mathrm{boot}}(x)
   = \sqrt{\frac1{B-1}\sum_{b=1}^B\bigl(F^{(b)}(x)-\bar F(x)\bigr)^2},
   \quad
   \bar F(x)=\frac1B\sum_bF^{(b)}(x).
 ```
-Form $P$ scenarios from the Cartesian product of revenue and EPS labels, yielding feature vectors $\{x_j\}_{j=1}^P$.
+$P$ scenarios are constructed by taking the Cartesian product of revenue and EPS, mapping each scenario to numeric feature values, and appending fixed macro forecasts, yielding feature vectors $\{x_j\}_{j=1}^P$.
 
 - Base predictions: $\hat F_j = F(x_j)$.  
 - Bootstrap SE: $\mathrm{SE}_{\mathrm{boot},\,j}$.  
@@ -272,6 +334,8 @@ Implements a residual income model where future book value is grown and excess r
 Equity Value = BVPS_0 + \sum_{i=1}^{n-1} \frac{EPS_i - \bigl(COE \cdot BVPS_{i-1} \bigr)}{\bigl(1 + COE\bigr)^{\frac{t_i - t_0}{365}}} + \frac{TV}{\bigl(1 + COE\bigr)^{\frac{t_n - t_0}{365}}}
 ```
 Monte-Carlo simulation is once again used for the aformentioned reason.
+
+For future Book Value per Shares I use the formula: $BVPS_{i+1} = BVPS_i + EPS_{i+1} - DPS_{i+1}$
 
 
 ### Relative Valuation and Factor Models (`rel_val`):
@@ -394,7 +458,7 @@ An elastic‑net solver built with CVXPY used to forecast cash flows in `dcf.py`
 
 It applies Huber loss and L1 (Lasso) / L2 (Ridge) penalties and performs grid‑search cross‑validation, optionally enforcing accounting sign constraints.
 
-Given data $\(\{(x_i, \quad y_i)\}_{i=1}^n\)$ with $\(x_i \in \mathbb{R}^p\)$, we augment with an intercept by defining  
+Given data $\{\(x_i, y_i\)\}_{i=1}^n$ with $\(x_i \in \mathbb{R}^p\)$, the intercept augmented by defining  
 
 ```math
 X = 
@@ -407,8 +471,7 @@ X =
 \quad
 \beta = (\beta_0,\beta_1,\dots,\beta_p)^\top.
 ```
-
-The residuals are $r_i = \bigl(X \beta\bigr)_i - y_i$ . For a threshold $\(M>0\)$, the Huber loss on a scalar residual $\(r\)$ is
+where the residuals are given by $r_i = \bigl(X \beta\bigr)_i - y_i$ . For a threshold $\(M>0\)$, the Huber loss on a scalar residual $\(r\)$ is
 ```math
 h_M(r) = 
 \begin{cases}
@@ -416,7 +479,7 @@ h_M(r) =
 M\bigl(|r| - \tfrac{1}{2}M\bigr), & |r|>M.
 \end{cases}
 ```
-Thus the total data‐fit term is
+Therefore the total data‐fit term is
 ```math
 \mathcal{L}_{\mathrm{huber}}(\beta)
 \;=\;
@@ -440,35 +503,30 @@ For the constrained regression, non-negativity is imposed on the coefficients $\
 \quad
 \text{s.t. } \beta_{1:p}\ge0\;\text{(if constrained).}
 ```
-To improve conditioning, features and target are scaled before solving:
-1.  Compute
+To improve conditioning, features and target are scaled before solving the following compute
 ```math
 \mu_x = \tfrac1n\sum_i x_i,\quad \sigma_x = \sqrt{\tfrac1n\sum_i (x_i-\mu_x)^2},\quad \mu_y = \tfrac1n\sum_i y_i,\quad \sigma_y = \sqrt{\tfrac1n\sum_i (y_i-\mu_y)^2} 
 ```
-  replacing any zero $\(\sigma_x\)$ or $\(\sigma_y\)$ by 1.
-2.  Define
+and any zero $\(\sigma_x\)$ or $\(\sigma_y\)$ is replaced by 1. $x_{i}^s$ and $y_i^s$ are then defined by:
 ```math
  x_{i}^s = \frac{x_i - \mu_x}{\sigma_x},\qquad y_i^s = \frac{y_i - \mu_y}{\sigma_y}
 ```
-3.  Solve for $\(\beta^s\)$ on $\(\{(x_i^s,y_i^s)\}\)$. Then recover original-scale coefficients:
+Solve for $\(\beta^s\)$ on $\(\{(x_i^s,y_i^s)\}\)$. Then recover original-scale coefficients:
 ```math
     \beta_j = \frac{\sigma_y}{\sigma_{x_j}}\,\beta^s_j,\quad
     \beta_0 = \mu_y + \sigma_y\,\beta^s_0 \;-\;\sum_{j=1}^p \beta_j\,\mu_{x_j}
 ```
-Results are searched over triples $\((\alpha,\lambda,M)\)$ by $\(K\)$-fold CV:
-
-1.  Split indices into $\(\{I_{\text{train}}^{(k)},I_{\text{test}}^{(k)}\}_{k=1}^K\)$.
-2.  For each $\((\alpha,\lambda,M)\)$ and each fold $k$, fit $\beta^{(k)}$ on the training set, predict $\hat y_i = (X\beta^{(k)})_i\)$ in the test set, and compute the mean-squared error
+Results are searched over triples $\((\alpha,\lambda,M)\)$ by $\(K\)$-fold CV. Indices are split into $\(\{I_{\text{train}}^{(k)},I_{\text{test}}^{(k)}\}_{k=1}^K\)$. For each $\((\alpha,\lambda,M)\)$ and each fold $k$, $\beta^{(k)}$ is fitted on the training set to predict $\hat y_i = (X\beta^{(k)})_i\)$ and evaluated in the test set via the mean-squared error
 ```math
     \mathrm{MSE}^{(k)}(\alpha,\lambda,M)
     = \frac1{\lvert I_{\text{test}}^{(k)}\rvert}
       \sum_{i\in I_{\text{test}}^{(k)}}(y_i - \hat y_i)^2.
 ```
-3.  Average over folds:
+Select $\((\alpha^*,\lambda^*,M^*)\)$ by minimizing $\(\overline{\mathrm{MSE}}\)$ that is averaged over the folds:
 ```math
 \overline{\mathrm{MSE}}(\alpha,\lambda,M) = \frac1K\sum_{k=1}^K \mathrm{MSE}^{(k)} $
 ```
-4.  Select $\((\alpha^*,\lambda^*,M^*)\)$ minimizing $\(\overline{\mathrm{MSE}}\)$, then re-fit on all data.
+This is then re-fitted on all the data.
 
 * **`cov_functions.py`** – Implements covariance estimators including constant‑correlation and Ledoit–Wolf shrinkage.
 
@@ -487,16 +545,18 @@ Let:
 - $P\in\mathbb{R}^{k\times n}$ = “pick” matrix encoding \(k\) views  
 - $q\in\mathbb{R}^k$ = view returns  
 - $\kappa>0$ = confidence scalar (higher $\kappa$ ⟶ more confidence)  
-
+Given a risk-aversion coefficient $\delta$, a covariance matrix $\Sigma_i$ and a benchmark portfolio weight vector $w\in\mathbb{R}^n$, the implied equilibrium returns $\pi$ satisfy:
 ```math
 \pi \;=\;\delta\,\Sigma\,w
 ```
+For a view matrix $P$ (each row encodes a linear view on asset returns), a scalar $\tau$ and a confidence parameter $\kappa$, the Black-Litterman model proposes that:
 ```math
 \tilde\Sigma \;=\;\tau\,\Sigma
 \quad,\quad
 \Omega \;=\;\frac{\mathrm{diag}\bigl(P\,\tilde\Sigma\,P^\top\bigr)}{\kappa}
 ```
-where $\Omega\in\mathbb{R}^{k\times k}$ is diagonal. Define $A = P\, \tilde\Sigma\, P^\top + \Omega$ . Then the adjusted expected returns are
+where $\Omega\in\mathbb{R}^{k\times k}$ is diagonal. For the index returns I set $\kappa$ as 0.1, and for the Black-Litterman portfolio I set $\kappa$ as 1.
+Define $A = P \tilde\Sigma P^\top + \Omega$ . The posterior Black-Litterman expected returns are then given by:
 ```math
 \mu_{BL}
 \;=\;
@@ -504,7 +564,7 @@ where $\Omega\in\mathbb{R}^{k\times k}$ is diagonal. Define $A = P\, \tilde\Sigm
 \;+\;
 \tilde\Sigma\,P^\top\,A^{-1}\,\bigl(q \;-\; P\,\pi\bigr)
 ```
-with $\mu_{BL}\in\mathbb{R}^n\$ .
+with $\mu_{BL}\in\mathbb{R}^n\$ . The posterior Black-Litterman covariance is given by:
 ```math
 \Sigma_{BL}
 \;=\;
@@ -556,18 +616,18 @@ Generates future factor realisations by fitting a VAR model and applying Cholesk
 
 Let $x_t\in\mathbb{R}^k$ be the factor vector. Fit
 ```math
-  x_t = c + \sum_{\ell=1}^{p} A_\ell\,x_{t-\ell} + u_t,
+  x_t \quad = \quad c + \quad \sum_{\ell=1}^{p} A_\ell\,x_{t-\ell} \quad + 'quad u_t,
   \quad
   u_t \sim \mathcal{N}(0,\Sigma_u),
 ```
-where $p$ is chosen by minimizing AIC. Cholesky factor $L$ of $\Sigma_u$ is then computed by:
+where $p$ is chosen by minimising AIC. Cholesky factor $L$ of $\Sigma_u$ is used to simulate shocks and is then computed by:
 ```math
   \Sigma_u = L\,L^\top,
   \quad
   u_t = L\,z_t,
   \;z_t\sim\mathcal{N}(0,I_k).
 ```
-Using the last $p$ observations as initialization, $N$ paths are simulated over $H$ steps:
+Using the last $p$ observations as a "burn-in" buffer, $N$ paths are simulated over $H$ steps by iterating fo $h = 1,...,H$:
 ```math
   x_{t+h}^{(j)}
   = c + \sum_{\ell=1}^{p}A_\ell\,x_{t+h-\ell}^{(j)}
@@ -575,7 +635,7 @@ Using the last $p$ observations as initialization, $N$ paths are simulated over 
   \quad
   z_{t+h}^{(j)}\sim\mathcal{N}(0,I_k).
 ```
-Let $X_h = [\,x_{t+h}^{(1)},\dots,x_{t+h}^{(N)}]$, then the Mean and Covariance are:
+At each horizon $h$, simulations are assembled into a matrix $X_h = [\,x_{t+h}^{(1)},\dots,x_{t+h}^{(N)}]$, which is then used to compute the Mean and Covariances:
 ```math
 \bar x_h = \frac{1}{N}\sum_{j=1}^N x_{t+h}^{(j)}, \qquad \mathrm{Cov}_h = \frac{1}{N-1}\sum_{j=1}^N (x_{t+h}^{(j)}-\bar x_h)(x_{t+h}^{(j)}-\bar x_h)^\top
 ```
