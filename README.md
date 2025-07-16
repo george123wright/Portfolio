@@ -40,6 +40,7 @@ pip install -r requirements.txt
 Several scripts expect local Excel files as inputs/outputs (e.g. `Portfolio_Optimisation_Data_YYYY-MM-DD.xlsx`). Update the paths inside the modules if your files live elsewhere.
 
 Financial reports that are imported are obtained from [Stock Analysis ](https://stockanalysis.com/).
+
 ## Repository Layout
 
 ```
@@ -53,7 +54,7 @@ maps/             - Mapping tables for currencies, sectors and indexes
 ```
 
 ## Typical Workflow
-The major components are described below.
+The components are described below. I have included a brief summary at the top of the script summary, and then gone into more depth below.
 
 ## Data Collection (`fetch_data`)
 
@@ -652,12 +653,70 @@ Calculates technical Buy and Sell stock indicators, scoring each ticker and savi
 
 These indicators include:
   
-  - MACD (Moving Average Convergence/Divergence)
+  - MACD (Moving Average Convergence/Divergence):
+```math
+\begin{aligned}
+\mathrm{MACD}_t = \mathrm{EMA}_{12}( \mathrm{Close}_t ) - \mathrm{EMA}_{26}( \mathrm{Close}_t ) \\
+\mathrm{Signal}_t = \mathrm{EMA}_{9}(\mathrm{MACD}_t) \\
+\mathrm{Buy}: \mathrm{MACD}_t > \mathrm{Signal}_t \quad \mathrm{and} \quad \mathrm{MACD}_{t-1}\le\mathrm{Signal}_{t-1} \\
+\mathrm{Sell}: \mathrm{MACD}_t < \mathrm{Signal}_t  \quad \mathrm{and} \quad \mathrm{MACD}_{t-1}\ge\mathrm{Signal}_{t-1}
+\end{aligned}
+```
   - RSI (Relative Strength Index) with Buy and Sell thresholds of 30 and 70 respectively over a 14 day period window.
+```math
+\mathrm{RSI}_t = 100 \times \frac{\mathrm{EWMA}^+_t}{\mathrm{EWMA}^+_t + \mathrm{EWMA}^-_t}
+```
+where ${EWMA}^\pm$ are Wilder’s smoothed average gains/losses over 14 bars
+
+Buy: $RSI_t < 30$ and $RSI_{t-1} ≥ 30$
+
+Sell: $RSI_t > 70$ and $RSI_{t-1} ≤ 70$
+
   - EMA (Exponential Moving Average) Crossover Signals with Fast and Slow moving averages of 12 and 26 respectively.
+```math
+\mathrm{EMA}^{(f)}_t = \alpha_f\,\mathrm{Close}_t + (1-\alpha_f)\,\mathrm{EMA}^{(f)}_{t-1},
+\quad
+\alpha_f = \frac{2}{n+1}
+```
+Buy: $EMA_{Fast,t} > EMA_{Slow,t}$ and $EMA_{Fast,t-1} < EMA_{Slow,t-1}$
+
+Sell: $EMA_{Fast,t} < EMA_{Slow,t}$ and $EMA_{Fast,t-1} > EMA_{Slow,t-1}$
+
   - Bollinger Signals with a Bollinger Band window of 20 with Bollinger Band standard deviation of 2.
-  - Stochastic Signals with Slow and Fast windows of 14 and 3 respectively, and with buy and sell values of 20 and 80 respectively.
+```math
+\begin{aligned}
+\mathrm{SMA}_t = \frac1N\sum_{i=0}^{N-1}Close_{t-i} \\
+\sigma_t = \sqrt{\frac1N\sum_{i=0}^{N-1}\bigl(Close_{t-i}-\mathrm{SMA}_t\bigr)^2} \\
+\mathrm{Upper}(t) = \mathrm{SMA}_t + K\,\sigma_t \\
+\mathrm{Lower}(t) = \mathrm{SMA}_t - K\,\sigma_t
+\end{aligned}
+```
+Buy: $Close_{t-1} < Lower_{t-1}$ and $Close_t > Lower_t$
+
+Sell: $Close_{t-1} > Upper_{t-1}$ and $Close_t < Upper_t$
+
+  - Stochastic Oscillator with Slow and Fast windows of 14 and 3 respectively, and with buy and sell values of 20 and 80 respectively.
+```math
+\begin{aligned}
+\%K(t) = 100\,\frac{Close_t-\min_{i\in[t-K+1,t]}L(i)}{\max_{i\in[t-K+1,t]}H(i)\;-\;\min_{i\in[t-K+1,t]}L(i)} \\
+\%D(t) = \frac1D\sum_{j=0}^{D-1}\%K(t-j)
+\end{aligned}
+```
+Buy: $\%K(t) < 20$ , $\%K(t-1) < \%D(t-1)$ and $\%K(t)>\%D(t)$
+
+Sell: $\%K(t) > 80$ , $\%K(t-1) > \%D(t-1)$ and $\%K(t) < \%D(t)$
+
   - ATR (Average True Range) Breakout with ATR window of 14, ATR Breakout window of 20 and ATR Multiplier of 1.5.
+```math
+\begin{aligned}
+\mathrm{True Range:} \quad \mathrm{TR}(t) = \max\bigl\{H(t)-L(t),\;|H(t)-P(t-1)|,\;|L(t)-P(t-1)|\bigr\} \\
+\mathrm{Average True Range:}\mathrm{ATR}(t) = \frac1N\sum_{i=0}^{N-1}\mathrm{TR}(t-i)
+\end{aligned}
+```
+Buy: $Close_t > \max_{i\in[t-L,t-1]}H(i) \;+\; M\;\mathrm{ATR}(t-1)$
+
+Sell: $Close_t < \min_{i\in[t-L,t-1]}L(i) \;-\; M\;\mathrm{ATR}(t-1)$
+
   - OBV (On-Balance Volume) Divergence with OBV lookback of 20.
   - True Wilder ADX (Average Directional Index) with ADX window and ADX threshold of 14 and 25 respectively.
   - MFI (Money Flow Index) with MFI window of 14 and Buy and Sell thresholds of 20 and 80 respectively.
@@ -753,6 +812,8 @@ $$
 $$
 
 These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%. 
+
+There are also a cap of 10% on the percentage of the portfolio that can be in each industry.
 
 ## Running the Toolkit
 
