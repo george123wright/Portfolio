@@ -588,7 +588,17 @@ $$
 $$
 
 
-* **`coe.py`** – Calculates the cost of equity per ticker by combining country risk premiums and currency risk with the standard CAPM estimate.
+* **`coe.py`**
+
+Calculates the cost of equity per ticker by combining country risk premiums and currency risk with the standard CAPM estimate.
+
+$$
+\quad
+COE
+= R_f + \beta_i \bigl(\mathbb{E}[R_m] - R_f\bigr) + CRP + FXRP
+$$
+
+where CRP is the country risk premiumn, as calculated by Aswath Damodaran in https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html, and FXRP is the foreign exchange risk premium. 
 
 * **`fama_french_3_pred.py` / `fama_french_5_pred.py`**
 
