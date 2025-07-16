@@ -90,9 +90,11 @@ The major components are described below.
 
 ### Machine-Learning (`machine_learning`):
 
-* **`prophet_model.py`** – Utilises Facebook Prophet with piecewise linear and logistic trends.
+* **`prophet_model.py`**
 
-  Financial and macro regressors extend the additive model, and cross-validation tunes changepoints and seasonality. Weekly seasonal trends are enabled. Daily and yearly seasonality is disabled due to the   substantial noise created.
+Utilises Facebook Prophet with piecewise linear and logistic trends.
+
+Financial and macro regressors extend the additive model, and cross-validation tunes changepoints and seasonality. Weekly seasonal trends are enabled. Daily and yearly seasonality is disabled due to the   substantial noise created.
 
   The forecast $\(\hat y(t)\)$ is given by
 ```math
@@ -148,13 +150,58 @@ Forecasts over all $(revenue, eps)$ scenarios are computed to give probabilistic
 \mathrm{SE}_{\rm total} = \sqrt{\sigma_{\text{scen}}^2 + (\mathrm{RMSE})^2}
 ```
 
-* **`Sarimax.py`** – Fits SARIMAX (Seasonal Autoregressive Integrated Moving Average + Exogenous Variables) time-series models with exogenous macro factors.
+* **`Sarimax.py`**
+Fits SARIMAX (Seasonal Autoregressive Integrated Moving Average + Exogenous Variables) time-series models with exogenous macro factors.
 
-  Candidate ARIMA (Autoregressive Integrated Moving Average) orders are weighted by AIC (Akaike Information Criterion) to form an ensemble. 
+Candidate ARIMA (Autoregressive Integrated Moving Average) orders are weighted by AIC (Akaike Information Criterion) to form an ensemble. 
 
-  Future macro scenarios are drawn from a VAR (Vector Auto Regressive) process via Cholesky simulation and propagated through the model.
+Future macro scenarios are drawn from a VAR (Vector Auto Regressive) process via Cholesky simulation and propagated through the model.
 
-  Monte-Carlo simulation is then used to generate correlated draws from the VAR models output
+Monte-Carlo simulation is then used to generate correlated draws from the VAR models output
+
+Fit $VAR(p)$ residuals $\varepsilon_t$ and implied covariance $\Sigma_u$. Compute
+```math
+\alpha
+= \frac{\mathrm{tr}\bigl(\widehat\Sigma_\varepsilon\bigr)}
+       {\mathrm{tr}\bigl(\Sigma_u\bigr)},
+\quad
+\widehat\Sigma_\varepsilon
+= \frac{1}{T}\sum_t \varepsilon_t\varepsilon_t^\top.
+```
+For each model $m$ with $\mathrm{AIC}_m$, let $\Delta_m = \mathrm{AIC}_m - \min_j \mathrm{AIC}_j$.  Then
+```math
+w_m
+= \frac{\exp(-\tfrac12\,\Delta_m)}
+       {\sum_j \exp(-\tfrac12\,\Delta_j)}.
+```
+Forecast log-returns $\hat r_{t+1:\,t+H}$ and set
+```math
+P_{\mathrm{pred}}
+= P_t \exp\Bigl(\sum_{h=1}^H \hat r_{t+h}\Bigr).
+```
+Over $F$ folds,  
+```math
+\mathrm{RMSE}
+= \sqrt{\frac1F\sum_{f=1}^F\bigl(P_{\mathrm{true}}^{(f)}-P_{\mathrm{pred}}^{(f)}\bigr)^2}.
+```
+$VAR(p)$ dynamics are:
+```math
+x_{t+h}
+= c + \sum_{\ell=1}^p A_\ell\,x_{t+h-\ell} + \varepsilon_{t+h}.
+```
+Two shock covariances:
+```math
+\Sigma_w = \alpha\,\Sigma_u,\quad
+\Sigma_q = S\,\Sigma_u,
+```
+with $S$ =shock interval. Draw $\varepsilon\sim N(0,\Sigma_q)$ every $S$ steps, else $N(0,\Sigma_w)$. Use antithetic sampling: $\tilde x^{(j+N/2)} = 2\,x_{\rm last}-x^{(j)}$.
+
+
+For each macro path:
+1. Sample model $m$ with $\Pr(m)=w_m$.  
+2. Draw parameters $\beta^*\sim N(\hat\beta_m,\mathrm{Cov}(\hat\beta_m))$.  
+3. Forecast $\{\mu_{t+h},\sigma^2_{t+h}\}$, simulate $r_{t+h} = \mu_{t+h} + \sigma_{t+h}\,z_{t+h},\quad z_{t+h}\sim N(0,1)$
+4. Propagate $P_{t+h} = P_{t+h-1}\,\exp(r_{t+h})$, then clip $P$ into $[\ell,u]$.
   
 * **`lstm.py`** – Builds a recurrent LSTM (Long Short-Term Memory) network on rolling windows of returns and engineered factors.
 
@@ -164,35 +211,67 @@ Forecasts over all $(revenue, eps)$ scenarios are computed to give probabilistic
 
   Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
   
-* **`returns_reg_pred.py`** – Trains a gradient‑boosting regression on engineered features to predict twelve‑month returns.
+* **`returns_reg_pred.py`**
 
-  Hyperparameters are tuned with grid search, and bootstrapped samples produce an ensemble of models.
+Trains a gradient‑boosting regression on engineered features to predict twelve‑month returns.
 
-  Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
+Hyperparameters are tuned with grid search, and bootstrapped samples produce an ensemble of models.
+
+Macro Forecasts obtained from Trading Economics are used, as well as revenue and eps forecasts that are obtained from Yahoo Finance and Stock Analysis.
+
+The model fits $M$ successive trees:
+```math
+  F_m(x) = F_{m-1}(x) + \nu\,h_m(x),
+  \quad
+  F_0(x) = \bar y,
+```
+
+where each tree $h_m$ is fit to the residuals $r_i^{(m)} = y_i - F_{m-1}(x_i)$, and $\nu$ is the learning rate. For hyper-parameter selection via time-series cross validation, it searchs over $M\in\{100,200\},\quad \nu\in\{0.05,0.10\}$ using forward-chaining splits. For each setting, the following is computed and the combination with minimising the cross-validated MSE is selected $\mathrm{MSE} = \frac1N\sum_{i=1}^N\bigl(y_i - \hat y_i\bigr)^2$ . $B$ bootstrap samples are drawn, and $F^{(b)}$ is fitted to each, then at any $x$:
+```math
+  \mathrm{SE}_{\mathrm{boot}}(x)
+  = \sqrt{\frac1{B-1}\sum_{b=1}^B\bigl(F^{(b)}(x)-\bar F(x)\bigr)^2},
+  \quad
+  \bar F(x)=\frac1B\sum_bF^{(b)}(x).
+```
+Form $P$ scenarios from the Cartesian product of revenue and EPS labels, yielding feature vectors $\{x_j\}_{j=1}^P$.
+
+- Base predictions: $\hat F_j = F(x_j)$.  
+- Bootstrap SE: $\mathrm{SE}_{\mathrm{boot},\,j}$.  
+- Scenario variance: $\displaystyle \sigma_{\mathrm{scen}}^2 = \frac1P\sum_{j=1}^P(\hat F_j - \bar F)^2$
+- Final SE for each scenario:
+```math
+    \mathrm{SE}_j
+    = \sqrt{\mathrm{SE}_{\mathrm{boot},\,j}^2 + \sigma_{\mathrm{scen}}^2}.
+```
+
 
 ### Intrinsic Valuation (`intrinsic_value`):
 
-* **`dcf.py`** – Performs discounted cash‑flow valuation to determine the enterprise value given by:
+* **`dcf.py`**
+
+Performs discounted cash‑flow valuation to determine the enterprise value given by:
 ```math
 Enterprise Value = \sum_{i=1}^{n-1} \frac{FCFE_i}{\bigl(1 + WACC\bigr)^{\frac{t_i - t_0}{365}}} + \frac{TV}{\bigl(1 + WACC\bigr)^{\frac{t_n - t_0}{365}}}
 ```
-  where $t_0$ is todays date, $t_i$ is the date of the i'th cash flow forecast and $t_n$ is the date of the terminal forecast date.
-  Cash flows are forecast using elastic‑net regression (see `fast_regression.py`) and then discounted.
-  Monte‑Carlo scenarios for growth generate a distribution of intrinsic values. The scenarios are used to help gauge the uncertainty of the valuation.
+where $t_0$ is todays date, $t_i$ is the date of the i'th cash flow forecast and $t_n$ is the date of the terminal forecast date.
+Cash flows are forecast using elastic‑net regression (see `fast_regression.py`) and then discounted.
+Monte‑Carlo scenarios for growth generate a distribution of intrinsic values. The scenarios are used to help gauge the uncertainty of the valuation.
   
-* **`dcfe.py`** – Similar to `dcf.py` but values equity directly via discounted cash‑flow to equity.  Constrained regression ensures realistic relationships between drivers. Equity value is given by:
+* **`dcfe.py`**
+
+Similar to `dcf.py` but values equity directly via discounted cash‑flow to equity.  Constrained regression ensures realistic relationships between drivers. Equity value is given by:
 ```math
 Equity Value = \sum_{i=1}^{n-1} \frac{FCFF_i}{\bigl(1 + COE\bigr)^{\frac{t_i - t_0}{365}}} + \frac{TV}{\bigl(1 + COE\bigr)^{\frac{t_n - t_0}{365}}}
 ```
-  Monte-Carlo simulation is used for the aformentioned reason.
+Monte-Carlo simulation is used for the aformentioned reason.
   
-* **`ri.py`** – Implements a residual income model where future book value is grown and excess returns are discounted using the cost of equity. Equity value is given by:
+* **`ri.py`**
+
+Implements a residual income model where future book value is grown and excess returns are discounted using the cost of equity. Equity value is given by:
 ```math
 Equity Value = BVPS_0 + \sum_{i=1}^{n-1} \frac{EPS_i - \bigl(COE \cdot BVPS_{i-1} \bigr)}{\bigl(1 + COE\bigr)^{\frac{t_i - t_0}{365}}} + \frac{TV}{\bigl(1 + COE\bigr)^{\frac{t_n - t_0}{365}}}
 ```
-
-
-  Monte-Carlo simulation is once again used for the aformentioned reason.
+Monte-Carlo simulation is once again used for the aformentioned reason.
 
 
 ### Relative Valuation and Factor Models (`rel_val`):
@@ -212,20 +291,21 @@ Provides multiple models blending peer multiples and fundamental data:
 
 ## Forecast Ensemble and Score
 
-* **`Combination_Forecast.py`** – Fuses all of the model return forecasts and standard errors into
-  a Bayesian ensemble, applying weights and producing an overall score.
+* **`Combination_Forecast.py`**
 
-  Weights are assigned for each models prediction based on the inverse of the standard error or volatility, i.e.
+Fuses all of the model return forecasts and standard errors into a Bayesian ensemble, applying weights and producing an overall score.
+
+Weights are assigned for each models prediction based on the inverse of the standard error or volatility, i.e.
 
 $$
 w_i = \frac{\frac{1}{\mathrm{SE}_i^2}}{\sum{\frac{1}{{SE}_i^2}}}
 $$
 
-  These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $\displaystyle \frac{1}{\text{number of valid models}}$.
+These weights are capped at 10% per model, unless there are not enough valid models, in which case the cap is $\displaystyle \frac{1}{\text{number of valid models}}$.
 
-  The score is inspired by the Pitroski F-score.
+The score is inspired by the Pitroski F-score.
 
-  It includes all 9 of the Pitroski F-Score variables:
+It includes all 9 of the Pitroski F-Score variables:
 
   1. Positive Return on Assets $\Rightarrow$ + 1
   2. Positive Operating Cash Flow $\Rightarrow$ + 1
@@ -237,7 +317,7 @@ $$
   8. Higher year on year Gross Margin $\Rightarrow$ + 1
   9. Higher Asset Turnover Ratio year on year Growth $\Rightarrow$ + 1
 
-  I have adapted this in the following way:
+I have adapted this in the following way:
 
   - Negative Return on Assets $\Rightarrow$- 1
   - Return on Assets > Industry Average $\Rightarrow$ + 1
@@ -245,7 +325,7 @@ $$
   - Previous Return on Assets < Current Return on Assets $\Rightarrow$ - 1
   - Previous Current Ratio > Current Ratio $\Rightarrow$ - 1
 
-  I then added the following scores relating to financials as well. These were back tested to see the significance.
+I then added the following scores relating to financials as well. These were back tested to see the significance.
 
   - 5% increase in percentage of shares shorted month on month $\Rightarrow$ - 1
   - 5% decrease in percentage of shares shorted month on month $\Rightarrow$ + 1
@@ -272,13 +352,13 @@ $$
   - Forward Price to Earnings < Trailing 12 month Price to Earnings $\Rightarrow$ + 1
   - Forward Price to Earnings > Trailing 12 month Price to Earnings $\Rightarrow$ - 1
 
-  Then I considered Analyst recommendations, to gather a sense of professional sentiment:
+Then I considered Analyst recommendations, to gather a sense of professional sentiment:
 
   - Strong Buy Recommendation $\Rightarrow$ + 3
   - Hold Recommendation $\Rightarrow$ - 1
   - Sell or Strong Sell Recommendation $\Rightarrow$ - 5
  
-  I further consider the stock prices movement within the market:
+I further consider the stock prices movement within the market:
 
   - Positive Skewness based on last 5 years weekly returns $\Rightarrow$ + 1
   - Sharpe Ratio based on last year weekly returns > 1.0 $\Rightarrow$ + 1
@@ -293,7 +373,7 @@ $$
   - Negative Jensens Alpha over last 5 years with respect to the S&P500 $\Rightarrow$ - 1
   - Negative Predicted Jensen's Alpha $\Rightarrow$ - 5
  
-  I also consider daily sentiment scores from webscraping r/wallstreetbets. This is to capture the sentiment amongst retail investors, which have an increasing importance in influencing the market:
+I also consider daily sentiment scores from webscraping r/wallstreetbets. This is to capture the sentiment amongst retail investors, which have an increasing importance in influencing the market:
 
   - Positive Average Sentiment $\Rightarrow$ + 1
   - Negative Average Sentiment $\Rightarrow$ - 1
@@ -304,13 +384,15 @@ $$
   - Average Sentiment > 0.2 and over 10 mentions $\Rightarrow$ + 1
   - Average Sentiment < 0.2 and over 10 mentions $\Rightarrow$ - 1
 
-  I then add the scores from the technical buy and sell indicators to these scores.
+I then add the scores from the technical buy and sell indicators to these scores.
 
 ## Utility Functions (`functions`)
 
-* **`fast_regression.py`** – An elastic‑net solver built with CVXPY used to forecast cash flows in `dcf.py` and `dcfe.py`.
+* **`fast_regression.py`**
 
-  It applies Huber loss and L1 (Lasso) / L2 (Ridge) penalties and performs grid‑search cross‑validation, optionally enforcing accounting sign constraints.
+An elastic‑net solver built with CVXPY used to forecast cash flows in `dcf.py` and `dcfe.py`.
+
+It applies Huber loss and L1 (Lasso) / L2 (Ridge) penalties and performs grid‑search cross‑validation, optionally enforcing accounting sign constraints.
 
 Given data $\(\{(x_i, \quad y_i)\}_{i=1}^n\)$ with $\(x_i \in \mathbb{R}^p\)$, we augment with an intercept by defining  
 
@@ -392,7 +474,9 @@ Results are searched over triples $\((\alpha,\lambda,M)\)$ by $\(K\)$-fold CV:
 
   Predicted covariances are derived from multi‑horizon scaling with an extended Stein shrinkage variant.
 
-* **`black_litterman_model.py`** – Implements the Black–Litterman Bayesian update combining equilibrium market returns with subjective views to obtain posterior means and covariances.
+* **`black_litterman_model.py`**
+
+Implements the Black–Litterman Bayesian update combining equilibrium market returns with subjective views to obtain posterior means and covariances.
 
 Let:
 - $n$ = number of assets  
@@ -432,7 +516,9 @@ with $\mu_{BL}\in\mathbb{R}^n\$ .
 ```
 
 
-* **`capm.py`** – Helper implementing the CAPM formula:
+* **`capm.py`**
+
+Helper implementing the CAPM formula:
 
 $$
 \quad
@@ -443,9 +529,11 @@ $$
 
 * **`coe.py`** – Calculates the cost of equity per ticker by combining country risk premiums and currency risk with the standard CAPM estimate.
 
-* **`fama_french_3_pred.py` / `fama_french_5_pred.py`** – Estimate expected returns using the Fama–French 3 factor and Fama-French 5 factor models using OLS Betas and simulated future factor values.
+* **`fama_french_3_pred.py` / `fama_french_5_pred.py`**
 
-  Fama-French 3 factor model is given by:
+Estimate expected returns using the Fama–French 3 factor and Fama-French 5 factor models using OLS Betas and simulated future factor values.
+
+Fama-French 3 factor model is given by:
   
 $$
 \quad
@@ -453,7 +541,7 @@ $$
 = R_f + \beta_{i,m} \bigl(\mathbb{E}[R_m] - R_f\bigr) + \beta_{i,\mathrm{SMB}} \mathbb{E}[\mathrm{SMB}] + \beta_{i,\mathrm{HML}} \mathbb{E}[\mathrm{HML}],
 $$
 
- Fama-French 5 factor model is given by:
+Fama-French 5 factor model is given by:
   
 $$
 \quad
@@ -462,7 +550,35 @@ $$
 $$
 
   
-* **`factor_simulations.py`** – Generates future factor realisations by fitting a VAR model and applying Cholesky shocks. These simulated paths feed into the Fama–French forecasts.
+* **`factor_simulations.py`**
+
+Generates future factor realisations by fitting a VAR model and applying Cholesky shocks. These simulated paths feed into the Fama–French forecasts.
+
+Let $x_t\in\mathbb{R}^k$ be the factor vector. Fit
+```math
+  x_t = c + \sum_{\ell=1}^{p} A_\ell\,x_{t-\ell} + u_t,
+  \quad
+  u_t \sim \mathcal{N}(0,\Sigma_u),
+```
+where $p$ is chosen by minimizing AIC. Cholesky factor $L$ of $\Sigma_u$ is then computed by:
+```math
+  \Sigma_u = L\,L^\top,
+  \quad
+  u_t = L\,z_t,
+  \;z_t\sim\mathcal{N}(0,I_k).
+```
+Using the last $p$ observations as initialization, $N$ paths are simulated over $H$ steps:
+```math
+  x_{t+h}^{(j)}
+  = c + \sum_{\ell=1}^{p}A_\ell\,x_{t+h-\ell}^{(j)}
+    + L\,z_{t+h}^{(j)},
+  \quad
+  z_{t+h}^{(j)}\sim\mathcal{N}(0,I_k).
+```
+Let $X_h = [\,x_{t+h}^{(1)},\dots,x_{t+h}^{(N)}]$, then the Mean and Covariance are:
+```math
+\bar x_h = \frac{1}{N}\sum_{j=1}^N x_{t+h}^{(j)}, \qquad \mathrm{Cov}_h = \frac{1}{N-1}\sum_{j=1}^N (x_{t+h}^{(j)}-\bar x_h)(x_{t+h}^{(j)}-\bar x_h)^\top
+```
   
 * **`export_forecast.py`** – Writes DataFrames to Excel with conditional formatting and table styling.
   
@@ -470,10 +586,11 @@ $$
 
 ## Technical Indicators and Sentiment (`indicators`)
 
-* **`technical_indicators.py`** – Calculates technical Buy and Sell stock indicators, scoring each ticker and saving the results to
-  Excel.
+* **`technical_indicators.py`**
 
-  These indicators include:
+Calculates technical Buy and Sell stock indicators, scoring each ticker and saving the results to Excel.
+
+These indicators include:
   
   - MACD (Moving Average Convergence/Divergence)
   - RSI (Relative Strength Index) with Buy and Sell thresholds of 30 and 70 respectively over a 14 day period window.
@@ -486,19 +603,22 @@ $$
   - MFI (Money Flow Index) with MFI window of 14 and Buy and Sell thresholds of 20 and 80 respectively.
   - VWAP (Volume Weighted Average Price) with VWAP window of 14
 
- Buy and Sell signals are given a score of ± 1
+Buy and Sell signals are given a score of ± 1
  
-* **`wallstreetbets_scrapping.py`** – Scrapes posts and comments from r/wallstreetbets.
+* **`wallstreetbets_scrapping.py`**
 
-  Ticker mentions are analysed with NLTK’s (Natural Language Toolkit) VADER (Valence Aware Dictionary and Sentioment Reasoner) sentiment classifier and aggregated scores are saved.
+Scrapes posts and comments from r/wallstreetbets.
 
-  I have tuned this dictionary to account for relevant slang and market related terms frequently used. For example, "bullish", "buy the dip" and "yolo".
+Ticker mentions are analysed with NLTK’s (Natural Language Toolkit) VADER (Valence Aware Dictionary and Sentioment Reasoner) sentiment classifier and aggregated scores are saved.
 
+I have tuned this dictionary to account for relevant slang and market related terms frequently used. For example, "bullish", "buy the dip" and "yolo".
 
 
 ## Portfolio Optimisation (`Optimiser`)
 
-* **`portfolio_functions.py`** – Utility functions for:
+* **`portfolio_functions.py`**
+
+Utility functions for:
 
   - Portfolio Return
   - Portfolio Volatility,
@@ -535,7 +655,9 @@ $$
   - Portfolio Simulation 
   - Simulation and Portfolio Metrics Report
 
-* **`portfolio_optimisers.py`** – Implements portfolio optimisers subject to constraints using `scipy.optimize`. These optimisers include:
+* **`portfolio_optimisers.py`**
+
+Implements portfolio optimisers subject to constraints using `scipy.optimize`. These optimisers include:
 
   - Max Sharpe Portfolio
   - Max Sortino Portfolio
@@ -545,19 +667,21 @@ $$
   - Max Risk Adjusted Score Portfolio
   - Custom Portfolio
 
-  The custom portfolio maximise's the scaled Sharpe Ratio, Sortino Ratio and the Sharpe Ratio using Black Litterman returns and covariance, and then adds a penalty term for deviations from the Max Information Ratio Portfolio. This optimiser uses empirical CDF transform for scaling. The objective function can be written as:
+The custom portfolio maximise's the scaled Sharpe Ratio, Sortino Ratio and the Sharpe Ratio using Black Litterman returns and covariance, and then adds a penalty term for deviations from the Max Information Ratio Portfolio. This optimiser uses empirical CDF transform for scaling. The objective function can be written as:
 
 ```math
 \max \Biggl[\gamma_{\mathrm{Sharpe}} \Bigl(\frac{\mathbb{E}[R_i] - R_f}{\sigma_i}\Bigr) \quad + \quad \gamma_{\mathrm{Sortino}} \Bigl(\frac{\mathbb{E}[R_i] - R_f}{\mathrm{DD}_i}\Bigr) \quad + \quad \gamma_{\mathrm{Sharpe,BL}} \Bigl(\frac{\mathbb{E}[R_i]^{\mathrm{BL}} - R_f}{\sigma_i^{\mathrm{BL}}}\Bigr) \quad - \quad \gamma_{\mathrm{Information}} \sum_{i}\Bigl(w_i - w_{i,\mathrm{MIR}}\Bigr)^{2}\Biggr]
 ```
  
-  I have also included constraint on sectors, with the a maximum of 15% of the portfolio being in a single sector, with the exception of Healthcare, which has a upper limit of 10% and Technology which has a limit of 30%.
+I have also included constraint on sectors, with the a maximum of 15% of the portfolio being in a single sector, with the exception of Healthcare, which has a upper limit of 10% and Technology which has a limit of 30%.
 
-* **`Portfolio_Optimisation.py`** – Orchestrates data loading, covariance estimation and optimisation runs, then exports weights, attribution and performance statistics.
+* **`Portfolio_Optimisation.py`**
 
-  There is also my proprietary function for portfolio constraints to minimise portfolio risk and return forecast errors. Each ticker that has a positive expected return and a positive score is assigned an initial weight value of the s of the square root of the tickers market cap / forecasting standard error.
+Orchestrates data loading, covariance estimation and optimisation runs, then exports weights, attribution and performance statistics.
+
+There is also my proprietary function for portfolio constraints to minimise portfolio risk and return forecast errors. Each ticker that has a positive expected return and a positive score is assigned an initial weight value of the s of the square root of the tickers market cap / forecasting standard error.
   
-  The lower and upper portfolio weight constraints are then given by:
+The lower and upper portfolio weight constraints are then given by:
 
 
 $$
@@ -568,7 +692,7 @@ $$
 = \sqrt{\frac{\frac{\sqrt{\mathrm{Market Cap}_i}}{\mathrm{SE}_i}}{\sum{\frac{\sqrt{\mathrm{Market Cap}_i}}{{SE}_i}}}} \cdot \frac{\mathrm{score}_i}{\max \mathrm{score}}.
 $$
 
-  These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%. 
+These bounds are subject to constraints. I have a minimum value of $$\frac{2}{\text{Money in Portfolio}}$$ constraint on the lower bound and the upper constraint is 10%, with the excepetion of tickers that are in the Healthcare sector which have an upper bound of 2.5%. 
 
 ## Running the Toolkit
 
