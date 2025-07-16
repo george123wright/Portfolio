@@ -598,7 +598,7 @@ COE
 = R_f + \beta_i \bigl(\mathbb{E}[R_m] - R_f\bigr) + CRP + FXRP
 $$
 
-where CRP is the country risk premiumn, as calculated by Aswath Damodaran in https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html, and FXRP is the foreign exchange risk premium. 
+where CRP is the country risk premiumn, as calculated by Aswath Damodaran in [NYE Stern ](https://pages.stern.nyu.edu/~adamodar/New_Home_Page/datafile/ctryprem.html), and FXRP is the foreign exchange risk premium.
 
 * **`fama_french_3_pred.py` / `fama_french_5_pred.py`**
 
