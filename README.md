@@ -869,17 +869,17 @@ I have tuned this dictionary to account for relevant slang and market related te
 
 Utility functions for:
 
-  - Portfolio Return
-  - Portfolio Volatility,
-  - Portfolio Downside Deviation
-  - Tracking Error
-  - Portfolio Beta
-  - Treynor Ratio
-  - Portfolio Score
-  - Sharpe Ratio
-  - Annualised Volatility
-  - Drawdown
-  - Skewness
+  - Portfolio Return: $w^T \ \mu$
+  - Portfolio Volatility: $\sqrt{w^T \ Cov \ w}$
+  - Portfolio Downside Deviation: $\sqrt{\frac{1}{N}\sum{\min(0, \mu - target)}}$
+  - Tracking Error: $\sqrt{\sum{(r_a - r_b)^2}}$
+  - Portfolio Beta: $w^T \ \beta$
+  - Treynor Ratio: $\frac{\mathbb{E}[R] - R_f}{\beta}$
+  - Portfolio Score: $w^T \ Score$
+  - Sharpe Ratio: $\frac{\mathbb{E}[R] - R_f}{\sigma}$
+  - Annualised Volatility: $\sigma * \sqrt{T}$
+  - Drawdown: $\frac{wealth - peak}{peak}$
+  - Skewness:
   - Kurtosis
   - VaR (Value at Risk)
   - VaR Gaussian
@@ -888,7 +888,7 @@ Utility functions for:
   - Annualised Returns
   - Ucler Index
   - CDaR (Conditional Drawdown at Risk)
-  - Jensen's Alpha
+  - Jensen's Alpha 
   - Capture Ratios
   - Sortino Ratios
   - Calmar Ratio
