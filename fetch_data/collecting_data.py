@@ -15,7 +15,9 @@ import requests
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import config
-from export_forecast import export_results
+from maps.SecMap import sec_map
+from maps.industry_mapping import IndustryMap
+from functions.export_forecast import export_results
 
 
 BASE_FORECAST_URL = "https://tradingeconomics.com/forecast"
@@ -318,8 +320,8 @@ def macro_data() -> pd.DataFrame:
 
     start, end = '2010-01-01', config.TODAY.isoformat()
 
-    sp = yf.download('^GSPC', start=start, end=end)
-    
+    sp = yf.download('^GSPC', start = start, end = end)
+
     sp500_monthly = pd.DataFrame(sp["Close"].resample("ME").ffill())
     sp500_monthly.columns = ["SP500_Close"]
    
@@ -363,6 +365,96 @@ def macro_data() -> pd.DataFrame:
     return macro_df
 
 
+def get_sector_data() -> pd.DataFrame:
+    
+    sec_data = yf.download(list(sec_map.keys()), start = config.YEAR_AGO, end = config.TODAY)['Close']
+    
+    sec_data = sec_data.rename(columns = sec_map)
+    
+    rets = sec_data.pct_change().dropna()
+    
+    rets_len = len(rets)
+    
+    rets_ann = (1 + rets).prod() - 1
+    
+    vol = rets.std() * np.sqrt(rets_len)
+    
+    sr = (rets_ann - config.RF) / vol
+    
+    exp_ret_ind = rets.ewm(halflife = 0.2 * rets_len, adjust = False).mean().iloc[-1] * rets_len
+   
+    exp_std_ind = rets.ewm(halflife = 0.2 * rets_len, adjust = False).std().iloc[-1] * np.sqrt(rets_len)
+   
+    exp_sr_ind = (exp_ret_ind - 0.0435) / exp_std_ind
+    
+    df = pd.DataFrame({
+        "Sector": sec_data.columns,
+        "Returns": rets_ann,
+        "Volatility": vol,
+        "Sharpe Ratio": sr,
+        "Exp Returns": exp_ret_ind,
+        "Exp Volatility": exp_std_ind,
+        "Exp Sharpe Ratio": exp_sr_ind
+    }).set_index("Sector")
+    
+    return df
+
+
+def get_industry_data() -> pd.DataFrame:
+    """
+    Download industry data, compute returns, volatility, and Sharpe ratio.
+    Returns a DataFrame with industry metrics.
+    """
+    
+    ind_list = list(IndustryMap.keys())
+    
+    ind_ticker_map = {}
+    
+    for ind in ind_list:
+    
+        sec_data = yf.Industry(ind).ticker.ticker
+    
+        ind_ticker_map[sec_data] = ind
+    
+    ind_ticker_map
+
+    ind_data = yf.download(list(ind_ticker_map.keys()), start = config.YEAR_AGO, end = config.TODAY)['Close']
+    
+    ind_data = ind_data.rename(columns=ind_ticker_map)
+
+    ind_data = ind_data.rename(columns=IndustryMap)
+    
+    ind_data = ind_data.groupby(axis=1, level=0).sum()
+
+    rets_ind = ind_data.pct_change().dropna()
+    
+    rets_len = len(rets_ind)
+    
+    rets_ann_ind = (1 + rets_ind).prod() - 1        
+    
+    vol_ind = rets_ind.std() * np.sqrt(rets_len)
+    
+    sr_ind = ((rets_ann_ind - 0.0465) / vol_ind).fillna(0)
+    
+    exp_ret_ind = rets_ind.ewm(halflife = 0.2 * rets_len, adjust = False).mean().iloc[-1] * rets_len
+   
+    exp_std_ind = rets_ind.ewm(halflife=0.2 * rets_len, adjust = False).std().iloc[-1] * np.sqrt(rets_len)
+   
+    exp_sr_ind = (exp_ret_ind - 0.0435) / exp_std_ind
+    
+    df = pd.DataFrame({
+        "Industry": ind_data.columns,
+        "Returns": rets_ann_ind,
+        "Volatility": vol_ind,
+        "Sharpe Ratio": sr_ind,
+        "Exp Returns": exp_ret_ind,
+        "Exp Volatility": exp_std_ind,
+        "Exp Sharpe Ratio": exp_sr_ind
+    }).set_index("Industry")
+    
+    return df
+
+
 def main() -> None:
     """
     Orchestrate data download, indicator computation, forecast scraping,
@@ -371,18 +463,8 @@ def main() -> None:
    
     configure_logging()
 
-    tickers = [
-        "1211.HK", "ACHR", "AMZN", "APD", "ARBE", "APH", "ASTS", "ASX", "AV.L", "BA", "BA.L", "BABA", "BATS.L", "BB", "BBAI",
-        "BLDR", "BLZE", "BNP.PA", "BNTC", "BP.L", "BBD-B.TO", "BT-A.L", "BUR", "BUSE", "C", "CCO.TO", "CELH", "CRM", "CNQ.TO", "COP", "COHR", "CPNG", "CRWD", "COST", "CSCO", "CVX", "CYBR", "CZR",
-        "DE", "DHI", "DHR", "DIS", "DPZ", "DKNG", "EVR", "EZJ.L", "FARO", "FISI", "FIX", "FLNC", "FLOW.AS", "FSG.L", "FTAI", "FUN",
-        "GLBE", "GM", "GOOG", "GRG.L", "GS", "GTLB", "HEIA.AS", "HOOD", "HSBA.L", "HWM",
-        "IAG.L", "IBM", "IDXX", "IMI.L", "INVZ", "JD.L", "JOBY", "JPM", "KO", "KBR", "LH", "LRN", "LMP.L", "LOVE", "LUNR", "MCD", "MELI", "META", "MGM", "MGNI", "MNG.L", "ML.PA", "MSFT", "MKC",
-        "MTZ", "NEE", "NG.L", "NUE", "NVDA", "NOVO-B.CO", "ORCL", "OUST", "PYPL", "PLTR", "PSN.L", 
-        "QNST", "REL.L", "RGTI", "RR.L", "RY.TO", "SAN.MC", "SBUX", "SHIP", "SMCI", "STE", "STZ", "SU.TO", "TBLA", "TDY", "TEM", "TEVA", "TMUS", "TMO",
-        "TRMB", "TRMD", "TSCO.L", "TTD", "TTWO", "UBER", "UBSG.SW", "UNH", "UUUU", "VIRT", "VRT", "VKTX", "XIACY",
-        "W7L.L", "WFC", "WMT", "WPK.TO", "ZETA", "ZIM"
-    ]    
-   
+    tickers = config.tickers
+    
     start_date = '2000-01-01'  
     
     index_tickers = ['^GSPC', '^NDX', '^FTSE', '^GDAXI', '^FCHI', '^AEX', '^IBEX', '^GSPTSE', '^HSI', '^SSMI', 'VWRL.L', '^IXIC']
@@ -466,6 +548,10 @@ def main() -> None:
             logging.exception("Commodity forecast failed: %s", key)
    
     macro_df = macro_data()
+    
+    sector_data = get_sector_data()
+    
+    industry_data = get_industry_data()
    
     sheets_data = {
         "Close": close,
@@ -481,6 +567,8 @@ def main() -> None:
         "MACD Signal": macd_sig_df,
         **forecasts,
         "Macro Data": macro_df,
+        "Sector Data": sector_data,
+        "Industry Data": industry_data,
         "Index Close": index_close
     }
    
