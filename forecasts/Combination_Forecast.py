@@ -32,7 +32,7 @@ IND_DATA_FILE = 'ind_data_mc_all_simple_mean.xlsx'
 
 MIN_STD = 1e-2
 MAX_STD = 2
-MAX_MODEL_WT = 0.12
+MAX_MODEL_WT = 0.10
 
 
 def ensure_headers_are_strings(
@@ -408,6 +408,7 @@ class PortfolioOptimizer:
     def return_on_assets_score(
         self, 
         return_on_assets: pd.Series, 
+        prev_roa : pd.Series,
         score: pd.Series, 
         ind_roa: pd.Series
         ) -> pd.Series:
@@ -418,6 +419,8 @@ class PortfolioOptimizer:
         common_idx = return_on_assets.index.intersection(score.index)
 
         roa = return_on_assets.reindex(common_idx).fillna(0)
+        
+        p_roa = prev_roa.reindex(common_idx).fillna(0)
 
         sc = score.reindex(common_idx, fill_value=0)
         
@@ -430,6 +433,10 @@ class PortfolioOptimizer:
         sc.loc[nonzero_idx] += (roa.loc[nonzero_idx] > ind_roa.loc[nonzero_idx]).astype(int)
         
         sc.loc[nonzero_idx] -= (roa.loc[nonzero_idx] < ind_roa.loc[nonzero_idx]).astype(int)
+        
+        sc.loc[nonzero_idx] += (roa.loc[nonzero_idx] > p_roa.loc[nonzero_idx]).astype(int)
+        
+        sc.loc[nonzero_idx] -= (roa.loc[nonzero_idx] < p_roa.loc[nonzero_idx]).astype(int)
 
         return sc
 
@@ -498,19 +505,15 @@ class PortfolioOptimizer:
 
             forward_ratio = np.where(feps != 0, pr / feps, np.inf)
             
-            ratio_1y = np.where(eps_1y != 0, pr / eps_1y, np.inf)
-
         trailing_series = pd.Series(trailing_ratio, index = common_idx)
 
         forward_series = pd.Series(forward_ratio, index = common_idx)
         
-        series_1y = pd.Series(ratio_1y, index = common_idx)
-
         mask_no_l = ~pd.Series(common_idx, index = common_idx).str.endswith('.L')
 
         valid_idx = common_idx[mask_no_l]
 
-        sc.loc[valid_idx] -= (forward_series[valid_idx] > ipe[valid_idx]).astype(int)
+        sc.loc[valid_idx] -= (trailing_series[valid_idx] > ipe[valid_idx]).astype(int)
 
         sc.loc[valid_idx] += (forward_series[valid_idx] < trailing_series[valid_idx]).astype(int)
         
@@ -675,6 +678,7 @@ class PortfolioOptimizer:
         rev_growth = a['revenueGrowth']
        
         roa = a['Return on Assets']
+        prev_roa = a['Previous Return on Assets']
        
         roe = a['returnOnEquity']
        
@@ -773,16 +777,8 @@ class PortfolioOptimizer:
         ses = [s.reindex(common_idx).clip(lower=MIN_STD, upper=MAX_STD) for s in ses]
 
         ret_df = pd.DataFrame({names[i]: rets[i] for i in range(len(names))}, index=common_idx)
-
-        Q1, Q3 = ret_df.quantile(0.25), ret_df.quantile(0.75)
-       
-        IQR = Q3 - Q1
-
-        ret_df_clipped = ret_df.clip(
-                                lower = Q1 - IQR, 
-                                upper = Q3 + IQR, 
-                                axis = 1
-                            )
+        
+        ret_df_clipped = ret_df
 
         model_vars = pd.DataFrame(
             { names[i]: ses[i] ** 2 for i in range(len(names)) },
@@ -866,7 +862,47 @@ class PortfolioOptimizer:
             cap = cap_per_ticker.values,     
             mask = valid.values.T
         )
+        
+        group_iv_names = ['DCF', 'DCFE', 'RI']
+        group_f_names = ['FF3', 'FF5', 'CAPM']
+        group_ml_names = ['Prophet', 'SARIMAX', 'LinReg']
 
+        group_iv_idx = [names.index(m) for m in group_iv_names]
+        group_f_idx = [names.index(m) for m in group_f_names]
+        group_ml_idx = [names.index(m) for m in group_ml_names]
+        
+        for col in range(w_arr.shape[1]):
+
+            current_iv = w_arr[group_iv_idx, col]
+
+            if current_iv.sum() > 0.25:
+
+                w_arr[group_iv_idx, col] *= 0.25 / current_iv.sum()
+
+                others = [i for i in range(w_arr.shape[0]) if i not in group_iv_idx]
+
+                w_arr[others, col]  *= 0.75 / w_arr[others, col].sum()
+
+            current_f = w_arr[group_f_idx, col]
+
+            if current_f.sum() > 0.25:
+
+                w_arr[group_f_idx, col] *= 0.25 / current_f.sum()
+
+                others = [i for i in range(w_arr.shape[0]) if i not in group_f_idx]
+
+                w_arr[others, col]  *= 0.75 / w_arr[others, col].sum()
+
+            current_ml = w_arr[group_ml_idx, col]
+
+            if current_ml.sum() > 0.25:
+
+                w_arr[group_ml_idx, col] *= 0.25 / current_ml.sum()
+
+                others = [i for i in range(w_arr.shape[0]) if i not in group_ml_idx]
+
+                w_arr[others, col]  *= 0.75 / w_arr[others, col].sum()
+            
         weights = {
             names[i]: pd.Series(w_arr[i], index = common_idx)
             for i in range(len(names))
@@ -875,6 +911,7 @@ class PortfolioOptimizer:
         comb_rets = div.reindex(common_idx).fillna(0)
 
         for n in names:
+            
             comb_rets += weights[n] * ret_df_clipped[n]
 
         w_df = pd.DataFrame(weights)
@@ -948,6 +985,7 @@ class PortfolioOptimizer:
         
         score_roa = self.return_on_assets_score(
             return_on_assets = roa, 
+            prev_roa = prev_roa,
             score = score_roe.copy(), 
             ind_roa = ind_roa
         )
@@ -1046,6 +1084,10 @@ class PortfolioOptimizer:
         final_scores = score_breakdown.sum(axis=1)
        
         final_scores = pd.Series(np.minimum(final_scores, nY), index=common_idx)
+        
+        if config.TICKER_EXEMPTIONS in final_scores.index:
+            
+            final_scores.loc[config.TICKER_EXEMPTIONS] = final_scores.mean()
        
         score_breakdown['Final Score'] = final_scores
 
