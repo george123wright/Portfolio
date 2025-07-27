@@ -7,6 +7,7 @@ import numpy as np
 from typing import Tuple, Dict, Any, List
 from scipy.stats import norm
 import statsmodels.api as sm
+from numbers import Number
 import config
 
 
@@ -27,10 +28,26 @@ def portfolio_return(
     elif isinstance(returns, pd.Series):
        
         return float(weights @ returns)
-   
+    
+    elif isinstance(returns, np.ndarray):
+        
+        return float(weights @ returns)
+
+    if isinstance(returns, Number):
+    
+        if len(weights) == 1:
+        
+            return float(weights[0] * returns)
+        
+        else:
+            
+            raise TypeError(
+                f"Cannot compute a multi‑asset portfolio return from a single scalar ({returns})"
+            )
+    
     else:
         
-        raise TypeError("Expected returns to be a Series or DataFrame")
+         raise TypeError("Expected returns to be a Series or DataFrame")
 
 
 def portfolio_volatility(
@@ -286,6 +303,37 @@ def cvar_historic(
         raise TypeError("Expected r to be a Series or DataFrame")
 
 
+def port_pred_cvar(
+    r_pred, 
+    std_pred,
+    skew,
+    kurt, 
+    level = 5.0,
+    periods = 52
+) -> float:
+    
+    alpha = level / 100
+    
+    z  = norm.ppf(alpha)
+        
+    z_cf = (
+        z
+        + (z ** 2 - 1) * skew / 6
+        + (z ** 3 - 3 * z) * (kurt - 3) / 24
+        - (2 * z ** 3 - 5 * z) * (skew ** 2) / 36
+    )
+    
+    r_pred_per_period = (1 + r_pred)**(1/periods) - 1
+    
+    std_pred_per_period = std_pred / np.sqrt(periods)
+    
+    z_pdf = norm.pdf(z_cf)
+    
+    cvar = r_pred_per_period + (std_pred_per_period * z_pdf / alpha)
+    
+    return cvar
+
+
 def kurtosis(
     r
 ):
@@ -454,6 +502,10 @@ def portfolio_return_robust(
     """
     
     w = np.asarray(weights)
+    
+    if isinstance(returns, pd.Series):
+    
+        returns = returns.to_frame()
 
     def row_ret(
         row: pd.Series
@@ -701,7 +753,7 @@ def percent_positive_and_streaks(
 
 def gbm(
     n_years = 10, 
-    n_scenarios = 1000,
+    n_scenarios = 1_000_000,
     mu = 0.07, 
     sigma = 0.15, 
     steps_per_year = 12, 
@@ -731,7 +783,7 @@ def gbm(
     
     rets_plus_1[0] = 1
    
-    ret_val = s_0*pd.DataFrame(rets_plus_1).cumprod() if prices else rets_plus_1 - 1
+    ret_val = s_0 * pd.DataFrame(rets_plus_1).cumprod() if prices else rets_plus_1 - 1
    
     return ret_val
 
@@ -804,8 +856,9 @@ def simulate_and_report(
     rf: float, beta: float, 
     benchmark_weekly_rets: pd.Series, 
     benchmark_ann_ret: float,
-    bl_ret = pd.Series,
-    bl_cov = pd.DataFrame
+    bl_ret: pd.Series,
+    bl_cov: pd.DataFrame,
+    sims: int = 1_000_000
 ) -> Dict[str, Any]:
     
     last_year_weekly_rets = weekly_rets.loc[weekly_rets.index >= pd.to_datetime(config.YEAR_AGO)]
@@ -842,7 +895,7 @@ def simulate_and_report(
         sigma = vol_ann, 
         steps = 252, 
         s0 = 100.0, 
-        scenarios = 1_000_000
+        scenarios = sims
     )
     
     b_val = port_beta(
@@ -899,6 +952,15 @@ def simulate_and_report(
     
     hist_cvar5 = cvar_historic(
         r = portfolio_rets_5year_hist
+    )
+    
+    pred_cvar = port_pred_cvar(
+        r_pred = port_rets,
+        std_pred = vol_ann,
+        skew = skew_val,
+        kurt = kurt_val,
+        level = 5.0,
+        periods = 52
     )
     
     te = tracking_error(
@@ -991,28 +1053,28 @@ def simulate_and_report(
     )
     
     summary = {
-        "Average Returns": f"{port_rets * 100:.2f}%",
-        "Average Bear Returns": f"{port_bear_rets * 100:.2f}%",
-        "Average Bull Returns": f"{port_bull_rets * 100:.2f}%",
-        "BL Returns": f"{port_bl_rets * 100:.2f}%",
+        "Average Returns": port_rets,
+        "Average Bear Returns": port_bear_rets,
+        "Average Bull Returns": port_bull_rets,
+        "BL Returns": port_bl_rets,
         "Weekly Volatility": vol,
         "Annual Volatility": vol_ann,
         "BL Volatility": port_bl_vol,
-        "Scenario Average Returns": f"{stats['mean_returns'] * 100:.2f}%",
-        "Scenario Loss Incurred": f"{stats['loss_percentage']:.2f}%",
-        "Scenario Average Loss": f"{stats['mean_loss_amount'] * -100:.2f}%",
-        "Scenario Average Gain": f"{stats['mean_gain_amount'] * 100:.2f}%",
+        "Scenario Average Returns": stats['mean_returns'],
+        "Scenario Loss Incurred": stats['loss_percentage'],
+        "Scenario Average Loss": stats['mean_loss_amount'],
+        "Scenario Average Gain": stats['mean_gain_amount'],
         "Scenario Variance": stats["variance"],
-        "Scenario 10th Percentile": f"{stats['10th_percentile'] * 100:.2f}%",
-        "Scenario Lower Quartile": f"{stats['lower_quartile'] * 100:.2f}%",
-        "Scenario Upper Quartile": f"{stats['upper_quartile'] * 100:.2f}%",
-        "Scenario 90th Percentile": f"{stats['90th_percentile'] * 100:.2f}%",
-        "Scenario Up/Down": f"{stats['scenarios_up_down']:.2f}",
-        "Scenario Min Returns": f"{stats['min_return'] * 100:.2f}%",
-        "Scenario Max Returns": f"{stats['max_return'] * 100:.2f}%",
-        "Portfolio Beta": f"{b_val:.4f}",
-        "Treynor Ratio": f"{treynor:.4f}",
-        "Portfolio Score": f"{score_val:.2f}",
+        "Scenario 10th Percentile": stats['10th_percentile'],
+        "Scenario Lower Quartile": stats['lower_quartile'],
+        "Scenario Upper Quartile": stats['upper_quartile'],
+        "Scenario 90th Percentile": stats['90th_percentile'],
+        "Scenario Up/Down": stats['scenarios_up_down'],
+        "Scenario Min Returns": stats['min_return'],
+        "Scenario Max Returns": stats['max_return'],
+        "Portfolio Beta": b_val,
+        "Treynor Ratio": treynor,
+        "Portfolio Score": score_val,
         "Portfolio Tracking Error": te,
         "Information Ratio": ir,
         "Sortino Ratio": sortino,
@@ -1032,6 +1094,7 @@ def simulate_and_report(
         "Kurtosis": kurt_val,
         "Cornish-Fisher VaR (5%)": cf_var5,
         "Historic CVaR (5%)": hist_cvar5,
+        "Predicted CVaR (5%)": pred_cvar,
         "Sharpe Ratio (Predicted)": sr_pred,
         "Sharpe Hist Ratio": ann_sr_hist,
         "Bl Sharpe Ratio": bl_sr,
@@ -1047,3 +1110,118 @@ def simulate_and_report(
     }
         
     return summary
+
+
+def report_ticker_metrics(
+    tickers: List[str],
+    weekly_rets: pd.DataFrame,
+    weekly_cov: pd.DataFrame,
+    ann_cov: pd.DataFrame,
+    comb_rets: pd.Series,
+    bear_rets: pd.Series,
+    bull_rets: pd.Series,
+    comb_score: pd.Series,
+    rf: float,
+    beta: pd.Series,
+    benchmark_weekly_rets: pd.Series,
+    benchmark_ann_ret: float,
+    bl_ret: pd.Series,
+    bl_cov: pd.DataFrame,
+    forecast_file: str,
+    sims: int = 100_000
+) -> pd.DataFrame:
+    """
+    For each ticker in `tickers`, simulate and report portfolio metrics using a single-asset portfolio,
+    then include each of the forecast-return model predictions from `forecast_file`.
+
+    Returns a DataFrame with one row per ticker, containing:
+      - All metrics from simulate_and_report
+      - Model return predictions (one column per model)
+    """
+    
+    n = len(tickers)
+    
+    results: Dict[str, Dict] = {}
+
+    wts = [1]
+
+    for t in tickers:
+        
+        print(f"Simulating {t}...")
+        stock_df = weekly_rets[[t]].dropna()
+                
+        one_year = pd.to_datetime(config.YEAR_AGO)
+        stock_df = stock_df.loc[ stock_df.index >= one_year ]
+        bench_sr = benchmark_weekly_rets.loc[ benchmark_weekly_rets.index >= one_year ]
+        vol_weekly = np.sqrt(weekly_cov.loc[t, t])
+        
+        common = stock_df.index.intersection( bench_sr.index )
+        stock_df = stock_df.loc[common]
+        bench_sr = bench_sr.loc[common]
+        
+        vol_annual = np.sqrt(ann_cov.loc[t, t])
+                
+        bl_cov_t = np.array([[bl_cov.loc[t, t]]])
+        
+        beta_t = np.array([beta.loc[t]])
+        
+        score_t = np.array([comb_score.loc[t]])
+                        
+        metrics = simulate_and_report(
+            name = t,
+            wts = wts,
+            comb_rets = comb_rets.loc[t],
+            bear_rets = bear_rets.loc[t],
+            bull_rets = bull_rets.loc[t],
+            vol = vol_weekly,
+            vol_ann = vol_annual,
+            comb_score = score_t,
+            weekly_rets = stock_df,
+            rf = rf,
+            beta = beta_t,
+            benchmark_weekly_rets = bench_sr,
+            benchmark_ann_ret = benchmark_ann_ret,
+            bl_ret = bl_ret.loc[t],
+            bl_cov = bl_cov_t,
+            sims = sims
+        )
+        results[t] = metrics
+
+    metrics_df = pd.DataFrame.from_dict(results, orient='index')
+
+    xls = pd.ExcelFile(forecast_file)
+    
+    model_sheets = {
+        'Prophet Pred': 'Prophet',
+        'Analyst Target': 'AnalystTarget',
+        'Exponential Returns':'EMA',
+        'Lin Reg Returns': 'LinReg',
+        'DCF': 'DCF',
+        'DCFE': 'DCFE',
+        'Daily Returns': 'Daily',
+        'RI': 'RI',
+        'CAPM BL Pred': 'CAPM',
+        'FF3 Pred': 'FF3',
+        'FF5 Pred': 'FF5',
+        'SARIMAX Monte Carlo': 'SARIMAX',
+        'Rel Val Pred': 'RelVal'
+    }
+    
+    model_returns: Dict[str, pd.Series] = {}
+    
+    for sheet, name in model_sheets.items():
+        
+        df = xls.parse(sheet, usecols=['Ticker', 'Returns'], index_col='Ticker')
+        
+        df.index = df.index.str.upper()
+        
+        model_returns[name] = df['Returns']
+
+    ret_df = pd.DataFrame(model_returns).reindex(tickers)
+
+
+    final_df = ret_df.join(metrics_df)
+
+    final_df['Combined Return'] = comb_rets.reindex(tickers)
+
+    return final_df
