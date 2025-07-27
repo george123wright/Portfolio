@@ -17,6 +17,59 @@ sector_limits = {
 }
 
 
+def align_by_ticker(func):
+    """
+    Make every optimiser:
+      • internally work with numpy arrays (fast),
+      • externally always accept/return objects that share the same ticker order.
+
+    The canonical order is taken from the tickers given in config.py.
+    """
+    @functools.wraps(func)
+    
+    def _wrapper(*args, **kwargs):
+
+        tickers = config.tickers
+
+        def _reindex(
+            obj
+        ):
+           
+            if isinstance(obj, pd.Series):
+               
+                return obj.reindex(tickers)
+            
+            if isinstance(obj, pd.DataFrame):
+
+                if obj.index.equals(obj.columns):
+                   
+                    return obj.reindex(index = tickers, columns = tickers)
+
+                return obj.reindex(columns = tickers)
+
+            return obj
+
+        args = list(args)
+
+        for i, a in enumerate(args):
+            
+            args[i] = _reindex(
+                obj = a
+            )
+       
+        for k in list(kwargs):
+       
+            kwargs[k] = _reindex(
+                obj = kwargs[k]
+            )
+
+        w = func(*args, **kwargs)   
+        
+        return pd.Series(w, index = tickers, name = func.__name__)
+
+    return _wrapper
+
+
 def generate_bounds_for_asset(
     bnd_h: float,
     bnd_l: float,
@@ -36,7 +89,7 @@ def generate_bounds_for_asset(
         
         return (bnd_l, bnd_h)
     
-
+@align_by_ticker
 def msr(
     riskfree_rate: float,
     er: pd.Series,
@@ -87,17 +140,7 @@ def msr(
             "fun": lambda w,
             inds=idxs: max_industry_pct - np.sum(w[inds])
         })
-        
-    for sector in ticker_sec.unique():
-        
-        idxs = [i for i, tk in enumerate(er.index) if ticker_sec.loc[tk] == sector]
-        
-        constraints.append({
-            "type": "ineq",
-            "fun": lambda w, 
-            inds = idxs: max_sector_pct - np.sum(w[inds])
-        })
-        
+
     for sector in ticker_sec.unique():
        
         limit = sector_limits.get(sector, max_sector_pct)
@@ -141,7 +184,7 @@ def msr(
  
     return res.x
 
-
+@align_by_ticker
 def msr_sortino(
     riskfree_rate: float,
     er: pd.Series,
@@ -375,7 +418,7 @@ def equal_risk_contributions(
         bnd_l = bnd_l
     )
 
-
+@align_by_ticker
 def MIR(
     benchmark: float,
     benchmark_weekly_ret: pd.Series,
@@ -475,7 +518,6 @@ def MIR(
     
     return res.x
 
-
 def black_litterman_weights(
     tickers: pd.Index,
     comb_rets: pd.Series,
@@ -515,15 +557,15 @@ def black_litterman_weights(
     
         raise ValueError("Nothing passes the >0 screen")
     
-    w_prior = pd.Series(0.0, index=tickers)
+    w_prior = pd.Series(0.0, index=comb_std.index)
     
     w_prior[mask] = mcap[mask] / total_mcap
 
-    P = pd.DataFrame(np.eye(len(tickers)), index=tickers, columns=tickers)
+    P = pd.DataFrame(np.eye(len(tickers)), index=comb_std.index, columns=comb_std.index)
     
     Q = comb_rets.copy()
     
-    omega = pd.DataFrame(np.diag(comb_std**2), index=tickers, columns=tickers)
+    omega = pd.DataFrame(np.diag(comb_std**2), index=comb_std.index, columns=comb_std.index)
     
     mu_bl, sigma_bl = black_litterman(
         w_prior = w_prior,
@@ -610,28 +652,29 @@ def black_litterman_weights(
     
     return w_bl, mu_bl, sigma_bl
 
-
-def comb_port(
+@align_by_ticker
+def comb_port_init_w(
     riskfree_rate: float,
     er: pd.Series,
     cov: np.ndarray,
     weekly_ret_1y: pd.DataFrame,
-    benchmark: float,
-    last_year_benchmark_weekly_ret: pd.Series,
-    scores: pd.Series,
     ticker_ind: pd.Series,
     ticker_sec: pd.Series,
     bnd_h: pd.Series,
     bnd_l: pd.Series,
+    w_msr: pd.Series,
+    w_sortino: pd.Series,
+    w_mir: pd.Series,
+    w_bl: pd.Series,
+    w_msp: pd.Series,
+    mu_bl: pd.Series,
+    sigma_bl: pd.DataFrame,
     max_industry_pct: float = 0.1,
     max_sector_pct: float = 0.15,
     tickers: pd.Index = None,
-    comb_std: pd.Series = None,
-    sigma_prior: pd.DataFrame = None,
-    mcap: pd.Series = None,
-    gamma: Tuple[float, float, float, float] = (1.0, 1.0, 1.0, 1.0),
-    sample_size: int = 500,
-    random_state: int = None
+    gamma: Tuple[float, float, float, float, float] = (1.0, 1.0, 1.0, 1.0, 1.0),
+    sample_size: int = 2000,
+    random_state: int = 42
 ) -> np.ndarray:
     """
     Builds a convex combination of MSR, Sortino, MIR and BL weights, maximizing:
@@ -653,73 +696,19 @@ def comb_port(
         
         return np.vectorize(cdf)
 
-    w_msr = msr(
-        riskfree_rate = riskfree_rate, 
-        er = er, 
-        cov = cov,
-        scores = scores, 
-        ticker_ind = ticker_ind, 
-        ticker_sec = ticker_sec,
-        bnd_h = bnd_h, 
-        bnd_l = bnd_l,
-        max_industry_pct = max_industry_pct,
-        max_sector_pct = max_sector_pct
-    )
-    
-    w_sortino = msr_sortino(
-        riskfree_rate = riskfree_rate, 
-        er = er, 
-        weekly_ret = weekly_ret_1y, 
-        scores = scores, 
-        ticker_ind = ticker_ind, 
-        ticker_sec = ticker_sec,
-        bnd_h = bnd_h,
-        bnd_l = bnd_l,
-        max_industry_pct = max_industry_pct,
-        max_sector_pct = max_sector_pct
-    )
-    
-    w_mir = MIR(
-        benchmark = benchmark, 
-        benchmark_weekly_ret = last_year_benchmark_weekly_ret, 
-        er = er,
-        scores = scores,
-        er_hist = weekly_ret_1y, 
-        ticker_ind = ticker_ind, 
-        ticker_sec = ticker_sec,
-        bnd_h = bnd_h, 
-        bnd_l = bnd_l,
-        max_industry_pct = max_industry_pct,
-        max_sector_pct = max_sector_pct
-    )
-    
-    w_bl, mu_bl, sigma_bl = black_litterman_weights(
-        tickers = tickers,
-        comb_rets = er,
-        comb_std = comb_std,
-        cov_prior = sigma_prior,
-        mcap = mcap,
-        score = scores,
-        ticker_ind = ticker_ind,
-        ticker_sec = ticker_sec,
-        bnd_h = bnd_h,
-        bnd_l = bnd_l,
-        max_industry_pct = max_industry_pct,
-        max_sector_pct = max_sector_pct
-    )
-
-    W = np.column_stack([w_msr, w_sortino, w_mir, w_bl])
+    W = np.column_stack([w_msr, w_sortino, w_mir, w_bl, w_msp])
 
     if random_state is not None:
         
         np.random.seed(random_state)
     
-    alphas = np.random.dirichlet([1, 1, 1, 1], size = sample_size)
+    alphas = np.random.dirichlet([1, 1, 1, 1, 1], size = sample_size)
 
     sharpe_vals = []
     sortino_vals = []
     mir_pen_vals = []
     bl_reward_vals = []
+    msp_pen_vals = []
 
     for α in alphas:
         
@@ -764,6 +753,8 @@ def comb_port(
         mir_pen_vals.append(np.sum((w - w_mir)**2))
 
         bl_reward_vals.append((bl_ret - riskfree_rate) / bl_vol)
+        
+        msp_pen_vals.append(np.sum((w - w_msp)**2))
 
     F_sharpe = empirical_cdf_transform(
         vals = sharpe_vals
@@ -780,8 +771,12 @@ def comb_port(
     F_mir = empirical_cdf_transform(
         vals = mir_pen_vals
     )
+    
+    F_msp = empirical_cdf_transform(
+        vals = msp_pen_vals
+    )
 
-    γ_s, γ_so, γ_pm, γ_bl = gamma
+    γ_s, γ_so, γ_pm, γ_bl, γ_sp = gamma
 
     def neg_obj(
         α: np.ndarray
@@ -828,13 +823,16 @@ def comb_port(
         mir_pen = np.sum((w - w_mir) ** 2)
        
         bl_reward = (bl_ret - riskfree_rate) / bl_vol
+        
+        msp_pen = np.sum((w - w_msp) ** 2)
 
         s_scaled = F_sharpe(sharpe)
         so_scaled = F_sortino(sortino)
         bl_scaled = F_bl(bl_reward)
         mir_scaled = F_mir(mir_pen)
+        msp_scaled = F_msp(msp_pen)
 
-        return - (γ_s * s_scaled + γ_so * so_scaled + γ_bl * bl_scaled) + (γ_pm * mir_scaled)
+        return - (γ_s * s_scaled + γ_so * so_scaled + γ_bl * bl_scaled) + (γ_pm * mir_scaled + γ_sp * msp_scaled)
 
     cons = [{
         "type": "eq", 
@@ -878,9 +876,11 @@ def comb_port(
             limit = limit: limit - np.sum(W.dot(α)[inds])
         })
 
-    bounds_α = [(0.0, 1.0)] * 4
+    k = W.shape[1]            
+    
+    bounds_α = [(0.0, 1.0)] * k
 
-    init = np.full(4, 1/4)
+    init = np.full(k, 1.0 / k)
     
     res = minimize(
         neg_obj,
@@ -888,7 +888,7 @@ def comb_port(
         method = 'SLSQP',
         bounds = bounds_α,
         constraints = cons,
-        options = {'disp': False}
+        options = {'disp': True,  "maxiter": 4000}
     )
     
     if not res.success:
@@ -899,84 +899,446 @@ def comb_port(
     
     return W.dot(α_opt)
 
-
-def msp(
-    scores: pd.Series,
-    cov: np.ndarray,
+@align_by_ticker
+def comb_port(
+    riskfree_rate: float,
     er: pd.Series,
+    cov: np.ndarray,
+    weekly_ret_1y: pd.DataFrame,
+    last_5_year_weekly_rets: pd.DataFrame,
+    benchmark: float,
+    last_year_benchmark_weekly_ret: pd.Series,
+    scores: pd.Series,
     ticker_ind: pd.Series,
     ticker_sec: pd.Series,
-    bnd_h: float,
-    bnd_l: float,
+    bnd_h: pd.Series,
+    bnd_l: pd.Series,
+    tickers: pd.Index,
+    comb_std: pd.Series,
+    sigma_prior: pd.DataFrame,
+    mcap: pd.Series,
+    w_msr: pd.Series = None,
+    w_sortino: pd.Series = None,
+    w_mir: pd.Series = None,
+    w_bl: pd.Series = None,
+    w_msp: pd.Series = None,
+    mu_bl: pd.Series = None,
+    sigma_bl: pd.DataFrame = None,
     max_industry_pct: float = 0.1,
-    max_sector_pct: float = 0.15
+    max_sector_pct: float = 0.15,
+    sample_size: int = 2000,
+    random_state: int = 42,
+    gamma: tuple = (1, 1, 1, 1, 1)
 ) -> np.ndarray:
     """
-    Maximises the score-per-risk measure: (w @ scores) / volatility.
+    Scale each of [Sharpe, Sortino, BL-Sharpe, MIR-penalty, MSP-penalty]
+    to unit sample–std so that a unit weight on each (γ=1,1,…1) means “equal impact.”
     """
+
+    n = len(er)
     
-    n = er.shape[0]
+    if w_msr is None:
+        
+        w_msr = msr(
+            riskfree_rate = riskfree_rate,
+            er = er,
+            cov = cov,
+            scores = scores,
+            ticker_ind = ticker_ind,
+            ticker_sec = ticker_sec,
+            bnd_h = bnd_h,
+            bnd_l = bnd_l,
+            max_industry_pct = max_industry_pct,
+            max_sector_pct = max_sector_pct
+        )
     
-    init_guess = np.zeros(n)
+    if w_sortino is None:
+
+        w_sortino = msr_sortino(
+            riskfree_rate = riskfree_rate,
+            er = er,
+            weekly_ret = weekly_ret_1y,
+            scores = scores,
+            ticker_ind = ticker_ind,
+            ticker_sec = ticker_sec,
+            bnd_h = bnd_h,
+            bnd_l = bnd_l,
+            max_industry_pct = max_industry_pct,
+            max_sector_pct = max_sector_pct
+        )
     
-    bnds = [
-        generate_bounds_for_asset(
-            bnd_h = bnd_h.iloc[i], 
-            bnd_l = bnd_l.iloc[i], 
-            er = er.iloc[i], 
-            score = scores.iloc[i]
-        ) 
-        for i in range(n)
-    ]
+    if w_mir is None:
+        
+        w_mir = MIR(
+            benchmark = benchmark,
+            benchmark_weekly_ret = last_year_benchmark_weekly_ret,
+            er = er,
+            scores = scores,
+            er_hist = weekly_ret_1y,
+            ticker_ind = ticker_ind,
+            ticker_sec = ticker_sec,
+            bnd_h = bnd_h,
+            bnd_l = bnd_l,
+            max_industry_pct = max_industry_pct,
+            max_sector_pct = max_sector_pct
+        )
+    if w_msp is None:
+        
+        w_msp = msp(
+            scores = scores,
+            er = er,
+            cov = cov,
+            weekly_ret = weekly_ret_1y,
+            level = 5.0,
+            ticker_ind = ticker_ind,
+            ticker_sec = ticker_sec,
+            bnd_h = bnd_h,
+            bnd_l = bnd_l,
+            max_industry_pct = max_industry_pct,
+            max_sector_pct = max_sector_pct
+        )
     
-    constraints = [{
+    if w_bl is None or mu_bl is None or sigma_bl is None:
+    
+        w_bl, mu_bl, sigma_bl = black_litterman_weights(
+            tickers = tickers,
+            comb_rets = er,
+            comb_std = comb_std,
+            cov_prior = sigma_prior,
+            mcap = mcap, 
+            score = scores,
+            ticker_ind = ticker_ind,
+            ticker_sec = ticker_sec,
+            bnd_h=bnd_h,
+            bnd_l=bnd_l,
+            max_industry_pct=max_industry_pct,
+            max_sector_pct=max_sector_pct
+        )
+    
+    weights_mat = np.vstack([
+        w_msr.values,
+        w_sortino.values,
+        w_mir.values,
+        w_msp.values,
+        w_bl.values        
+    ])
+    
+    min_weight = weights_mat.min(axis=0)   
+    max_weight = weights_mat.max(axis=0)
+    
+    rng = np.random.default_rng(random_state)
+ 
+    W_rand = rng.random((sample_size, n))
+ 
+    W_rand /= W_rand.sum(axis=1, keepdims=True)
+
+    sharpe_samps = np.empty(sample_size)
+    sortino_samps = np.empty(sample_size)
+    bl_samps = np.empty(sample_size)
+    mir_samps = np.empty(sample_size)
+    msp_samps = np.empty(sample_size)
+
+    for j, w in enumerate(W_rand):
+
+        ret = pf.portfolio_return(
+            weights = w, 
+            returns = er
+        )
+       
+        vol = max(
+            pf.portfolio_volatility(
+                weights = w, 
+                covmat = cov
+            ), 1e-12
+        )
+
+        dd = max(
+            pf.portfolio_downside_deviation(
+                weights = w, 
+                returns = weekly_ret_1y, 
+                target = config.RF_PER_WEEK
+            ), 1e-12
+        )
+
+        bl_ret = pf.portfolio_return(
+            weights = w, 
+            returns = mu_bl
+        )
+
+        bl_vol = max(
+            pf.portfolio_volatility(
+                weights = w, 
+                covmat = sigma_bl
+            ), 1e-12
+        )
+
+        sharpe_samps[j] = (ret - riskfree_rate) / vol
+     
+        sortino_samps[j] = (ret - riskfree_rate) / dd
+     
+        bl_samps[j] = (bl_ret - riskfree_rate) / bl_vol
+     
+        mir_samps[j] = np.sum((w - w_mir) ** 2)
+     
+        msp_samps[j] = np.sum((w - w_msp) ** 2)
+
+
+    scale_s = 1.0 / (sharpe_samps.std() + 1e-12)
+    scale_so = 1.0 / (sortino_samps.std() + 1e-12)
+    scale_bl = 1.0 / (bl_samps.std() + 1e-12)
+    scale_mir = 1.0 / (mir_samps.std() + 1e-12)
+    scale_msp = 1.0 / (msp_samps.std() + 1e-12)
+
+    γ_s, γ_so, γ_bl, γ_pm, γ_sp = gamma
+
+    bounds = [(float(bnd_l[i]), float(bnd_h[i])) for i in range(n)]
+
+    cons = [{
         "type": "eq", 
-        "fun": lambda w: np.sum(w) - 1
+        "fun": lambda w: np.sum(w) - 1.0
     }]
-    
+
     for industry in ticker_ind.unique():
-        
-        idxs = [i for i, tk in enumerate(er.index) if ticker_ind.loc[tk] == industry]
-        
-        constraints.append({
-            "type": "ineq",
+
+        idxs = [i for i, t in enumerate(er.index) if ticker_ind.loc[t] == industry]
+
+        cons.append({
+            "type":"ineq",
             "fun": lambda w, 
             inds = idxs: max_industry_pct - np.sum(w[inds])
         })
 
     for sector in ticker_sec.unique():
-        
+      
         limit = sector_limits.get(sector, max_sector_pct)
-        
-        idxs = [i for i, tk in enumerate(er.index) if ticker_sec.loc[tk] == sector]
-        
-        constraints.append({
-            "type": "ineq",
+      
+        idxs = [i for i, t in enumerate(er.index) if ticker_sec.loc[t]==sector]
+      
+        cons.append({
+            "type":"ineq",
             "fun": lambda w, 
             inds = idxs, 
-            limit = limit: limit - np.sum(w[inds])
+            lim = limit: lim - np.sum(w[inds])
         })
+
+    
+    for i in range(n):
         
-    def neg_score_risk(
+        lo = min_weight[i]
+        hi = max_weight[i]
+
+        cons.append({"type": "ineq",
+                    "fun": lambda w, 
+                    i = i, 
+                    lo = lo: w[i] - lo})   
+        
+        cons.append({"type": "ineq",
+                    "fun": lambda w, 
+                    i = i,
+                    hi = hi: hi - w[i]}) 
+    
+    if (min_weight > max_weight).any():
+        
+        raise ValueError("Some min_weight > max_weight — check your individual models")
+
+    def neg_obj(
         w: np.ndarray
     ) -> float:
+        
+        ret = pf.portfolio_return(
+            weights = w, 
+            returns = er
+        )
+        
+        vol = max(
+            pf.portfolio_volatility(
+                weights = w, 
+                covmat = cov
+            ), 1e-12
+        )
+        
+        dd = max(
+            pf.portfolio_downside_deviation(
+                weights = w, 
+                returns = weekly_ret_1y, 
+                target = config.RF_PER_WEEK
+            ), 1e-12
+        )
+        
+        bl_ret = pf.portfolio_return(
+            weights = w, 
+            returns = mu_bl
+        )
+        
+        bl_vol = max(
+            pf.portfolio_volatility(
+                weights = w, 
+                covmat = sigma_bl
+            ), 1e-12
+        )
+
+        sharpe  = (ret - riskfree_rate) / vol * scale_s
+        
+        sortino = (ret - riskfree_rate) / dd * scale_so
+        
+        bl_sharpe = (bl_ret - riskfree_rate) / bl_vol * scale_bl
+
+        mir_pen = np.sum((w - w_mir)**2) * scale_mir
+        
+        msp_pen = np.sum((w - w_msp)**2) * scale_msp
+
+        return - (γ_s * sharpe + γ_so * sortino + γ_bl * bl_sharpe) + (γ_pm * mir_pen + γ_sp * msp_pen)
+
+    init = comb_port_init_w(
+        riskfree_rate = riskfree_rate,
+        er = er,
+        cov = cov,
+        weekly_ret_1y = weekly_ret_1y,
+        ticker_ind = ticker_ind,
+        ticker_sec = ticker_sec,
+        bnd_h = bnd_h,
+        bnd_l = bnd_l,
+        w_msr = w_msr,
+        w_sortino = w_sortino,
+        w_mir = w_mir,
+        w_bl = w_bl,
+        w_msp = w_msp,
+        mu_bl = mu_bl,
+        sigma_bl = sigma_bl,
+        tickers = tickers
+    )
+
+    res = minimize(
+        neg_obj,
+        init,
+        method = "SLSQP",
+        bounds = bounds,
+        constraints = cons,
+        options = {"disp": True, "maxiter": 5000}
+    )
+
+    if not res.success:
+
+        raise RuntimeError(f"comb_port failed to converge: {res.message}")
+
+    return res.x
+
+
+@align_by_ticker
+def msp(
+    scores: pd.Series,
+    er: pd.Series,
+    cov: np.ndarray,
+    weekly_ret: pd.DataFrame,
+    level: float,
+    ticker_ind: pd.Series,
+    ticker_sec: pd.Series,
+    bnd_h: pd.Series,
+    bnd_l: pd.Series,
+    max_industry_pct: float = 0.1,
+    max_sector_pct: float = 0.15
+) -> np.ndarray:
+    """
+    Maximises the score-per-CVaR measure: (w @ scores) / historical CVaR at `level`%.
+    - scores: Analyst scores for each asset
+    - er: Forecast returns (used for bounds & init guess)
+    - weekly_ret: Historical returns DataFrame (for CVaR)
+    - level: Tail level for CVaR (e.g. 5.0 for 5%)
+    - ticker_ind: Industry mapping
+    - ticker_sec: Sector mapping
+    - bnd_h, bnd_l: Upper/lower weight bounds per asset
+    """
     
+    n = scores.shape[0]
+
+    init_guess = np.zeros(n)
+
+    nonzero = np.where((scores > 0) & (er > 0))[0]
+
+    if len(nonzero) > 0:
+
+        init_guess[nonzero] = 1.0 / len(nonzero)
+
+    bnds = [
+        generate_bounds_for_asset(
+            bnd_h = bnd_h.iloc[i],
+            bnd_l = bnd_l.iloc[i],
+            er = er.iloc[i],
+            score = scores.iloc[i]
+        )
+        for i in range(n)
+    ]
+
+    constraints = [
+        {"type": "eq", "fun": lambda w: np.sum(w) - 1}
+    ]
+
+    for industry in ticker_ind.unique():
+        
+        inds = [i for i, t in enumerate(scores.index) if ticker_ind.loc[t] == industry]
+      
+        constraints.append({
+            "type": "ineq",
+            "fun": lambda w, inds=inds: max_industry_pct - np.sum(w[inds])
+        })
+
+    for sector in ticker_sec.unique():
+       
+        limit = sector_limits.get(sector, max_sector_pct)
+       
+        inds = [i for i, t in enumerate(scores.index) if ticker_sec.loc[t] == sector]
+
+        constraints.append({
+            "type": "ineq",
+            "fun": lambda w, inds=inds, limit=limit: limit - np.sum(w[inds])
+        })
+
+    def neg_score_cvar(w: np.ndarray) -> float:
+
+        pr = pf.portfolio_return(
+            weights = w, 
+            returns = er
+        )
+        
         vol = pf.portfolio_volatility(
             weights = w, 
             covmat = cov
         )
-    
+        
+        port_rets = pf.portfolio_return_robust(
+            weights = w, 
+            returns = weekly_ret
+        )
+        
+        skew = pf.skewness(
+            r = port_rets
+        )
+        
+        kurt = pf.kurtosis(
+            r = port_rets
+        )
+ 
         vol = max(vol, 1e-12)
-    
-        return -((w @ scores) / vol)
-    
+        
+        tail_risk = pf.port_pred_cvar(
+            r_pred = pr, 
+            std_pred = vol,
+            skew = skew,
+            kurt = kurt,
+            level = level,
+        )
+
+        tail_risk = max(tail_risk, 1e-12)
+
+        return -((w @ scores) / tail_risk)
+
     res = minimize(
-        neg_score_risk, 
-        init_guess, 
+        neg_score_cvar,
+        init_guess,
         method = "SLSQP",
-        bounds = bnds, 
-        constraints = constraints, 
+        bounds = bnds,
+        constraints = constraints,
         options = {"disp": False}
     )
-    
+
     return res.x
