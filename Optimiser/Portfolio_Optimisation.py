@@ -24,9 +24,10 @@ import portfolio_optimisers as po
 from data_processing.ratio_data import RatioData
 import config
 
+
 r = RatioData()
 
-tickers = r.tickers
+tickers = config.tickers
 
 money_in_portfolio = config.MONEY_IN_PORTFOLIO
 
@@ -106,10 +107,7 @@ def load_excel_data() -> Tuple[
     daily_ret_5y = daily_ret.loc[daily_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
     weekly_ret_5y = weekly_ret.loc[weekly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
     monthly_ret_5y = monthly_ret.loc[monthly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
-    
-    print("Comb Data Index:")
-    print(comb_data.index)
-        
+            
     annCov = shrinkage_covariance(
         daily_5y = daily_ret_5y, 
         weekly_5y = weekly_ret_5y, 
@@ -247,6 +245,12 @@ def write_excel_results(
     red = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 
     with pd.ExcelWriter(excel_file, engine = "openpyxl", mode = "a", if_sheet_exists = "replace") as writer:
+        
+        tperf = ensure_headers_are_strings(sheets["Ticker Performance"].copy())
+        
+        tperf.to_excel(writer, sheet_name="Ticker Performance", index=True)
+        
+        ws_tp = writer.sheets["Ticker Performance"]
 
         tbs = ensure_headers_are_strings(sheets["Today_Buy_Sell"].copy())
         
@@ -260,6 +264,8 @@ def write_excel_results(
         ws.conditional_formatting.add(f"B2:B{n}", CellIsRule(operator = "equal", formula = ["FALSE"], fill = red))
         ws.conditional_formatting.add(f"C2:C{n}", CellIsRule(operator = "equal", formula = ["TRUE"],  fill = green))
         ws.conditional_formatting.add(f"C2:C{n}", CellIsRule(operator = "equal", formula = ["FALSE"], fill = red))
+        
+        _add_table(writer.sheets['Ticker Performance'], "TickerPerformanceTable")
         
         _add_table(ws, "TodayBuySellTable")
 
@@ -389,15 +395,25 @@ def compute_mcap_bounds(
     
     score_max = score.max()
     
-    mcap_sqrt = np.sqrt(market_cap)
+    mcap_sqrt = market_cap
+    
+    sec_sharpe = r.align_sector_sharpe()
+    
+    ind_sharpe = r.align_ind_sharpe()
     
     mcap_vol = {}
             
     for t in tickers:
     
         if vol.loc[t] > 0 and beta.loc[t] > 0 and score.loc[t] > 0:
-                            
-            mcap_vol[t] = mcap_sqrt.loc[t] / vol.loc[t]
+            
+            sec_sharpe_t = sec_sharpe.loc[t]    
+            
+            ind_sharpe_t = ind_sharpe.loc[t]
+            
+            ind_sharpe_val = np.maximum(np.sqrt(np.maximum(ind_sharpe_t + 1, 0)), 0.1)
+            
+            mcap_vol[t] = (1 + sec_sharpe_t) * ind_sharpe_val * mcap_sqrt.loc[t] / vol.loc[t]
             
         else:
             mcap_vol[t] = 0.0
@@ -406,17 +422,25 @@ def compute_mcap_bounds(
 
     mcap_vol_beta = mcap_vol_beta.fillna(0)
     
-    tot = mcap_vol_beta[er > 0].sum()
+    mask = (er > 0) & (score > 0)
+    
+    tot = float(mcap_vol_beta[mask].sum())
     
     if tot == 0:
+        
         tot = 1e-12  
 
     lb = {}
     ub = {}
     
     for t in tickers:
+        
+        if t in config.TICKER_EXEMPTIONS:
+            
+            lb[t] = 0.01
+            ub[t] = 0.075
     
-        if er.loc[t] > 0 and score.loc[t] > 0:
+        elif er.loc[t] > 0 and score.loc[t] > 0:
                             
             norm_score = score.loc[t] / score_max
 
@@ -430,11 +454,13 @@ def compute_mcap_bounds(
             
             cl_u = min(frac_u, max_all)
             
-            if ticker_sec.loc[t] == 'Healthcare':
+            if ticker_sec.loc[t] == 'Healthcare' or ticker_sec.loc[t] == 'Consumer Staples':
             
                 ub[t] = (norm_score * cl_u).clip(min_all_u, 0.025)
             
                 ub_val = min(norm_score * cl_u, 0.025)
+                
+                lb[t] = max(norm_score * cl_l / 2, min_all)
             
                 ub[t] = max(ub_val, lb[t])
             
@@ -447,15 +473,13 @@ def compute_mcap_bounds(
             lb[t] = 0.0
             ub[t] = 0.0
 
-    return pd.Series(lb), pd.Series(ub)
+    return pd.Series(lb), pd.Series(ub), mcap_vol_beta
 
 
 def main() -> None:
    
     logging.info("Starting portfolio optimisation script...")
-    
-    tickers = r.tickers
-    
+        
     benchmark_ret, benchmark_weekly_rets, last_year_benchmark_weekly_rets = benchmark_rets(
         benchmark = config.benchmark, 
         start = config.FIVE_YEAR_AGO, 
@@ -495,7 +519,7 @@ def main() -> None:
     
     min_all_u = w_min * 2
     
-    mcap_bnd_l, mcap_bnd_h = compute_mcap_bounds(
+    mcap_bnd_l, mcap_bnd_h, mcap_vol_beta = compute_mcap_bounds(
         market_cap = mcap, 
         beta = beta, 
         er = comb_rets, 
@@ -509,12 +533,17 @@ def main() -> None:
         min_all_u = min_all_u
     )
     
+    mcap["SGLP.L"] = mcap.max()
+    
     bounds_df = pd.DataFrame({
+        'mid': mcap_vol_beta,
         'Low': mcap_bnd_l,
         'High': mcap_bnd_h
     })
     
-    last_year_weekly_rets = weekly_ret.loc[weekly_ret.index >= pd.to_datetime(config.YEAR_AGO)]            
+    last_year_weekly_rets = weekly_ret.loc[weekly_ret.index >= pd.to_datetime(config.YEAR_AGO)]   
+    
+    last_5_year_weekly_rets = weekly_ret.loc[weekly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]         
     
     logging.info("Optimising MSR with constraints...")
     
@@ -528,6 +557,10 @@ def main() -> None:
         bnd_h = mcap_bnd_h, 
         bnd_l = mcap_bnd_l
     )
+    
+    print("MSR Weights:", w_msr)
+    
+    print(comb_rets.loc['NVDA'])
     
     vol_msr_ann = pf.portfolio_volatility(
         weights = w_msr, 
@@ -552,6 +585,8 @@ def main() -> None:
         bnd_l = mcap_bnd_l
     )
     
+    print("Sortino Weights:", w_sortino)
+    
     vol_sortino_ann = pf.portfolio_volatility(
         weights = w_sortino, 
         covmat = ann_cov
@@ -574,8 +609,10 @@ def main() -> None:
         ticker_ind = ticker_ind,
         ticker_sec = ticker_sec,
         bnd_l = mcap_bnd_l,
-        bnd_h = mcap_bnd_h
+        bnd_h = mcap_bnd_h,
     )
+    
+    print('Black-Litterman Weights:', w_bl)
     
     vol_bl_ann = pf.portfolio_volatility(
         weights = w_bl, 
@@ -596,12 +633,14 @@ def main() -> None:
         benchmark_weekly_ret = last_year_benchmark_weekly_rets, 
         er = comb_rets, 
         scores = comb_score,
-        er_hist = weekly_hist, 
+        er_hist = last_year_weekly_rets, 
         ticker_ind = ticker_ind, 
         ticker_sec = ticker_sec, 
         bnd_h = mcap_bnd_h, 
         bnd_l = mcap_bnd_l
     )
+    
+    print("MIR Weights:", w_mir)
     
     vol_mir_ann = pf.portfolio_volatility(
         weights = w_mir, 
@@ -616,15 +655,19 @@ def main() -> None:
     logging.info("Optimising MSP with constraints...")
     
     w_msp = po.msp(
-        scores = comb_score, 
-        cov = ann_cov, 
+        scores = comb_score,
         er = comb_rets,
-        ticker_ind = ticker_ind, 
-        ticker_sec = ticker_sec, 
-        bnd_h = mcap_bnd_h, 
+        cov = ann_cov,
+        weekly_ret = last_5_year_weekly_rets,
+        level = 5.0,          
+        ticker_ind = ticker_ind,
+        ticker_sec = ticker_sec,
+        bnd_h = mcap_bnd_h,
         bnd_l = mcap_bnd_l
     )
-    
+            
+    print("MSP Weights:", w_msp)    
+        
     vol_msp_ann = pf.portfolio_volatility(
         weights = w_msp, 
         covmat = ann_cov
@@ -642,6 +685,7 @@ def main() -> None:
         er = comb_rets,
         cov = ann_cov,
         weekly_ret_1y = last_year_weekly_rets,
+        last_5_year_weekly_rets = last_5_year_weekly_rets,
         benchmark = benchmark_ret,
         last_year_benchmark_weekly_ret = last_year_benchmark_weekly_rets,
         bnd_h = mcap_bnd_h,
@@ -649,14 +693,21 @@ def main() -> None:
         scores = comb_score,
         ticker_ind = ticker_ind,
         ticker_sec = ticker_sec,
-        sample_size = 500,
         tickers = tickers,
         comb_std = comb_ann_std,
         sigma_prior = sigma_prior,
         mcap = mcap,
-        gamma = (1.0, 1.0, 1.0, 1.0),
-        random_state = 42
+        w_msr = w_msr,
+        w_sortino = w_sortino,
+        w_bl = w_bl,
+        w_mir = w_mir,
+        w_msp = w_msp,
+        mu_bl = mu_bl,
+        sigma_bl = sigma_bl,
+        gamma = (1.0, 1.0, 1.0, 1.0, 1.0),
     )
+    
+    print("Combination Weights:", w_comb)
 
     vol_comb_ann = pf.portfolio_volatility(
         weights = w_comb, 
@@ -668,18 +719,16 @@ def main() -> None:
         covmat = weekly_cov
     )
 
-    portfolio_weights = pd.DataFrame([
-        {
-            "Ticker": t,
-            "MSR": w_msr[i] * money_in_portfolio,
-            "Sortino": w_sortino[i] * money_in_portfolio,
-            "MIR": w_mir[i] * money_in_portfolio,
-            "MSP": w_msp[i] * money_in_portfolio,
-            "BL": w_bl[i] * money_in_portfolio,
-            "Combination": w_comb[i] * money_in_portfolio,
-        }
-        for i, t in enumerate(tickers)
-    ])
+    weights_df = pd.DataFrame({
+        "MSR": w_msr,
+        "Sortino": w_sortino,
+        "MIR": w_mir,
+        "MSP": w_msp,
+        "BL": w_bl,
+        "Combination": w_comb,
+    })
+    
+    portfolio_weights = weights_df.reindex(tickers).multiply(money_in_portfolio).reset_index().rename(columns = {"index": "Ticker"})
     
     portfolio_weights_with_ind = portfolio_weights.merge(
         ticker_ind.rename("Industry"), 
@@ -709,11 +758,32 @@ def main() -> None:
         "MSP": pf.simulate_and_report("MSP", w_msp, comb_rets, bear_rets, bull_rets, vol_msp, vol_msp_ann, comb_score, weekly_ret, rf_rate, beta, benchmark_weekly_rets, benchmark_ret, mu_bl, sigma_bl),
         "Comb": pf.simulate_and_report("Combination", w_comb, comb_rets, bear_rets, bull_rets, vol_comb, vol_comb_ann, comb_score, weekly_ret, rf_rate, beta, benchmark_weekly_rets, benchmark_ret, mu_bl, sigma_bl),
     }
-    performance_df = pd.DataFrame(port_performance)
+    performance_df = pd.DataFrame(port_performance).T
+    
+    ticker_performance = pf.report_ticker_metrics(
+        tickers = tickers, 
+        weekly_rets = weekly_ret,
+        weekly_cov = weekly_cov, 
+        ann_cov = ann_cov, 
+        comb_rets = comb_rets,
+        bear_rets = bear_rets,
+        bull_rets = bull_rets,
+        comb_score = comb_score,
+        rf = rf_rate,
+        beta = beta,
+        benchmark_weekly_rets = benchmark_weekly_rets,
+        benchmark_ann_ret = benchmark_ret,
+        bl_ret = mu_bl,
+        bl_cov = sigma_bl,
+        forecast_file = config.FORECAST_FILE
+    )
     
     logging.info("Writing results to Excel...")
     
+    ticker_performance_df = pd.DataFrame(ticker_performance)
+    
     sheets_to_write = {
+        "Ticker Performance": ticker_performance_df,
         "Today_Buy_Sell": buy_sell_today_df,
         "Covariance": cov_df,
         "Bounds": bounds_df,
