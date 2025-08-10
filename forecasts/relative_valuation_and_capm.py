@@ -37,6 +37,7 @@ from fetch_data.factor_data import load_factor_data
 from functions.factor_simulations import factor_sim
 from functions.fama_french_5_pred import ff5_pred
 from functions.fama_french_3_pred import ff3_pred
+from functions.factor_exponential_regression import exp_fac_reg
 import config
 
 logger = logging.getLogger(__name__)
@@ -180,7 +181,7 @@ def main():
     
     print("BL covariance:\n", bl_cov)
 
-    tickers = r.tickers
+    tickers = config.tickers
     
     weekly_ret = r.weekly_rets
     
@@ -201,6 +202,7 @@ def main():
     bl_market_dict = bl_df['Ann']
 
     capm_bl_list = []
+   
     capm_hist_list = []
     
     beta = temp_analyst['beta']
@@ -289,7 +291,7 @@ def main():
 
     spx_ret = bl_df.loc['^GSPC']
     
-    spx_ret_series = bl_df.loc['^GSPC', ['Q1','Q2','Q3','Q4']]
+    spx_ret_series = bl_df.loc['^GSPC', ['Q1', 'Q2', 'Q3', 'Q4']]
 
     index_close = r.index_close['^GSPC'].sort_index()
     
@@ -342,6 +344,8 @@ def main():
         sims = sims_3,
         rf = config.RF
     )
+    
+    exp_factor_results = exp_fac_reg()
 
     low_rev_y = temp_analyst['Low Revenue Estimate']
     avg_rev_y = temp_analyst['Avg Revenue Estimate']
@@ -368,193 +372,267 @@ def main():
     pe_pred_list, evs_pred_list, ps_pred_list, pbv_pred_list, graham_pred_list, rel_val_list = ([] for _ in range(6))
 
     for ticker in tickers:
-       
-        forecast_df = (
-            fdata.forecast[ticker]
-            [['low_eps', 'avg_eps', 'high_eps', 'low_rev', 'avg_rev', 'high_rev']]
-            .iloc[0]
-        )
         
-        kpis = (
-            fdata.kpis[ticker]
-            [["exp_pe", "exp_ps", "exp_ptb", "exp_evs", "bvps_0"]]
-            .iloc[0]
-        )
+        if ticker not in config.TICKER_EXEMPTIONS:
         
-        r_pe = pe_price_pred(
-            eps_low = forecast_df['low_eps'],
-            eps_avg = forecast_df['avg_eps'],
-            eps_high = forecast_df['high_eps'],
-            eps_low_y = low_eps_y.get(ticker, np.nan),
-            eps_avg_y = avg_eps_y.get(ticker, np.nan),
-            eps_high_y = high_eps_y.get(ticker, np.nan),
-            pe_c = cpe.get(ticker, np.nan),
-            pe_t = tpe.get(ticker, np.nan),
-            pe_ind = results['PE'][ticker],
-            avg_pe_fs = kpis['exp_pe'],
-            price = latest_prices.get(ticker, 0)
-        )
-     
-        pe_pred_list.append({
-            "Ticker": ticker,
-            "Current Price": latest_prices.get(ticker, 0),
-            "Low Price": r_pe[0],
-            "Avg Price": r_pe[1],
-            "High Price": r_pe[2],
-            "Returns": r_pe[3],
-            "Volatility": r_pe[4],
-            "Avg PE": r_pe[5]
-        })
-    
-        r_evs = ev_to_sales_price_pred(
-            price = latest_prices.get(ticker, 0),
-            low_rev = forecast_df['low_rev'],
-            avg_rev = forecast_df['avg_rev'],
-            high_rev = forecast_df['high_rev'],
-            low_rev_y = low_rev_y.get(ticker, np.nan),
-            avg_rev_y = avg_rev_y.get(ticker, np.nan),
-            high_rev_y = high_rev_y.get(ticker, np.nan),
-            shares_outstanding = shares_out.get(ticker, 0),
-            evs = evts[ticker],
-            avg_fs_ev = kpis['exp_evs'], 
-            ind_evs = results['EVS'][ticker],
-            mc_ev = mc_ev.get(ticker, 1),
-        )
-    
-        evs_pred_list.append({
-            "Ticker": ticker,
-            "Current Price": latest_prices.get(ticker, 0),
-            "Low Price": r_evs[0],
-            "Avg Price": r_evs[1],
-            "High Price": r_evs[2],
-            "Returns": r_evs[3],
-            "Volatility": r_evs[4],
-            "Avg EVS": r_evs[5]
-        })
-    
-        r_ps = price_to_sales_price_pred(
-            price = latest_prices.get(ticker, 0),
-            low_rev_y = low_rev_y.get(ticker, np.nan),
-            avg_rev_y = avg_rev_y.get(ticker, np.nan),
-            high_rev_y = high_rev_y.get(ticker, np.nan),
-            low_rev = forecast_df['low_rev'],
-            avg_rev = forecast_df['avg_rev'],
-            high_rev = forecast_df['high_rev'],
-            shares_outstanding = shares_out.get(ticker, 0),
-            ps = ps[ticker],
-            avg_ps_fs = kpis['exp_ps'],
-            ind_ps = results['PS'][ticker],
-        )
-    
-        ps_pred_list.append({
-            "Ticker": ticker,
-            "Current Price": latest_prices.get(ticker, 0),
-            "Low Price": r_ps[0],
-            "Avg Price": r_ps[1],
-            "High Price": r_ps[2],
-            "Returns": r_ps[3],
-            "Volatility": r_ps[4],
-            "Avg PS": r_ps[5]
-        })
+            forecast_df = (
+                fdata.forecast[ticker]
+                [['low_eps', 'avg_eps', 'high_eps', 'low_rev', 'avg_rev', 'high_rev']]
+                .iloc[0]
+            )
+            
+            kpis = (
+                fdata.kpis[ticker]
+                [["exp_pe", "exp_ps", "exp_ptb", "exp_evs", "bvps_0"]]
+                .iloc[0]
+            )
+            
+            r_pe = pe_price_pred(
+                eps_low = forecast_df['low_eps'],
+                eps_avg = forecast_df['avg_eps'],
+                eps_high = forecast_df['high_eps'],
+                eps_low_y = low_eps_y.get(ticker, np.nan),
+                eps_avg_y = avg_eps_y.get(ticker, np.nan),
+                eps_high_y = high_eps_y.get(ticker, np.nan),
+                pe_c = cpe.get(ticker, np.nan),
+                pe_t = tpe.get(ticker, np.nan),
+                pe_ind = results['PE'][ticker],
+                avg_pe_fs = kpis['exp_pe'],
+                price = latest_prices.get(ticker, 0)
+            )
+        
+            pe_pred_list.append({
+                "Ticker": ticker,
+                "Current Price": latest_prices.get(ticker, 0),
+                "Low Price": r_pe[0],
+                "Avg Price": r_pe[1],
+                "High Price": r_pe[2],
+                "Returns": r_pe[3],
+                "Volatility": r_pe[4],
+                "Avg PE": r_pe[5]
+            })
+        
+            r_evs = ev_to_sales_price_pred(
+                price = latest_prices.get(ticker, 0),
+                low_rev = forecast_df['low_rev'],
+                avg_rev = forecast_df['avg_rev'],
+                high_rev = forecast_df['high_rev'],
+                low_rev_y = low_rev_y.get(ticker, np.nan),
+                avg_rev_y = avg_rev_y.get(ticker, np.nan),
+                high_rev_y = high_rev_y.get(ticker, np.nan),
+                shares_outstanding = shares_out.get(ticker, 0),
+                evs = evts[ticker],
+                avg_fs_ev = kpis['exp_evs'], 
+                ind_evs = results['EVS'][ticker],
+                mc_ev = mc_ev.get(ticker, 1),
+            )
+        
+            evs_pred_list.append({
+                "Ticker": ticker,
+                "Current Price": latest_prices.get(ticker, 0),
+                "Low Price": r_evs[0],
+                "Avg Price": r_evs[1],
+                "High Price": r_evs[2],
+                "Returns": r_evs[3],
+                "Volatility": r_evs[4],
+                "Avg EVS": r_evs[5]
+            })
+        
+            r_ps = price_to_sales_price_pred(
+                price = latest_prices.get(ticker, 0),
+                low_rev_y = low_rev_y.get(ticker, np.nan),
+                avg_rev_y = avg_rev_y.get(ticker, np.nan),
+                high_rev_y = high_rev_y.get(ticker, np.nan),
+                low_rev = forecast_df['low_rev'],
+                avg_rev = forecast_df['avg_rev'],
+                high_rev = forecast_df['high_rev'],
+                shares_outstanding = shares_out.get(ticker, 0),
+                ps = ps[ticker],
+                avg_ps_fs = kpis['exp_ps'],
+                ind_ps = results['PS'][ticker],
+            )
+        
+            ps_pred_list.append({
+                "Ticker": ticker,
+                "Current Price": latest_prices.get(ticker, 0),
+                "Low Price": r_ps[0],
+                "Avg Price": r_ps[1],
+                "High Price": r_ps[2],
+                "Returns": r_ps[3],
+                "Volatility": r_ps[4],
+                "Avg PS": r_ps[5]
+            })
 
-        r_pbv = price_to_book_pred(
-            low_eps = forecast_df['low_eps'],
-            avg_eps = forecast_df['avg_eps'],
-            high_eps = forecast_df['high_eps'],
-            low_eps_y = low_eps_y.get(ticker, np.nan),
-            avg_eps_y = avg_eps_y.get(ticker, np.nan),
-            high_eps_y = high_eps_y.get(ticker, np.nan),
-            ptb = ptb_y[ticker],
-            avg_ptb_fs = kpis['exp_ptb'],
-            ptb_ind = results['PB'][ticker],
-            book_fs = kpis['bvps_0'],
-            dps = dps.get(ticker, 0),
-            price = latest_prices.get(ticker, 0)
-        )
-      
-        pbv_pred_list.append({
-            "Ticker": ticker,
-            "Current Price": latest_prices.get(ticker, 0),
-            "Low Price": r_pbv[0],
-            "Avg Price": r_pbv[1],
-            "High Price": r_pbv[2],
-            "Returns": r_pbv[3],
-            "Volatility": r_pbv[4],
-            "Avg PBV": r_pbv[5]
-        })
+            r_pbv = price_to_book_pred(
+                low_eps = forecast_df['low_eps'],
+                avg_eps = forecast_df['avg_eps'],
+                high_eps = forecast_df['high_eps'],
+                low_eps_y = low_eps_y.get(ticker, np.nan),
+                avg_eps_y = avg_eps_y.get(ticker, np.nan),
+                high_eps_y = high_eps_y.get(ticker, np.nan),
+                ptb = ptb_y[ticker],
+                avg_ptb_fs = kpis['exp_ptb'],
+                ptb_ind = results['PB'][ticker],
+                book_fs = kpis['bvps_0'],
+                dps = dps.get(ticker, 0),
+                price = latest_prices.get(ticker, 0)
+            )
         
-        r_graham = graham_number(
-            pe_ind = results['PE'][ticker],
-            eps_low = forecast_df['low_eps'],
-            eps_avg = forecast_df['avg_eps'],
-            eps_high = forecast_df['high_eps'],
-            price = latest_prices.get(ticker, 0),
-            pb_ind = results['PB'][ticker],
-            bvps_0 = kpis['bvps_0'],
-            dps = dps.get(ticker, 0),
-            low_eps_y = low_eps_y.get(ticker, np.nan),
-            avg_eps_y = avg_eps_y.get(ticker, np.nan),
-            high_eps_y = high_eps_y.get(ticker, np.nan)
-        )
+            pbv_pred_list.append({
+                "Ticker": ticker,
+                "Current Price": latest_prices.get(ticker, 0),
+                "Low Price": r_pbv[0],
+                "Avg Price": r_pbv[1],
+                "High Price": r_pbv[2],
+                "Returns": r_pbv[3],
+                "Volatility": r_pbv[4],
+                "Avg PBV": r_pbv[5]
+            })
+            
+            r_graham = graham_number(
+                pe_ind = results['PE'][ticker],
+                eps_low = forecast_df['low_eps'],
+                eps_avg = forecast_df['avg_eps'],
+                eps_high = forecast_df['high_eps'],
+                price = latest_prices.get(ticker, 0),
+                pb_ind = results['PB'][ticker],
+                bvps_0 = kpis['bvps_0'],
+                dps = dps.get(ticker, 0),
+                low_eps_y = low_eps_y.get(ticker, np.nan),
+                avg_eps_y = avg_eps_y.get(ticker, np.nan),
+                high_eps_y = high_eps_y.get(ticker, np.nan)
+            )
+            
+            graham_pred_list.append({
+                "Ticker": ticker,
+                "Current Price": capm_bl_pred_df.loc[ticker, "Current Price"],
+                "Low Price": r_graham[0],
+                "Avg Price": r_graham[1],
+                "High Price": r_graham[2],
+                "Returns": r_graham[3],
+                "Volatility": r_graham[4]
+            })
+            
+            r_rel_val = rel_val_model(
+                low_eps = forecast_df['low_eps'],
+                avg_eps = forecast_df['avg_eps'],
+                high_eps = forecast_df['high_eps'],
+                low_eps_y = low_eps_y.get(ticker, np.nan),
+                avg_eps_y = avg_eps_y.get(ticker, np.nan),
+                high_eps_y = high_eps_y.get(ticker, np.nan),
+                low_rev = forecast_df['low_rev'],
+                avg_rev = forecast_df['avg_rev'],
+                high_rev = forecast_df['high_rev'],
+                low_rev_y = low_rev_y.get(ticker, np.nan),
+                avg_rev_y = avg_rev_y.get(ticker, np.nan),
+                high_rev_y = high_rev_y.get(ticker, np.nan),
+                pe_c = cpe.get(ticker, np.nan),
+                pe_t = tpe.get(ticker, np.nan),
+                pe_ind = results['PE'][ticker],
+                avg_pe_fs = kpis['exp_pe'],
+                ps = ps[ticker],
+                avg_ps_fs = kpis['exp_ps'],
+                ind_ps = results['PS'][ticker],
+                ptb = ptb_y[ticker],
+                avg_ptb_fs = kpis['exp_ptb'],
+                ptb_ind = results['PB'][ticker],
+                evs = evts[ticker],
+                avg_fs_ev = kpis['exp_evs'], 
+                ind_evs = results['EVS'][ticker],
+                mc_ev = mc_ev.get(ticker, 1),
+                bvps_0 = kpis['bvps_0'],
+                dps = dps.get(ticker, 0),
+                shares_outstanding = shares_out.get(ticker, 0),
+                price = latest_prices.get(ticker, 0)
+            )
+            
+            rel_val_list.append({
+                "Ticker": ticker,
+                "Current Price": latest_prices.get(ticker, 0),
+                "Low Price": r_rel_val[0],
+                "Avg Price": r_rel_val[1],
+                "High Price": r_rel_val[2],
+                "Returns": r_rel_val[3],
+                "SE": r_rel_val[4]
+            })
         
-        graham_pred_list.append({
-            "Ticker": ticker,
-            "Current Price": capm_bl_pred_df.loc[ticker, "Current Price"],
-            "Low Price": r_graham[0],
-            "Avg Price": r_graham[1],
-            "High Price": r_graham[2],
-            "Returns": r_graham[3],
-            "Volatility": r_graham[4]
-        })
-        
-        r_rel_val = rel_val_model(
-            low_eps = forecast_df['low_eps'],
-            avg_eps = forecast_df['avg_eps'],
-            high_eps = forecast_df['high_eps'],
-            low_eps_y = low_eps_y.get(ticker, np.nan),
-            avg_eps_y = avg_eps_y.get(ticker, np.nan),
-            high_eps_y = high_eps_y.get(ticker, np.nan),
-            low_rev = forecast_df['low_rev'],
-            avg_rev = forecast_df['avg_rev'],
-            high_rev = forecast_df['high_rev'],
-            low_rev_y = low_rev_y.get(ticker, np.nan),
-            avg_rev_y = avg_rev_y.get(ticker, np.nan),
-            high_rev_y = high_rev_y.get(ticker, np.nan),
-            pe_c = cpe.get(ticker, np.nan),
-            pe_t = tpe.get(ticker, np.nan),
-            pe_ind = results['PE'][ticker],
-            avg_pe_fs = kpis['exp_pe'],
-            ps = ps[ticker],
-            avg_ps_fs = kpis['exp_ps'],
-            ind_ps = results['PS'][ticker],
-            ptb = ptb_y[ticker],
-            avg_ptb_fs = kpis['exp_ptb'],
-            ptb_ind = results['PB'][ticker],
-            evs = evts[ticker],
-            avg_fs_ev = kpis['exp_evs'], 
-            ind_evs = results['EVS'][ticker],
-            mc_ev = mc_ev.get(ticker, 1),
-            bvps_0 = kpis['bvps_0'],
-            dps = dps.get(ticker, 0),
-            shares_outstanding = shares_out.get(ticker, 0),
-            price = latest_prices.get(ticker, 0)
-        )
-        
-        rel_val_list.append({
-            "Ticker": ticker,
-            "Current Price": latest_prices.get(ticker, 0),
-            "Low Price": r_rel_val[0],
-            "Avg Price": r_rel_val[1],
-            "High Price": r_rel_val[2],
-            "Returns": r_rel_val[3],
-            "SE": r_rel_val[4]
-        })
+        else:
+            
+            pe_pred_list.append({
+                "Ticker": ticker,
+                "Current Price": latest_prices.get(ticker, 0),
+                "Low Price": 0,
+                "Avg Price": 0,
+                "High Price": 0,
+                "Returns": 0,
+                "Volatility": 0,
+                "Avg PE": 0
+            })
+            
+            evs_pred_list.append({
+                "Ticker": ticker,
+                "Current Price": latest_prices.get(ticker, 0),
+                "Low Price": 0,
+                "Avg Price": 0,
+                "High Price": 0,
+                "Returns": 0,
+                "Volatility": 0,
+                "Avg EVS": 0
+            })
+            
+            ps_pred_list.append({
+                "Ticker": ticker,
+                "Current Price": latest_prices.get(ticker, 0),
+                "Low Price": 0,
+                "Avg Price": 0,
+                "High Price": 0,
+                "Returns": 0,
+                "Volatility": 0,
+                "Avg PS": 0
+            })
+            
+            pbv_pred_list.append({
+                "Ticker": ticker,
+                "Current Price": latest_prices.get(ticker, 0),
+                "Low Price": 0,
+                "Avg Price": 0,
+                "High Price": 0,
+                "Returns": 0,
+                "Volatility": 0,
+                "Avg PBV": 0
+            })
+            
+            graham_pred_list.append({
+                "Ticker": ticker,
+                "Current Price": latest_prices.get(ticker, 0),
+                "Low Price": 0,
+                "Avg Price": 0,
+                "High Price": 0,
+                "Returns": 0,
+                "Volatility": 0
+            })
+            
+            rel_val_list.append({
+                "Ticker": ticker,
+                "Current Price": latest_prices.get(ticker, 0),
+                "Low Price": 0,
+                "Avg Price": 0,
+                "High Price": 0,
+                "Returns": 0,
+                "SE" : np.nan
+            })
+
 
     pe_pred_df = pd.DataFrame(pe_pred_list).set_index("Ticker")
+
     evs_pred_df = pd.DataFrame(evs_pred_list).set_index("Ticker")
+
     ps_pred_df = pd.DataFrame(ps_pred_list).set_index("Ticker")
+
     pbv_pred_df = pd.DataFrame(pbv_pred_list).set_index("Ticker")
+
     graham_pred_df = pd.DataFrame(graham_pred_list).set_index("Ticker")
+
     rel_val_pred_df = pd.DataFrame(rel_val_list).set_index("Ticker")
         
     rel_val_sheets = {
@@ -566,6 +644,7 @@ def main():
         'PBV Pred': pbv_pred_df,
         'Graham Pred': graham_pred_df,
     }
+    
     export_results(
         sheets = rel_val_sheets, 
         output_excel_file = config.REL_VAL_FILE
@@ -576,8 +655,10 @@ def main():
         'Rel Val Pred': rel_val_pred_df,
         'COE': coe_df,
         'FF3 Pred': ff3_results,
-        'FF5 Pred': ff5_results
+        'FF5 Pred': ff5_results,
+        'Factor Exponential Regression': exp_factor_results,
     }
+    
     export_results(
         sheets = sheets_to_write
     )
