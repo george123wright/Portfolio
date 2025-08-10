@@ -9,7 +9,7 @@ import pandas as pd
 import cvxpy as cp
 import functools
 from typing import Tuple, Dict, List, Optional
-from black_litterman_model import black_litterman
+from functions.black_litterman_model import black_litterman
 import config
 
 
