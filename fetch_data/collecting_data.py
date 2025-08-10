@@ -20,6 +20,7 @@ from maps.industry_mapping import IndustryMap
 from functions.export_forecast import export_results
 
 
+
 BASE_FORECAST_URL = "https://tradingeconomics.com/forecast"
 
 FORECAST_SPECS: Dict[str, Dict[str, Any]] = {
@@ -365,27 +366,29 @@ def macro_data() -> pd.DataFrame:
     return macro_df
 
 
-def get_sector_data() -> pd.DataFrame:
+def get_sector_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     
-    sec_data = yf.download(list(sec_map.keys()), start = config.YEAR_AGO, end = config.TODAY)['Close']
+    sec_data = yf.download(list(sec_map.keys()), start = config.FIVE_YEAR_AGO, end = config.TODAY)['Close']
     
     sec_data = sec_data.rename(columns = sec_map)
     
     rets = sec_data.pct_change().dropna()
+        
+    rets_last_year = rets.loc[rets.index >= pd.to_datetime(config.YEAR_AGO)]
     
-    rets_len = len(rets)
+    rets_last_year_len = len(rets_last_year)
     
-    rets_ann = (1 + rets).prod() - 1
+    rets_ann = (1 + rets_last_year).prod() - 1
     
-    vol = rets.std() * np.sqrt(rets_len)
+    vol = rets.std() * np.sqrt(rets_last_year_len)
     
     sr = (rets_ann - config.RF) / vol
     
-    exp_ret_ind = rets.ewm(halflife = 0.2 * rets_len, adjust = False).mean().iloc[-1] * rets_len
+    exp_ret_ind = rets_last_year.ewm(halflife = 0.1 * rets_last_year_len, adjust = False).mean().iloc[-1] * rets_last_year_len
    
-    exp_std_ind = rets.ewm(halflife = 0.2 * rets_len, adjust = False).std().iloc[-1] * np.sqrt(rets_len)
+    exp_std_ind = rets_last_year.ewm(halflife = 0.1 * rets_last_year_len, adjust = False).std().iloc[-1] * np.sqrt(rets_last_year_len)
    
-    exp_sr_ind = (exp_ret_ind - 0.0435) / exp_std_ind
+    exp_sr_ind = (exp_ret_ind - config.RF) / exp_std_ind
     
     df = pd.DataFrame({
         "Sector": sec_data.columns,
@@ -397,10 +400,10 @@ def get_sector_data() -> pd.DataFrame:
         "Exp Sharpe Ratio": exp_sr_ind
     }).set_index("Sector")
     
-    return df
+    return df, sec_data
 
 
-def get_industry_data() -> pd.DataFrame:
+def get_industry_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Download industry data, compute returns, volatility, and Sharpe ratio.
     Returns a DataFrame with industry metrics.
@@ -418,7 +421,7 @@ def get_industry_data() -> pd.DataFrame:
     
     ind_ticker_map
 
-    ind_data = yf.download(list(ind_ticker_map.keys()), start = config.YEAR_AGO, end = config.TODAY)['Close']
+    ind_data = yf.download(list(ind_ticker_map.keys()), start = config.FIVE_YEAR_AGO, end = config.TODAY)['Close']
     
     ind_data = ind_data.rename(columns=ind_ticker_map)
 
@@ -427,20 +430,22 @@ def get_industry_data() -> pd.DataFrame:
     ind_data = ind_data.groupby(axis=1, level=0).sum()
 
     rets_ind = ind_data.pct_change().dropna()
+        
+    rets_last_year_ind = rets_ind.loc[rets_ind.index >= pd.to_datetime(config.YEAR_AGO)]
     
-    rets_len = len(rets_ind)
+    rets_last_year_ind_len = len(rets_last_year_ind)
     
-    rets_ann_ind = (1 + rets_ind).prod() - 1        
+    rets_ann_ind = (1 + rets_last_year_ind).prod() - 1        
     
-    vol_ind = rets_ind.std() * np.sqrt(rets_len)
+    vol_ind = rets_ind.std() * np.sqrt(rets_last_year_ind_len)
     
-    sr_ind = ((rets_ann_ind - 0.0465) / vol_ind).fillna(0)
+    sr_ind = ((rets_ann_ind - config.RF) / vol_ind).fillna(0)
     
-    exp_ret_ind = rets_ind.ewm(halflife = 0.2 * rets_len, adjust = False).mean().iloc[-1] * rets_len
+    exp_ret_ind = rets_last_year_ind.ewm(halflife = 0.1 * rets_last_year_ind_len, adjust = False).mean().iloc[-1] * rets_last_year_ind_len
    
-    exp_std_ind = rets_ind.ewm(halflife=0.2 * rets_len, adjust = False).std().iloc[-1] * np.sqrt(rets_len)
+    exp_std_ind = rets_last_year_ind.ewm(halflife = 0.1 * rets_last_year_ind_len, adjust = False).std().iloc[-1] * np.sqrt(rets_last_year_ind_len)
    
-    exp_sr_ind = (exp_ret_ind - 0.0435) / exp_std_ind
+    exp_sr_ind = (exp_ret_ind - config.RF) / exp_std_ind
     
     df = pd.DataFrame({
         "Industry": ind_data.columns,
@@ -452,7 +457,81 @@ def get_industry_data() -> pd.DataFrame:
         "Exp Sharpe Ratio": exp_sr_ind
     }).set_index("Industry")
     
-    return df
+    return df, ind_data
+
+
+def get_factor_etfs() -> Tuple[pd.DataFrame, pd.DataFrame]:
+    
+    tickers = ['VLUE', 'QUAL', 'MTUM', 'USMV', 'SIZE']
+    
+    fac_data = yf.download(tickers, start = config.FIVE_YEAR_AGO, end = config.TODAY)['Close']
+        
+    rets = fac_data.pct_change().dropna()
+        
+    rets_last_year = rets.loc[rets.index >= pd.to_datetime(config.YEAR_AGO)]
+    
+    rets_last_year_len = len(rets_last_year)
+    
+    rets_ann = (1 + rets_last_year).prod() - 1
+    
+    vol = rets.std() * np.sqrt(rets_last_year_len)
+    
+    sr = (rets_ann - config.RF) / vol
+    
+    exp_ret_ind = rets_last_year.ewm(halflife = 0.1 * rets_last_year_len, adjust = False).mean().iloc[-1] * rets_last_year_len
+   
+    exp_std_ind = rets_last_year.ewm(halflife = 0.1 * rets_last_year_len, adjust = False).std().iloc[-1] * np.sqrt(rets_last_year_len)
+   
+    exp_sr_ind = (exp_ret_ind - config.RF) / exp_std_ind
+    
+    df = pd.DataFrame({
+        "Sector": fac_data.columns,
+        "Returns": rets_ann,
+        "Volatility": vol,
+        "Sharpe Ratio": sr,
+        "Exp Returns": exp_ret_ind,
+        "Exp Volatility": exp_std_ind,
+        "Exp Sharpe Ratio": exp_sr_ind
+    }).set_index("Sector")
+    
+    return df, rets
+    
+
+def get_index_data() -> Tuple[pd.DataFrame, pd.DataFrame]:
+    
+    tickers = ['^GSPC', '^NDX', '^FTSE', '^GDAXI', '^FCHI', '^AEX', '^IBEX', '^GSPTSE', '^HSI', '^SSMI', 'VWRL.L', '^IXIC']
+    
+    index_data = yf.download(tickers, start = config.FIVE_YEAR_AGO, end = config.TODAY)['Close']
+        
+    rets = index_data.pct_change().dropna()
+        
+    rets_last_year = rets.loc[rets.index >= pd.to_datetime(config.YEAR_AGO)]
+    
+    rets_last_year_len = len(rets_last_year)
+    
+    rets_ann = (1 + rets_last_year).prod() - 1
+    
+    vol = rets.std() * np.sqrt(rets_last_year_len)
+    
+    sr = (rets_ann - config.RF) / vol
+    
+    exp_ret_ind = rets_last_year.ewm(halflife = 0.1 * rets_last_year_len, adjust = False).mean().iloc[-1] * rets_last_year_len
+   
+    exp_std_ind = rets_last_year.ewm(halflife = 0.1 * rets_last_year_len, adjust = False).std().iloc[-1] * np.sqrt(rets_last_year_len)
+   
+    exp_sr_ind = (exp_ret_ind - config.RF) / exp_std_ind
+    
+    df = pd.DataFrame({
+        "Sector": index_data.columns,
+        "Returns": rets_ann,
+        "Volatility": vol,
+        "Sharpe Ratio": sr,
+        "Exp Returns": exp_ret_ind,
+        "Exp Volatility": exp_std_ind,
+        "Exp Sharpe Ratio": exp_sr_ind
+    }).set_index("Sector")
+    
+    return df, index_data
 
 
 def main() -> None:
@@ -467,8 +546,6 @@ def main() -> None:
     
     start_date = '2000-01-01'  
     
-    index_tickers = ['^GSPC', '^NDX', '^FTSE', '^GDAXI', '^FCHI', '^AEX', '^IBEX', '^GSPTSE', '^HSI', '^SSMI', 'VWRL.L', '^IXIC']
-   
     data = download_data(
         tickers = tickers, 
         start = start_date, 
@@ -478,17 +555,6 @@ def main() -> None:
     close = get_close_series(
         data = data, 
         tickers = tickers
-    )
-    
-    index_data = download_data(
-        tickers = index_tickers, 
-        start = config.FIVE_YEAR_AGO, 
-        end = config.TODAY
-    )
-   
-    index_close = get_close_series(
-        data = index_data, 
-        tickers = index_tickers
     )
     
     high = data['High']
@@ -549,9 +615,13 @@ def main() -> None:
    
     macro_df = macro_data()
     
-    sector_data = get_sector_data()
+    sector_data, sec_close = get_sector_data()
     
-    industry_data = get_industry_data()
+    industry_data, ind_close = get_industry_data()
+    
+    factor_etfs, factor_rets = get_factor_etfs()
+    
+    index_data, index_close = get_index_data()
    
     sheets_data = {
         "Close": close,
@@ -563,13 +633,14 @@ def main() -> None:
         "Historic Returns": daily_ret,
         "Historic Weekly Returns": weekly_ret,
         "RSI": rsi_df,
-        "MACD": macd_df,
+        "MACD": macd_df,  
         "MACD Signal": macd_sig_df,
         **forecasts,
         "Macro Data": macro_df,
-        "Sector Data": sector_data,
-        "Industry Data": industry_data,
-        "Index Close": index_close
+        "Index Close": index_close,
+        "Sector Close": sec_close,
+        "Industry Close": ind_close,
+        "Factor Returns": factor_rets,
     }
    
     close_1y = close.loc[close.index >= pd.to_datetime(config.YEAR_AGO)]
@@ -613,14 +684,23 @@ def main() -> None:
         "SE": ret_1y.std() * np.sqrt(len(ret_1y))
     })
 
-
     export_results(
         sheets = sheets_data, 
-        output_excel_file = config.DATA_FILE
+        output_excel_file = config.DATA_FILE,
+        formatting = False
     )
+    
+    forecast_sheets = {
+        "Exponential Returns": er_ema_df, 
+        "Daily Returns": dr_df,
+        "Sector Data": sector_data,
+        "Industry Data": industry_data,
+        "Factor ETFs": factor_etfs,
+        "Index Data": index_data
+    }
    
     export_results(
-        sheets = {"Exponential Returns": er_ema_df, "Daily Returns": dr_df},
+        sheets = forecast_sheets,
         output_excel_file = config.FORECAST_FILE
     )
 
