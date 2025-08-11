@@ -25,7 +25,6 @@ from data_processing.ratio_data import RatioData
 import config
 
 
-
 r = RatioData()
 
 tickers = config.tickers
@@ -301,9 +300,9 @@ def write_excel_results(
         min_val, mean_val, max_val = data.min(), data.mean(), data.max()
         
         color_rule = ColorScaleRule(
-            start_type='num', start_value=str(min_val), start_color='FFFFFF',
-            mid_type='num', mid_value=str(mean_val), mid_color='FFDD99',
-            end_type='num', end_value=str(max_val), end_color='FF0000'
+            start_type = 'num', start_value = str(min_val), start_color = 'FFFFFF',
+            mid_type = 'num', mid_value = str(mean_val), mid_color = 'FFDD99',
+            end_type = 'num', end_value = str(max_val), end_color = 'FF0000'
         )
 
         rng = f"B2:{get_column_letter(cov_ws.max_column)}{cov_ws.max_row}"
@@ -698,9 +697,13 @@ def main() -> None:
     
     last_year_weekly_rets = weekly_ret.loc[weekly_ret.index >= pd.to_datetime(config.YEAR_AGO)]   
     
-    last_5_year_weekly_rets = weekly_ret.loc[weekly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]         
+    n_last_year_weeks = len(last_year_weekly_rets)
     
-    logging.info("Optimising MSR with constraints...")
+    last_5_year_weekly_rets = weekly_ret.loc[weekly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]    
+    
+    pa = pf.PortfolioAnalytics(cache = False)     
+    
+    logging.info("Optimising Portfolios...")
    
     opt = PortfolioOptimiser(
         er = comb_rets, 
@@ -740,70 +743,70 @@ def main() -> None:
     
     print("MSR Weights:", w_msr)
         
-    vol_msr_ann = pf.portfolio_volatility(
+    vol_msr_ann = pa.portfolio_volatility(
         weights = w_msr, 
         covmat = ann_cov
     )
     
-    vol_msr = pf.portfolio_volatility(
+    vol_msr = pa.portfolio_volatility(
         weights = w_msr, 
         covmat = weekly_cov
     )
         
     print("Sortino Weights:", w_sortino)
     
-    vol_sortino_ann = pf.portfolio_volatility(
+    vol_sortino_ann = pa.portfolio_volatility(
         weights = w_sortino, 
         covmat = ann_cov
     )
     
-    vol_sortino = pf.portfolio_volatility(
+    vol_sortino = pa.portfolio_volatility(
         weights = w_sortino, 
         covmat = weekly_cov
     )
     
     print('Black-Litterman Weights:', w_bl)
     
-    vol_bl_ann = pf.portfolio_volatility(
+    vol_bl_ann = pa.portfolio_volatility(
         weights = w_bl, 
         covmat = ann_cov
     )
     
-    vol_bl = pf.portfolio_volatility(
+    vol_bl = pa.portfolio_volatility(
         weights = w_bl, 
         covmat = weekly_cov
     )
     
     print("MIR Weights:", w_mir)
     
-    vol_mir_ann = pf.portfolio_volatility(
+    vol_mir_ann = pa.portfolio_volatility(
         weights = w_mir, 
         covmat = ann_cov
     )
     
-    vol_mir = pf.portfolio_volatility(
+    vol_mir = pa.portfolio_volatility(
         weights = w_mir, 
         covmat = weekly_cov
     )
 
     print("MSP Weights:", w_msp)    
         
-    vol_msp_ann = pf.portfolio_volatility(
+    vol_msp_ann = pa.portfolio_volatility(
         weights = w_msp, 
         covmat = ann_cov
     )
     
-    vol_msp = pf.portfolio_volatility(
+    vol_msp = pa.portfolio_volatility(
         weights = w_msp, 
         covmat = weekly_cov
     )
     
-    vol_comb_ann = pf.portfolio_volatility(
+    vol_comb_ann = pa.portfolio_volatility(
         weights = w_comb, 
         covmat = ann_cov
     )
     
-    vol_comb = pf.portfolio_volatility(
+    vol_comb = pa.portfolio_volatility(
         weights = w_comb, 
         covmat = weekly_cov
     )
@@ -812,24 +815,24 @@ def main() -> None:
     
     print("Combination1 Weights:", w_comb1)
     
-    vol_comb1_ann = pf.portfolio_volatility(
+    vol_comb1_ann = pa.portfolio_volatility(
         weights = w_comb1, 
         covmat = ann_cov
     )
     
-    vol_comb1 = pf.portfolio_volatility(
+    vol_comb1 = pa.portfolio_volatility(
         weights = w_comb1, 
         covmat = weekly_cov
     )
     
     print("Combination2 Weights:", w_comb2)
     
-    vol_comb2_ann = pf.portfolio_volatility(
+    vol_comb2_ann = pa.portfolio_volatility(
         weights = w_comb2, 
         covmat = ann_cov
     )
     
-    vol_comb2 = pf.portfolio_volatility(
+    vol_comb2 = pa.portfolio_volatility(
         weights = w_comb2, 
         covmat = weekly_cov
     )
@@ -868,8 +871,8 @@ def main() -> None:
     sector_breakdown_percent = sector_breakdown_percent.reset_index()
 
     logging.info("Generating portfolio performance reports...")
-
-    performance_df = pf.report_portfolio_metrics(
+    
+    performance_df = pa.report_portfolio_metrics(
         w_msr = w_msr,
         w_sortino = w_sortino,
         w_mir = w_mir,
@@ -900,6 +903,7 @@ def main() -> None:
         comb_score = comb_score,
         last_year_weekly_rets = last_year_weekly_rets,
         last_5y_weekly_rets = last_5_year_weekly_rets,
+        n_last_year_weeks = n_last_year_weeks,
         rf_rate = rf_rate,
         beta = beta,
         benchmark_weekly_rets = last_year_benchmark_weekly_rets,
@@ -908,10 +912,11 @@ def main() -> None:
         sigma_bl = sigma_bl
     )
         
-    ticker_performance = pf.report_ticker_metrics(
+    ticker_performance = pa.report_ticker_metrics(
         tickers = tickers, 
         last_year_weekly_rets = last_year_weekly_rets,
         last_5y_weekly_rets = last_5_year_weekly_rets,
+        n_last_year_weeks = n_last_year_weeks,
         weekly_cov = weekly_cov, 
         ann_cov = ann_cov, 
         comb_rets = comb_rets,
