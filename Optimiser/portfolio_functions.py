@@ -751,6 +751,104 @@ def percent_positive_and_streaks(
     return percent_pos, max_win, max_loss
 
 
+def _edgeworth_eps(n_steps, n_scenarios, skew, kurt, random_state=None):
+    """
+    Create standardized shocks ε with approximately given skewness (γ1)
+    and kurtosis (κ), where κ is the *ordinary* kurtosis (3 = normal).
+    Uses a Gram–Charlier (Edgeworth) polynomial adjustment of Normal(0,1)
+    and then restandardizes to mean≈0, var≈1.
+    """
+   
+    rng = np.random.default_rng(random_state)
+  
+    Z = rng.standard_normal(size=(n_steps, n_scenarios))
+  
+    g1 = float(skew)
+  
+    g2 = float(kurt) - 3.0
+
+    eps = (
+        Z
+        + (g1 / 6.0) * (Z**2 - 1.0)
+        + (g2 / 24.0) * (Z**3 - 3.0 * Z)
+        - ((g1**2) / 36.0) * (2.0 * Z**3 - 5.0 * Z)
+    )
+
+
+    eps -= eps.mean(axis = 1, keepdims = True)
+
+    std = eps.std(axis = 1, keepdims = True)
+
+    eps /= (std + 1e-12)
+
+    return eps
+
+
+def gbm_non_gaussian(
+    n_years=10,
+    n_scenarios=1_000_000,
+    mu=0.07,
+    sigma=0.15,
+    steps_per_year=12,
+    s_0=100.0,
+    skew=0.0,
+    kurt=3.0,
+    method="edgeworth",
+    prices=True,
+    random_state=None
+):
+    """
+    GBM-style simulation with non-Gaussian shocks that match target skew/kurt.
+    - If method == "edgeworth": uses polynomial transform of normals.
+    - If method == "gaussian": falls back to standard GBM.
+    Returns a (n_steps+1, n_scenarios) array like your current gbm().
+    """
+  
+    dt = 1.0 / steps_per_year
+  
+    n_steps = int(n_years * steps_per_year)
+
+    if method == "gaussian":
+  
+        rng = np.random.default_rng(random_state)
+  
+        Z = rng.standard_normal(size=(n_steps, n_scenarios))
+  
+        eps = Z
+  
+    else:
+  
+        eps = _edgeworth_eps(
+            n_steps = n_steps, 
+            n_scenarios = n_scenarios, 
+            skew = skew, 
+            kurt = kurt, 
+            random_state = random_state
+        )
+
+    b = sigma * np.sqrt(dt)
+
+    G_target = (1.0 + mu) ** (1.0 / steps_per_year)  
+
+    exp_b_eps_mean = np.exp(b * eps).mean(axis=1, keepdims = True) 
+
+    a = np.log(G_target) - np.log(exp_b_eps_mean)               
+
+    gross = np.exp(a + b * eps)                                
+    
+    gross = np.vstack([np.ones((1, n_scenarios)), gross])
+    
+    if prices:
+        
+        paths = s_0 * np.cumprod(gross, axis = 0) 
+    
+    else:
+        
+        paths = (gross - 1.0)
+    
+    return paths
+
+
 def gbm(
     n_years = 10, 
     n_scenarios = 1_000_000,
@@ -793,40 +891,50 @@ def simulate_portfolio_stats(
     sigma: float,
     steps: int = 252,
     s0: float = 100.0,
-    scenarios: int = 1_000_000
+    scenarios: int = 1_000_000,
+    skew: float = 0.0,
+    kurt: float = 3.0,
+    method: str = "edgeworth",
+    random_state: int | None = None
 ) -> Dict[str, Any]:
-    """
-    Simulate 1-year outcomes via GBM and gather summary statistics about the returns distribution.
-    """
-  
-    sim_paths = gbm(
-        n_years = 1, 
-        n_scenarios = scenarios, 
-        mu = mu, 
+
+    sim_paths = gbm_non_gaussian(
+        n_years = 1,
+        n_scenarios = scenarios,
+        mu = mu,
         sigma = sigma,
-        steps_per_year = steps, 
-        s_0 = s0
+        steps_per_year = steps,
+        s_0 = s0,
+        skew = skew,
+        kurt = kurt,
+        method = method,
+        prices = True,
+        random_state = random_state
     )
-  
-    final_prices = sim_paths.loc[steps]
-  
-    final_returns = (final_prices / s0) - 1
-  
-    q25_l = final_returns.quantile(0.245)
-    q25_h = final_returns.quantile(0.255)
-  
-    q75_l = final_returns.quantile(0.745)
-    q75 = final_returns.quantile(0.75)
-    q75_h = final_returns.quantile(0.755)
+
+    final_prices = sim_paths[-1]
     
-    p10 = final_returns.quantile(0.10)
-    p90 = final_returns.quantile(0.90)
-    
-    scen_up_down = p90 / p10
-  
-    stats = {
+    final_returns = pd.Series((final_prices / s0) - 1)
+
+    q25_l = pd.Series(final_returns).quantile(0.245)
+   
+    q25_h = pd.Series(final_returns).quantile(0.255)
+   
+    q75_l = pd.Series(final_returns).quantile(0.745)
+   
+    q75 = pd.Series(final_returns).quantile(0.75)
+   
+    q75_h = pd.Series(final_returns).quantile(0.755)
+   
+    p10 = pd.Series(final_returns).quantile(0.10)
+   
+    p90 = pd.Series(final_returns).quantile(0.90)
+   
+    scen_up_down = p90 / p10 if p10 != 0 else np.inf
+
+    return {
         "mean_returns": final_returns.mean(),
-        "loss_percentage": 100 * (final_returns < 0).sum() / len(final_returns),
+        "loss_percentage": 100 * (final_returns < 0).mean(),
         "mean_loss_amount": final_returns[final_returns < 0].mean(),
         "mean_gain_amount": final_returns[final_returns >= 0].mean(),
         "variance": (final_prices / s0).var(),
@@ -839,8 +947,6 @@ def simulate_portfolio_stats(
         "min_return": float(final_prices.min() / s0) - 1,
         "max_return": float(final_prices.max() / s0) - 1
     }
-  
-    return stats
 
 
 def simulate_and_report(
@@ -852,7 +958,8 @@ def simulate_and_report(
     vol: float, 
     vol_ann: float,
     comb_score: pd.Series, 
-    weekly_rets: pd.DataFrame, 
+    last_year_weekly_rets: pd.DataFrame, 
+    last_5y_weekly_rets: pd.DataFrame,
     rf: float, beta: float, 
     benchmark_weekly_rets: pd.Series, 
     benchmark_ann_ret: float,
@@ -860,11 +967,7 @@ def simulate_and_report(
     bl_cov: pd.DataFrame,
     sims: int = 1_000_000
 ) -> Dict[str, Any]:
-    
-    last_year_weekly_rets = weekly_rets.loc[weekly_rets.index >= pd.to_datetime(config.YEAR_AGO)]
-    
-    last_5y_weekly_rets = weekly_rets.loc[weekly_rets.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
-    
+
     port_rets = portfolio_return(
         weights = wts, 
         returns = comb_rets
@@ -890,12 +993,29 @@ def simulate_and_report(
         covmat = bl_cov
     )
     
+    portfolio_rets_5year_hist = portfolio_return_robust(
+        weights = wts,
+        returns = last_5y_weekly_rets
+    )    
+    
+    skew_val = skewness(
+        r = portfolio_rets_5year_hist
+    )
+    
+    kurt_val = kurtosis(
+        r = portfolio_rets_5year_hist
+    )
+    
     stats = simulate_portfolio_stats(
-        mu = port_rets, 
-        sigma = vol_ann, 
-        steps = 252, 
-        s0 = 100.0, 
-        scenarios = sims
+        mu = port_rets,
+        sigma = vol_ann,
+        steps = 252,
+        s0 = 100.0,
+        scenarios = sims,
+        skew = float(skew_val),
+        kurt = float(kurt_val),
+        method = "edgeworth",
+        random_state = 42
     )
     
     b_val = port_beta(
@@ -918,11 +1038,6 @@ def simulate_and_report(
         weights = wts, 
         returns = last_year_weekly_rets
     )
-            
-    portfolio_rets_5year_hist = portfolio_return_robust(
-        weights = wts,
-        returns = last_5y_weekly_rets
-    )    
         
     sr_pred = (port_rets - rf) / vol_ann
     
@@ -936,14 +1051,6 @@ def simulate_and_report(
     dd = drawdown(
         return_series = portfolio_rets_hist
     )["Drawdown"].min()
-    
-    skew_val = skewness(
-        r = portfolio_rets_5year_hist
-    )
-    
-    kurt_val = kurtosis(
-        r = portfolio_rets_5year_hist
-    )
     
     cf_var5 = var_gaussian(
         r = portfolio_rets_5year_hist,
@@ -1114,7 +1221,8 @@ def simulate_and_report(
 
 def report_ticker_metrics(
     tickers: List[str],
-    weekly_rets: pd.DataFrame,
+    last_year_weekly_rets: pd.DataFrame,
+    last_5y_weekly_rets: pd.DataFrame,
     weekly_cov: pd.DataFrame,
     ann_cov: pd.DataFrame,
     comb_rets: pd.Series,
@@ -1144,20 +1252,26 @@ def report_ticker_metrics(
     results: Dict[str, Dict] = {}
 
     wts = [1]
-
+    
+    one_year = pd.to_datetime(config.YEAR_AGO)
+    
+    bench_sr = benchmark_weekly_rets.loc[benchmark_weekly_rets.index >= one_year]
+    
     for t in tickers:
         
         print(f"Simulating {t}...")
-        stock_df = weekly_rets[[t]].dropna()
+        
+        stock_df_1y = last_year_weekly_rets[[t]].dropna()
+        
+        stock_df_5y = last_5y_weekly_rets[[t]].dropna()
                 
-        one_year = pd.to_datetime(config.YEAR_AGO)
-        stock_df = stock_df.loc[ stock_df.index >= one_year ]
-        bench_sr = benchmark_weekly_rets.loc[ benchmark_weekly_rets.index >= one_year ]
         vol_weekly = np.sqrt(weekly_cov.loc[t, t])
         
-        common = stock_df.index.intersection( bench_sr.index )
-        stock_df = stock_df.loc[common]
-        bench_sr = bench_sr.loc[common]
+        common = stock_df_1y.index.intersection( bench_sr.index )
+        
+        stock_df_1y = stock_df_1y.loc[common]
+        
+        bench_sr_t = bench_sr.loc[common]
         
         vol_annual = np.sqrt(ann_cov.loc[t, t])
                 
@@ -1176,10 +1290,11 @@ def report_ticker_metrics(
             vol = vol_weekly,
             vol_ann = vol_annual,
             comb_score = score_t,
-            weekly_rets = stock_df,
+            last_year_weekly_rets = stock_df_1y,
+            last_5y_weekly_rets = stock_df_5y,
             rf = rf,
             beta = beta_t,
-            benchmark_weekly_rets = bench_sr,
+            benchmark_weekly_rets = bench_sr_t,
             benchmark_ann_ret = benchmark_ann_ret,
             bl_ret = bl_ret.loc[t],
             bl_cov = bl_cov_t,
@@ -1225,3 +1340,214 @@ def report_ticker_metrics(
     final_df['Combined Return'] = comb_rets.reindex(tickers)
 
     return final_df
+
+
+def report_portfolio_metrics(
+    w_msr: np.ndarray,
+    w_sortino: np.ndarray,
+    w_bl: np.ndarray,
+    w_mir: np.ndarray,
+    w_msp: np.ndarray,
+    w_comb: np.ndarray,
+    w_comb1: np.ndarray,
+    w_comb2: np.ndarray,
+    comb_rets: pd.Series,
+    bear_rets: pd.Series,
+    bull_rets: pd.Series,
+    vol_msr: float,
+    vol_sortino: float,
+    vol_bl: float,
+    vol_mir: float,
+    vol_msp: float,
+    vol_comb: float,
+    vol_comb1: float,
+    vol_comb2: float,
+    vol_msr_ann: float,
+    vol_sortino_ann: float,
+    vol_bl_ann: float,
+    vol_mir_ann: float,
+    vol_msp_ann: float,
+    vol_comb_ann: float,
+    vol_comb1_ann: float,
+    vol_comb2_ann: float,
+    comb_score: pd.Series,
+    last_year_weekly_rets: pd.DataFrame,
+    last_5y_weekly_rets: pd.DataFrame,
+    rf_rate: float,
+    beta: pd.Series,
+    benchmark_weekly_rets: pd.Series,
+    benchmark_ret: float,
+    mu_bl: pd.Series, 
+    sigma_bl: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Simulate and report portfolio metrics for various strategies.
+    Returns a DataFrame with one row per strategy, containing all metrics.
+    """
+    
+    msr_report = simulate_and_report(
+        name = "MSR",
+        wts = w_msr,
+        comb_rets = comb_rets,
+        bear_rets = bear_rets,
+        bull_rets = bull_rets,
+        vol = vol_msr,
+        vol_ann = vol_msr_ann,
+        comb_score = comb_score,
+        last_year_weekly_rets = last_year_weekly_rets,
+        last_5y_weekly_rets = last_5y_weekly_rets,
+        rf = rf_rate,
+        beta = beta,
+        benchmark_weekly_rets = benchmark_weekly_rets,
+        benchmark_ann_ret = benchmark_ret,
+        bl_ret = mu_bl,
+        bl_cov = sigma_bl
+    )
+    
+    sortino_report = simulate_and_report(
+        name = "Sortino",
+        wts = w_sortino,
+        comb_rets = comb_rets,
+        bear_rets = bear_rets,
+        bull_rets = bull_rets,
+        vol = vol_sortino,
+        vol_ann = vol_sortino_ann,
+        comb_score = comb_score,
+        last_year_weekly_rets = last_year_weekly_rets,
+        last_5y_weekly_rets = last_5y_weekly_rets,
+        rf = rf_rate,
+        beta = beta,
+        benchmark_weekly_rets = benchmark_weekly_rets,
+        benchmark_ann_ret = benchmark_ret,
+        bl_ret = mu_bl,
+        bl_cov = sigma_bl
+    )
+    
+    bl_report = simulate_and_report(
+        name = "Black-Litterman",
+        wts = w_bl,
+        comb_rets = comb_rets,
+        bear_rets = bear_rets,
+        bull_rets = bull_rets,
+        vol = vol_bl,
+        vol_ann = vol_bl_ann,
+        comb_score = comb_score,
+        last_year_weekly_rets = last_year_weekly_rets,
+        last_5y_weekly_rets = last_5y_weekly_rets,
+        rf = rf_rate,
+        beta = beta,
+        benchmark_weekly_rets = benchmark_weekly_rets,
+        benchmark_ann_ret = benchmark_ret,
+        bl_ret = mu_bl,
+        bl_cov = sigma_bl
+    )
+    
+    mir_report = simulate_and_report(
+        name = "MIR",
+        wts = w_mir,
+        comb_rets = comb_rets,
+        bear_rets = bear_rets,
+        bull_rets = bull_rets,
+        vol = vol_mir,
+        vol_ann = vol_mir_ann,
+        comb_score = comb_score,
+        last_year_weekly_rets = last_year_weekly_rets,
+        last_5y_weekly_rets = last_5y_weekly_rets,
+        rf = rf_rate,
+        beta = beta,
+        benchmark_weekly_rets = benchmark_weekly_rets,
+        benchmark_ann_ret = benchmark_ret,
+        bl_ret = mu_bl,
+        bl_cov = sigma_bl
+    )
+    
+    msp_report = simulate_and_report(
+        name = "MSP",
+        wts = w_msp,
+        comb_rets = comb_rets,
+        bear_rets = bear_rets,
+        bull_rets = bull_rets,
+        vol = vol_msp,
+        vol_ann = vol_msp_ann,
+        comb_score = comb_score,
+        last_year_weekly_rets = last_year_weekly_rets,
+        last_5y_weekly_rets = last_5y_weekly_rets,
+        rf = rf_rate,
+        beta = beta,
+        benchmark_weekly_rets = benchmark_weekly_rets,
+        benchmark_ann_ret = benchmark_ret,
+        bl_ret = mu_bl,
+        bl_cov = sigma_bl
+    )
+    
+    comb_report = simulate_and_report(
+        name = "Combination",
+        wts = w_comb,
+        comb_rets = comb_rets,
+        bear_rets = bear_rets,
+        bull_rets = bull_rets,
+        vol = vol_comb,
+        vol_ann = vol_comb_ann,
+        comb_score = comb_score,
+        last_year_weekly_rets = last_year_weekly_rets,
+        last_5y_weekly_rets = last_5y_weekly_rets,
+        rf = rf_rate,
+        beta = beta,
+        benchmark_weekly_rets = benchmark_weekly_rets,
+        benchmark_ann_ret = benchmark_ret,
+        bl_ret = mu_bl,
+        bl_cov = sigma_bl
+    )
+    
+    comb_report1 = simulate_and_report(
+        name = "Combination1",
+        wts = w_comb1,
+        comb_rets = comb_rets,
+        bear_rets = bear_rets,
+        bull_rets = bull_rets,
+        vol = vol_comb1,
+        vol_ann = vol_comb1_ann,
+        comb_score = comb_score,
+        last_year_weekly_rets = last_year_weekly_rets,
+        last_5y_weekly_rets = last_5y_weekly_rets,
+        rf = rf_rate,
+        beta = beta,
+        benchmark_weekly_rets = benchmark_weekly_rets,
+        benchmark_ann_ret = benchmark_ret,
+        bl_ret = mu_bl,
+        bl_cov = sigma_bl
+    )
+    
+    comb_report2 = simulate_and_report(
+        name = "Combination2",
+        wts = w_comb2,
+        comb_rets = comb_rets,
+        bear_rets = bear_rets,
+        bull_rets = bull_rets,
+        vol = vol_comb2,
+        vol_ann = vol_comb2_ann,
+        comb_score = comb_score,
+        last_year_weekly_rets = last_year_weekly_rets,
+        last_5y_weekly_rets = last_5y_weekly_rets,
+        rf = rf_rate,
+        beta = beta,
+        benchmark_weekly_rets = benchmark_weekly_rets,
+        benchmark_ann_ret = benchmark_ret,
+        bl_ret = mu_bl,
+        bl_cov = sigma_bl
+    )
+    
+    port_performance = {
+        "MSR": msr_report,
+        "Sortino": sortino_report,
+        "Black-Litterman": bl_report,
+        "MIR": mir_report,
+        "MSP": msp_report,
+        "Combination": comb_report,
+        "Combination1": comb_report1,
+        "Combination2": comb_report2,
+    }
+    
+    performance_df = pd.DataFrame(port_performance).T
+    
+    return performance_df
