@@ -28,7 +28,7 @@ logging.basicConfig(
     format = '%(asctime)s - %(levelname)s - %(message)s'
 )
 
-IND_DATA_FILE = 'ind_data_mc_all_simple_mean.xlsx'
+IND_DATA_FILE = config.IND_DATA_FILE
 
 MIN_STD = 1e-2
 MAX_STD = 2
@@ -111,8 +111,10 @@ class PortfolioOptimizer:
             'CAPM BL Pred': 'CAPM',
             'FF3 Pred': 'FF3',
             'FF5 Pred': 'FF5',
+            'Factor Exponential Regression': 'FER',
             'SARIMAX Monte Carlo': 'SARIMAX',
-            'Rel Val Pred': 'RelVal'
+            'Rel Val Pred': 'RelVal',
+            'LSTM': 'LSTM'
         }
         
         self.models: Dict[str, pd.DataFrame] = {}
@@ -179,7 +181,7 @@ class PortfolioOptimizer:
 
         self.latest_prices = self.ratio_data.last_price
         
-        self.tickers = self.latest_prices.index.tolist()
+        self.tickers = config.tickers
 
         self.signal_scores = (
             pd.read_excel(self.excel_file_in,
@@ -642,8 +644,6 @@ class PortfolioOptimizer:
     ) -> Tuple[pd.Series, pd.Series, pd.Series, Dict[str, pd.Series], pd.DataFrame]:
         """
         Compute combination returns, volatility (SE), final score, model weights, and breakdown.
-        Return outliers are clipped at [Q1 - IQR, Q3 + IQR] per model; SE is from
-        within-model and between-model variance; weights capped via cap_norm.
         """
 
         names = list(self.models.keys())
@@ -772,9 +772,9 @@ class PortfolioOptimizer:
        
         common_idx = sorted(common_idx)
 
-        rets = [r.reindex(common_idx).clip(lower=config.lbr, upper=config.ubr) for r in rets]
+        rets = [r.reindex(common_idx).clip(lower = config.lbr, upper = config.ubr) for r in rets]
        
-        ses = [s.reindex(common_idx).clip(lower=MIN_STD, upper=MAX_STD) for s in ses]
+        ses = [s.reindex(common_idx).clip(lower = MIN_STD, upper = MAX_STD) for s in ses]
 
         ret_df = pd.DataFrame({names[i]: rets[i] for i in range(len(names))}, index=common_idx)
         
@@ -863,45 +863,62 @@ class PortfolioOptimizer:
             mask = valid.values.T
         )
         
-        group_iv_names = ['DCF', 'DCFE', 'RI']
-        group_f_names = ['FF3', 'FF5', 'CAPM']
-        group_ml_names = ['Prophet', 'SARIMAX', 'LinReg']
+        group_hist_names = ['Daily', 'EMA']
+        group_iv_names = ['DCF', 'DCFE', 'RI', 'RelVal']
+        group_f_names = ['FF3', 'FF5', 'CAPM', 'FER']
+        group_ml_names = ['Prophet', 'SARIMAX', 'LinReg', 'LSTM']
 
+        group_hist_idx = [names.index(m) for m in group_hist_names]
         group_iv_idx = [names.index(m) for m in group_iv_names]
         group_f_idx = [names.index(m) for m in group_f_names]
         group_ml_idx = [names.index(m) for m in group_ml_names]
         
+        hist_limit = 0.15
+        iv_limit = 0.3
+        f_limit = 0.3
+        ml_limit = 0.3
+        
         for col in range(w_arr.shape[1]):
+            
+            current_hist = w_arr[group_hist_idx, col]
+
+            if current_hist.sum() > hist_limit:
+
+                w_arr[group_hist_idx, col] *= hist_limit / current_hist.sum()
+                
+                others = [i for i in range(w_arr.shape[0]) if i not in group_hist_idx]
+
+                w_arr[others, col] *= (1 - hist_limit) / w_arr[others, col].sum()
 
             current_iv = w_arr[group_iv_idx, col]
 
-            if current_iv.sum() > 0.25:
+            if current_iv.sum() > iv_limit:
 
-                w_arr[group_iv_idx, col] *= 0.25 / current_iv.sum()
+                w_arr[group_iv_idx, col] *=  iv_limit / current_iv.sum()
 
                 others = [i for i in range(w_arr.shape[0]) if i not in group_iv_idx]
 
-                w_arr[others, col]  *= 0.75 / w_arr[others, col].sum()
+                w_arr[others, col]  *= (1 - iv_limit) / w_arr[others, col].sum()
 
             current_f = w_arr[group_f_idx, col]
 
-            if current_f.sum() > 0.25:
+            if current_f.sum() > f_limit:
 
-                w_arr[group_f_idx, col] *= 0.25 / current_f.sum()
+                w_arr[group_f_idx, col] *= f_limit / current_f.sum()
 
                 others = [i for i in range(w_arr.shape[0]) if i not in group_f_idx]
 
-                w_arr[others, col]  *= 0.75 / w_arr[others, col].sum()
+                w_arr[others, col]  *= (1 - f_limit) / w_arr[others, col].sum()
 
             current_ml = w_arr[group_ml_idx, col]
 
-            if current_ml.sum() > 0.25:
+            if current_ml.sum() > ml_limit:
 
-                w_arr[group_ml_idx, col] *= 0.25 / current_ml.sum()
+                w_arr[group_ml_idx, col] *= ml_limit / current_ml.sum()
 
                 others = [i for i in range(w_arr.shape[0]) if i not in group_ml_idx]
 
-                w_arr[others, col]  *= 0.75 / w_arr[others, col].sum()
+                w_arr[others, col]  *= (1 - ml_limit) / w_arr[others, col].sum()
             
         weights = {
             names[i]: pd.Series(w_arr[i], index = common_idx)
@@ -1085,9 +1102,9 @@ class PortfolioOptimizer:
        
         final_scores = pd.Series(np.minimum(final_scores, nY), index=common_idx)
         
-        if config.TICKER_EXEMPTIONS in final_scores.index:
+        if "SGLP.L" in final_scores.index:
             
-            final_scores.loc[config.TICKER_EXEMPTIONS] = final_scores.mean()
+            final_scores.loc["SGLP.L"] = final_scores.quantile(0.75)
        
         score_breakdown['Final Score'] = final_scores
 
@@ -1185,3 +1202,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
