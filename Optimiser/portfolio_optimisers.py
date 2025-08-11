@@ -42,7 +42,7 @@ def generate_bounds_for_asset(
     Long-only gating by score & expected return.
     """
     
-    if score <= 0 or er <= 0:
+    if not np.isfinite(score) or not np.isfinite(er) or score <= 0 or er <= 0:
     
         return (0.0, 0.0)
     
@@ -131,14 +131,122 @@ class PortfolioOptimiser:
             base = scores
             
         self._universe: List[str] = list(base.index)
+        
+        idx = pd.Index(self._universe)
+        
+        if idx.has_duplicates:
+        
+            dupes = idx[idx.duplicated()].unique().tolist()
+        
+            raise ValueError(f"Duplicate tickers in universe: {dupes}")
+        
+        self._universe = list(idx)
+        
+        NORMALIZE_TICKER_CASE = getattr(config, "NORMALIZE_TICKER_CASE", False)
+        
+        if NORMALIZE_TICKER_CASE:
+            
+            
+            def _canon_tkr(
+                x: str
+            ) -> str:
+                
+                return x.upper().strip()
 
+
+            canon = pd.Index(map(_canon_tkr, self._universe))
+           
+            if canon.has_duplicates:
+
+                collided = canon[canon.duplicated()].unique().tolist()
+
+                raise ValueError(f"Ticker collisions after case normalization: {collided}")
+
+            mapping = dict(zip(self._universe, canon))
+
+            self._universe = list(canon)
+
+            def _canon_index(
+                obj
+            ):
+                
+                if obj is None: 
+                
+                    return None
+                
+                if isinstance(obj, pd.Series):
+                
+                    s = obj.copy()
+                
+                    s.index = s.index.map(lambda t: mapping.get(t, _canon_tkr(t)))
+                
+                    return s
+                
+                if isinstance(obj, pd.DataFrame):
+                
+                    df = obj.copy()
+                
+                    df.columns = df.columns.map(lambda t: mapping.get(t, _canon_tkr(t)))
+                
+                    return df
+                
+                return obj
+
+            er  = _canon_index(
+                obj = er
+            )
+            
+            scores = _canon_index(
+                obj = scores
+            )
+            
+            weekly_ret_1y = _canon_index(
+                obj = weekly_ret_1y
+            )
+            
+            last_5_year_weekly_rets = _canon_index(
+                obj = last_5_year_weekly_rets
+            )
+            
+            benchmark_weekly_ret = _canon_index(
+                obj = benchmark_weekly_ret
+            )
+            
+            ticker_ind = _canon_index(
+                obj = ticker_ind
+            )
+            
+            ticker_sec = _canon_index(
+                obj = ticker_sec
+            )
+            
+            bnd_h = _canon_index(
+                obj= bnd_h
+            )
+            
+            bnd_l = _canon_index(
+                obj = bnd_l
+            )
+            
+            comb_std = _canon_index(
+                obj = comb_std
+            )
+            
+            sigma_prior = _canon_index(
+                obj = sigma_prior
+            )
+            
+            mcap = _canon_index(
+                obj = mcap
+            )
+        
         self._er = self._reindex_series(
             s = er
-        )
+        ).astype(float).fillna(0.0)
         
         self._scores = self._reindex_series(
             s = scores
-        )
+        ).astype(float).fillna(0.0)
         
         self.gamma = gamma
 
@@ -317,7 +425,7 @@ class PortfolioOptimiser:
         self
     ) -> np.ndarray:
         
-        return self._er.values.astype(float)
+        return self._er.to_numpy(dtype = float)
 
 
     @functools.cached_property
@@ -325,7 +433,7 @@ class PortfolioOptimiser:
         self
     ) -> np.ndarray:
         
-        return self._scores.values.astype(float)
+        return self._scores.to_numpy(dtype = float)
 
 
     @functools.cached_property
@@ -361,7 +469,7 @@ class PortfolioOptimiser:
         Weekly returns (1y) matrix aligned to universe.
         """
         
-        return self._weekly_ret_1y.values
+        return self._weekly_ret_1y.to_numpy()
 
 
     @functools.cached_property
@@ -372,7 +480,7 @@ class PortfolioOptimiser:
         Weekly returns (5y) matrix aligned to universe.
         """
         
-        return self._last_5y.values
+        return self._last_5y.to_numpy()
 
 
     @functools.cached_property
@@ -479,6 +587,27 @@ class PortfolioOptimiser:
     ) -> Dict[object, np.ndarray]:
         
         return {sec: np.where(self._ticker_sec.values == sec)[0] for sec in self._ticker_sec.dropna().unique()}
+
+
+    def _assert_alignment(
+        self
+    ):
+        
+        n = self.n
+       
+        assert self._cov.shape == (n, n)
+       
+        assert self._weekly_ret_1y.shape[1] == n
+       
+        assert self._last_5y.shape[1] == n
+       
+        assert len(self._er) == n and len(self._scores) == n
+       
+        assert (self._weekly_ret_1y.columns == self._last_5y.columns).all()
+       
+        assert self._weekly_ret_1y.columns.equals(pd.Index(self.universe))
+        
+        assert self._last_5y.columns.equals(pd.Index(self.universe))
 
 
     def _build_caps_rows(
@@ -692,6 +821,8 @@ class PortfolioOptimiser:
         riskfree_rate: Optional[float] = None,
     ) -> pd.Series:
         
+        self._assert_alignment()
+        
         μ = self.er_arr
         
         A = self.A
@@ -725,6 +856,8 @@ class PortfolioOptimiser:
         max_sector_pct: Optional[float] = None,
         riskfree_rate: Optional[float] = None,
     ) -> pd.Series:
+        
+        self._assert_alignment()
        
         n = self.n
        
@@ -758,7 +891,9 @@ class PortfolioOptimiser:
         )
 
         for _ in range(max_iter):
+           
             w = cp.Variable(n, nonneg = True)
+           
             u = cp.Variable(T, nonneg = True)
 
             port_week = R @ w
@@ -815,36 +950,40 @@ class PortfolioOptimiser:
         max_sector_pct: Optional[float] = None,
         benchmark_weekly_ret: Optional[pd.Series] = None,
     ) -> pd.Series:
+        
+        self._assert_alignment()
 
-        df = pd.DataFrame(self._last_5y, index = self._last_5y.index if isinstance(self._last_5y, pd.DataFrame) else None, columns=self.universe)
+        hist = self._last_5y
+        
+        if not isinstance(hist, pd.DataFrame) or not hist.columns.equals(pd.Index(self.universe)):
+            
+            raise RuntimeError("MIR: weekly 5y history not aligned to universe")
         
         if benchmark_weekly_ret is None:
         
             benchmark_weekly_ret = self._benchmark_weekly
 
         if benchmark_weekly_ret is not None:
-        
-            df = df.join(benchmark_weekly_ret.rename("_bench"), how="inner")
-        
-            if df.empty:
-        
-                raise RuntimeError("MIR: no overlap between er_hist and benchmark")
-        
-            b = df["_bench"].values
-        
-            R = df.drop(columns=["_bench"]).values
-        
-            univ = list(df.drop(columns=["_bench"]).columns)
+            
+            b = benchmark_weekly_ret.dropna()
+            
+            common_idx = hist.index.intersection(b.index)
+            
+            if common_idx.empty:
+            
+                raise RuntimeError("MIR: no overlap between history and benchmark")
+            
+            R = hist.loc[common_idx, self.universe].to_numpy()
+            
+            b_vec = b.loc[common_idx].to_numpy()
         
         else:
         
-            R = self.R5
+            R = hist.to_numpy()
         
-            b = np.full(self.T5, self.rf_week)
-        
-            univ = self.universe
+            b_vec = np.full(R.shape[0], self.rf_week)
 
-        n = len(univ)
+        n = self.n
         
         T = R.shape[0]
         
@@ -861,7 +1000,7 @@ class PortfolioOptimiser:
           
             w = cp.Variable(n, nonneg = True)
           
-            active = R @ w - b
+            active = R @ w - b_vec
           
             mean_a = (ones_T @ active) / T
           
@@ -884,7 +1023,7 @@ class PortfolioOptimiser:
 
             w_opt = w.value
             
-            active_np = (R @ w_opt) - b
+            active_np = (R @ w_opt) - b_vec
             
             mean_a_v = float(active_np.mean())
             
@@ -896,7 +1035,7 @@ class PortfolioOptimiser:
 
             if abs(mean_a_v - lam * te) < tol:
             
-                return pd.Series(w_opt, index = univ, name = "MIR")
+                return pd.Series(w_opt, index = self.universe, name = "MIR")
 
             lam = mean_a_v / te
 
@@ -911,7 +1050,9 @@ class PortfolioOptimiser:
         max_industry_pct: Optional[float] = None,
         max_sector_pct: Optional[float] = None,
     ) -> pd.Series:
-    
+
+        self._assert_alignment()
+        
         univ = self.universe
     
         n = self.n
@@ -922,7 +1063,7 @@ class PortfolioOptimiser:
       
             raise ValueError("MSP: no complete weekly data")
 
-        R = hist.values
+        R = hist.to_numpy()
       
         T = R.shape[0]
       
@@ -1151,6 +1292,8 @@ class PortfolioOptimiser:
         tol: float = 1e-10,
         max_iter: int = 100,
     ) -> tuple[pd.Series, pd.Series, pd.DataFrame]:
+        
+        self._assert_alignment()
 
         if self._mu_bl is not None and self._sigma_bl is not None:
 
@@ -1198,16 +1341,20 @@ class PortfolioOptimiser:
             
             mu_bl = mu_bl.reindex(tickers)
           
-            sigma_bl = sigma_bl.reindex(index = tickers, columns = tickers)
+            sigma_bl = sigma_bl.reindex(index = self.universe, columns = self.universe)
+            
+            if (mu_bl.isna().any()) or (sigma_bl.isna().any().any()):
+            
+                raise ValueError("BL: NaNs after reindexing to universe")
           
             self._mu_bl = mu_bl
             
             self._sigma_bl = sigma_bl
 
-        μ = mu_bl.values
+        μ = mu_bl.to_numpy()
         
         Σb = make_pd(
-            mat = sigma_bl.values, 
+            mat = sigma_bl.to_numpy(), 
             tol = 1e-10
         )
         
@@ -1281,6 +1428,12 @@ class PortfolioOptimiser:
         scores = np.zeros(W_mix.shape[0])
        
         LcT = self.Lc.T
+        
+        eps = 1e-12
+        
+        den_mir0 = max(np.mean(((W_mix - w_mir) ** 2).sum(axis = 1)), eps)
+        
+        den_msp0 = max(np.mean(((W_mix - w_msp) ** 2).sum(axis = 1)), eps)
        
         for i, w in enumerate(W_mix):
        
@@ -1306,17 +1459,13 @@ class PortfolioOptimiser:
 
             exc = ret - rf_ann
             
-            sh = exc / max(vol, 1e-12)
+            sh = exc / max(vol, eps)
             
-            so = exc / max(dd_ann, 1e-12)
+            so = exc / max(dd_ann, eps)
             
-            bl = (bl_ret - rf_ann) / max(bl_vol, 1e-12)
-
-            mir_pen = float(np.sum((w - w_mir) ** 2))
+            bl = (bl_ret - rf_ann) / max(bl_vol, eps)
             
-            msp_pen = float(np.sum((w - w_msp) ** 2))
-            
-            pen_comb = ((np.sum((w - w_mir)**2) / mir_pen) + (np.sum((w - w_msp) ** 2) / msp_pen))
+            pen_comb = (((w - w_mir) ** 2).sum() / den_mir0) + (((w - w_msp) ** 2).sum() / den_msp0)
             
             scores[i] = sh + so + bl - pen_comb
 
@@ -1758,6 +1907,45 @@ class PortfolioOptimiser:
         return (scale_s, scale_so, scale_bl, scale_ir, scale_sc, Σb, LbT)
 
 
+    def _coerce_weights(
+        self, 
+        w: Optional[pd.Series], 
+        name: str
+    ) -> pd.Series:
+        
+        if w is None:
+        
+            raise ValueError(f"{name} is None")
+        
+        if isinstance(w, pd.Series):
+        
+            out = w.reindex(self.universe).astype(float).fillna(0.0)
+        
+        else:
+        
+            arr = np.asarray(w, float)
+        
+            if arr.shape != (self.n,):
+        
+                raise ValueError(f"{name} has wrong shape {arr.shape}; expected {(self.n,)}")
+        
+            out = pd.Series(arr, index = self.universe)
+        
+        s = float(out.sum())
+        
+        if s <= 0:
+        
+            raise ValueError(f"{name} sums to {s}; cannot renormalize")
+        
+        out = out.clip(lower = 0.0)
+        
+        out /= out.sum()
+        
+        out.name = getattr(w, "name", name)
+        
+        return out
+    
+
     def last_diagnostics(
         self
     ) -> Optional[Dict[str, float]]:
@@ -1782,6 +1970,8 @@ class PortfolioOptimiser:
         w_msp: Optional[pd.Series] = None,
         huber_delta_l1: float = 1e-4, 
     ) -> pd.Series:
+        
+        self._assert_alignment()
 
         if self.gamma is not None:
             
@@ -1831,17 +2021,42 @@ class PortfolioOptimiser:
        
             mu_bl = self._mu_bl
 
-        w_msr_a = w_msr.values
+        w_msr = self._coerce_weights(
+            w = w_msr, 
+            name = "w_msr"
+        )
         
-        w_so_a = w_sort.values
+        w_sort = self._coerce_weights(
+            w = w_sort, 
+            name = "w_sortino"
+        )
         
-        w_mir_a = w_mir.values
+        w_mir = self._coerce_weights(
+            w = w_mir, 
+            name = "w_mir"
+        )
         
-        w_bl_a = w_bl.values
+        w_bl = self._coerce_weights(
+            w = w_bl, 
+            name = "w_bl"
+        )
         
-        w_msp_a = w_msp.values
+        w_msp = self._coerce_weights(
+            w = w_msp, 
+            name = "w_msp"
+        )
         
-        μ_bl_arr = mu_bl.values
+        w_msr_a = w_msr.to_numpy()
+        
+        w_so_a = w_sort.to_numpy()
+        
+        w_mir_a = w_mir.to_numpy()
+        
+        w_bl_a = w_bl.to_numpy()
+        
+        w_msp_a = w_msp.to_numpy()
+        
+        μ_bl_arr = mu_bl.to_numpy()
         
         W_stack = np.vstack([w_msr_a, w_so_a, w_mir_a, w_bl_a, w_msp_a])
 
@@ -2114,6 +2329,8 @@ class PortfolioOptimiser:
         w_bl: Optional[pd.Series] = None,
         w_msp: Optional[pd.Series] = None,
     ) -> pd.Series:
+        
+        self._assert_alignment()
 
         if self.gamma is not None:
          
@@ -2163,17 +2380,42 @@ class PortfolioOptimiser:
         
             mu_bl = self._mu_bl
 
-        w_msr_a = w_msr.values
-       
-        w_so_a =  w_sort.values
-      
-        w_mir_a = w_mir.values
-      
-        w_bl_a = w_bl.values
-      
-        w_msp_a = w_msp.values
-      
-        μ_bl_arr = mu_bl.values
+        w_msr = self._coerce_weights(
+            w = w_msr, 
+            name = "w_msr"
+        )
+        
+        w_sort = self._coerce_weights(
+            w = w_sort, 
+            name = "w_sortino"
+        )
+        
+        w_mir = self._coerce_weights(
+            w = w_mir, 
+            name = "w_mir"
+        )
+        
+        w_bl = self._coerce_weights(
+            w = w_bl, 
+            name = "w_bl"
+        )
+        
+        w_msp = self._coerce_weights(
+            w = w_msp, 
+            name = "w_msp"
+        )
+
+        w_msr_a = w_msr.to_numpy()
+        
+        w_so_a = w_sort.to_numpy()
+        
+        w_mir_a = w_mir.to_numpy()
+        
+        w_bl_a = w_bl.to_numpy()
+        
+        w_msp_a = w_msp.to_numpy()
+        
+        μ_bl_arr = mu_bl.to_numpy()
       
         W_stack = np.vstack([w_msr_a, w_so_a, w_mir_a, w_bl_a, w_msp_a])
 
@@ -2213,21 +2455,21 @@ class PortfolioOptimiser:
         
                 b_te = None
 
-        R1_local = hist_df.values
+        R1_local = hist_df.to_numpy()
         
         T1_local = R1_local.shape[0]
 
         scale_s, scale_so, scale_bl, scale_ir, scale_sc, Σb_cal, LbT = \
             self._calibrate_scales_by_grad_ir_sc(
-                W_stack=W_stack,
-                μ_bl_arr=μ_bl_arr,
-                gamma=gamma,
-                scores_arr=self.scores_arr,
-                R1_local=R1_local,
-                b_te=b_te,
-                cvar_level=cvar_level,
-                sample_size=sample_size,
-                random_state=random_state
+                W_stack = W_stack,
+                μ_bl_arr = μ_bl_arr,
+                gamma = gamma,
+                scores_arr = self.scores_arr,
+                R1_local = R1_local,
+                b_te = b_te,
+                cvar_level = cvar_level,
+                sample_size = sample_size,
+                random_state = random_state
             )
 
         Σ = self.Σ
@@ -2272,6 +2514,7 @@ class PortfolioOptimiser:
             cons.append(A_caps @ w_var <= caps_vec)
         
         prob = cp.Problem(cp.Minimize(obj_expr), cons)
+
 
         def _from_initial(
             w0: np.ndarray
@@ -2360,11 +2603,11 @@ class PortfolioOptimiser:
                 grad_sc = (df * cvar_eps - f * g_cvar) / (cvar_eps ** 2)
 
                 lin = (
-                    gamma[0]*scale_s  * grad_sh
-                    + gamma[1]*scale_so* grad_so
-                    + gamma[2]*scale_bl* grad_bl
-                    + gamma[3]*scale_ir* grad_ir
-                    + gamma[4]*scale_sc* grad_sc
+                    gamma[0] * scale_s * grad_sh
+                    + gamma[1] * scale_so * grad_so
+                    + gamma[2] * scale_bl * grad_bl
+                    + gamma[3] * scale_ir * grad_ir
+                    + gamma[4] * scale_sc * grad_sc
                 )
 
                 lin_param.value = lin
@@ -2512,7 +2755,7 @@ class PortfolioOptimiser:
 
         best_w = None
       
-        best_s = np.inf
+        best_s = -np.inf
       
         best_diag = {}
       
@@ -2559,6 +2802,8 @@ class PortfolioOptimiser:
         w_msp: Optional[pd.Series] = None,
         huber_delta_l1: float = 1e-4,   
     ) -> pd.Series:
+        
+        self._assert_alignment()
 
         if self.gamma is not None:
 
@@ -2608,25 +2853,42 @@ class PortfolioOptimiser:
         
             mu_bl = self._mu_bl
 
-        if w_bl is None or self._mu_bl is None or self._sigma_bl is None:
+        w_msr = self._coerce_weights(
+            w = w_msr, 
+            name = "w_msr"
+        )
         
-            w_bl, mu_bl, _ = self.black_litterman_weights()
+        w_sort = self._coerce_weights(
+            w = w_sort, 
+            name = "w_sortino"
+        )
         
-        else:
+        w_mir = self._coerce_weights(
+            w = w_mir, 
+            name = "w_mir"
+        )
         
-            mu_bl = self._mu_bl
+        w_bl = self._coerce_weights(
+            w = w_bl, 
+            name = "w_bl"
+        )
+        
+        w_msp = self._coerce_weights(
+            w = w_msp, 
+            name = "w_msp"
+        )
 
-        w_msr_a = w_msr.values
-       
-        w_so_a =  w_sort.values
+        w_msr_a = w_msr.to_numpy()
+               
+        w_so_a =  w_sort.to_numpy()
       
-        w_mir_a = w_mir.values
+        w_mir_a = w_mir.to_numpy()
       
-        w_bl_a = w_bl.values
+        w_bl_a = w_bl.to_numpy()
       
-        w_msp_a = w_msp.values
+        w_msp_a = w_msp.to_numpy()
       
-        μ_bl_arr = mu_bl.values
+        μ_bl_arr = mu_bl.to_numpy()
 
         W_stack = np.vstack([w_msr_a, w_so_a, w_mir_a, w_bl_a, w_msp_a])
 
@@ -2883,3 +3145,4 @@ class PortfolioOptimiser:
         self._last_diag = best_diag
         
         return pd.Series(best_w, index = self.universe, name = "comb_port2")
+
