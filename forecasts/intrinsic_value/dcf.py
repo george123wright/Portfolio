@@ -1,22 +1,26 @@
 """
 Performs discounted cash‑flow valuation using regression‑based cash‑flow forecasts and Monte‑Carlo scenarios.
 """
+from __future__ import annotations
 
+import logging
+import numpy as np
 import pandas as pd
 import datetime as dt
-import numpy as np
-import logging
-from sklearn.model_selection import KFold
-from functions.fast_regression import grid_search_regression, constrained_regression, ordinary_regression
+import itertools
+from sklearn.model_selection import TimeSeriesSplit
+
+from functions.fast_regression import HuberENetCV  
+
 from data_processing.financial_forecast_data import FinancialForecastData
 import config
 
 
-pd.set_option('future.no_silent_downcasting', True)
+pd.set_option("future.no_silent_downcasting", True)
 
 logging.basicConfig(
     level = logging.INFO, 
-    format = '%(asctime)s - %(levelname)s - %(message)s'
+    format = "%(asctime)s - %(levelname)s - %(message)s"
 )
 
 logger = logging.getLogger(__name__)
@@ -29,46 +33,31 @@ macro = fdata.macro
 
 r = macro.r
 
-tickers = r.tickers
+tickers = list(config.tickers)
 
-close = r.close
+latest_prices = r.last_price
 
-latest_prices_series = pd.Series({ticker: close[ticker].iloc[-1] for ticker in tickers})
+market_cap = r.mcap
 
-latest_prices = latest_prices_series.to_dict()
+shares_outstanding = r.shares_outstanding
 
-ticker_data = r.analyst
+tax_rate = r.tax_rate
 
-market_cap = pd.Series({ticker: ticker_data.loc[ticker, 'marketCap'] for ticker in tickers})
+interest_rates = 0.042
 
-shares_outstanding = pd.Series({ticker: ticker_data.loc[ticker, 'sharesOutstanding'] for ticker in tickers})
+cost_of_debt = interest_rates * (1.0 - tax_rate)
 
-tax_rate = pd.Series({ticker: ticker_data.loc[ticker, 'Tax Rate'] for ticker in tickers})
-
-coe = pd.read_excel(config.FORECAST_FILE, 
-                    sheet_name = 'COE', 
-                    index_col = 0, 
-                    usecols = ['Ticker', 'COE'], 
-                    engine = 'openpyxl'
-                    )
+coe = pd.read_excel(
+    config.FORECAST_FILE,
+    sheet_name = "COE",
+    index_col = 0,
+    usecols = ["Ticker", "COE"],
+    engine = "openpyxl",
+)
 
 r_dicts = r.dicts()
 
-evs_ind_dict = r_dicts['EVS']
-
-alphas = np.linspace(0.3, 0.7, 5)
-
-lambdas = np.logspace(-4, 1, 20)
-
-huber_M_values = (0.25, 1.0, 4.0)
-
-param_grid = [(a, l, m)
-                for a in alphas
-                for l in lambdas
-                for m in huber_M_values]
-cv_folds = 5
-
-kf = KFold(n_splits = cv_folds, shuffle = True, random_state = 123)
+evs_ind_dict = r_dicts["EVS"]
 
 column_map = {
     "ocf": "OCF",
@@ -84,57 +73,94 @@ column_map = {
     "ooa": "Other Operating Activities",
 }
 
-keys = ["ocf", "interest", "ebit", "da", "sbc", "aq", "ni", "fcf", "ebitda", "cwc", "ooa"]
-
-funcs = [
-    constrained_regression, 
-    constrained_regression, 
-    constrained_regression,
-    ordinary_regression, 
-    ordinary_regression, 
-    ordinary_regression, 
-    constrained_regression, 
-    constrained_regression, 
-    constrained_regression, 
-    ordinary_regression, 
-    ordinary_regression
+keys = [
+    "ocf", 
+    "interest",
+    "ebit", 
+    "da",
+    "sbc",
+    "aq", 
+    "ni", 
+    "fcf", 
+    "ebitda", 
+    "cwc", 
+    "ooa",
 ]
 
+constrained_keys = {"ocf", "ebit", "ni", "fcf", "ebitda"}  
+
+constrained_map = {k: (k in constrained_keys) for k in keys}
+
+alphas = np.linspace(0.3, 0.7, 5)
+
+lambdas = np.logspace(0, -4, 20)  
+
+huber_M_values = (0.25, 1.0, 4.0)
+
+cv_folds = 5
 
 def _zero_dicts(
-    ticker
+    ticker: str
 ):
-    
+
     for d in (low_price_dict, avg_price_dict, high_price_dict, returns_dict, se_dict):
-        
-        d[ticker] = 0
+
+        d[ticker] = 0.0
 
 
-low_price_dict, avg_price_dict, high_price_dict, returns_dict, se_dict = {}, {}, {}, {}, {}
+low_price_dict: dict = {}
+
+avg_price_dict: dict = {}
+
+high_price_dict: dict = {}
+
+returns_dict: dict = {}
+
+se_dict: dict = {}
 
 required_cols = [
-    "Revenue", 
-    "EPS", 
-    "OCF", 
-    "InterestAfterTax", 
+    "Revenue",
+    "EPS",
+    "OCF",
+    "InterestAfterTax",
     "Capex",
-    "EBIT", 
-    "Depreciation & Amortization", 
+    "EBIT",
+    "Depreciation & Amortization",
     "Share-Based Compensation",
-    "Acquisitions", 
-    "Net Income", 
+    "Acquisitions",
+    "Net Income",
     "EBITDA",
-    "Change in Working Capital", 
-    "Other Operating Activities", 
-    "FCF"
+    "Change in Working Capital",
+    "Other Operating Activities",
+    "FCF",
 ]
+
+lb = config.lbp * latest_prices 
+
+ub = config.ubp * latest_prices
+
+tscv = TimeSeriesSplit(n_splits = cv_folds)
+
+kpis_dict = fdata.kpis
+
+forecast_dict = fdata.forecast
+
+fin_dict = fdata.annuals
+
+cv = HuberENetCV(
+    alphas = alphas,
+    lambdas = lambdas,
+    Ms = huber_M_values,
+    n_splits = cv_folds,
+    n_jobs = -1,                 
+)
 
 for ticker in tickers:
     
     logger.info("Processing ticker: %s", ticker)
-    
-    fin_df = fdata.annuals.get(ticker)
-    
+
+    fin_df = fin_dict[ticker]
+  
     if fin_df is None:
     
         logger.info("Skipping %s: missing financials.", ticker)
@@ -142,7 +168,7 @@ for ticker in tickers:
         _zero_dicts(
             ticker = ticker
         )
-        
+    
         continue
 
     present = [c for c in required_cols if c in fin_df.columns]
@@ -150,244 +176,216 @@ for ticker in tickers:
     missing = set(required_cols) - set(present)
    
     if missing:
-        
-        logger.warning(f"{ticker} missing columns {missing}. Skipping regression.")
-        
+       
+        logger.warning("%s missing columns %s. Skipping regression.", ticker, missing)
+       
         _zero_dicts(
             ticker = ticker
         )
-        
+       
         continue
 
-    regression_data = fin_df.dropna(subset=present)
+    regression_data = fin_df.dropna(subset = present)
    
     if regression_data.empty:
         
-        logger.warning(f"Regression data empty for {ticker}. Skipping.")
-        
+        logger.warning("Regression data empty for %s. Skipping.", ticker)
+       
         _zero_dicts(
             ticker = ticker
         )
         
         continue
 
-    X = regression_data[["Revenue", "EPS"]].values
-   
-    y_series = {col: regression_data[col].values for col in ["OCF", 
-                                                             "InterestAfterTax",
-                                                             "EBIT", 
-                                                             "Depreciation & Amortization",
-                                                             "Share-Based Compensation", 
-                                                             "Acquisitions",
-                                                             "Net Income", 
-                                                             "FCF", 
-                                                             "EBITDA",
-                                                             "Change in Working Capital", 
-                                                             "Other Operating Activities"
-                                                             ]}
+    X = regression_data[["Revenue", "EPS"]].to_numpy(dtype = float)
 
-    forecast_df = fdata.forecast[ticker].dropna()
+    y_dict = {
+        k: regression_data[column_map[k]].to_numpy(dtype = float) for k in keys
+    }
 
+    forecast_df = forecast_dict[ticker].dropna()
+    
     if forecast_df.empty:
         
-        logger.warning(f"No forecast data for {ticker}, skipping DCF.")
-        
+        logger.warning("No forecast data for %s, skipping DCF.", ticker)
+       
         _zero_dicts(
             ticker = ticker
         )
-        
+      
         continue
- 
-    kpis = fdata.kpis[ticker]
- 
-    evs_list = pd.Series([kpis['exp_evs'].iat[0], evs_ind_dict[ticker]['Industry-MC']]).dropna()
+
+    kpis = kpis_dict[ticker]
     
-    mc_ev = kpis['mc_ev'].iat[0]
- 
+    evs_list = pd.Series(
+        [kpis["exp_evs"].iat[0], evs_ind_dict[ticker]["Industry-MC"]]
+    ).dropna()
+    
+    mc_ev = kpis["mc_ev"].iat[0]
+    
+    capex_rev_ratio = kpis["capex_rev_ratio"].iat[0]
+
     years = len(forecast_df)
     
-    cv_splits = list(kf.split(X)) 
-    
-    regs = {}
-    
-    for key, func in zip(keys, funcs):
-    
-        y_col = column_map[key]
-    
-        regs[key] = grid_search_regression(
-            X = X,
-            y = y_series[y_col],
-            regression_func = func,
-            param_grid = param_grid,    
-            cv_splits = cv_splits     
-        )[0]
+    cv_splits = list(tscv.split(X))
 
-    beta_ocf = regs['ocf']; beta_interest = regs['interest']; beta_ebit = regs['ebit']
-   
-    beta_da = regs['da']; beta_sbc = regs['sbc']; beta_aq = regs['aq']
-   
-    beta_ni = regs['ni']; beta_fcf = regs['fcf']; beta_ebitda = regs['ebitda']
-   
-    beta_cwc = regs['cwc']; beta_ooa = regs['ooa']
+    betas_by_key, best_lambda, best_alpha, best_M = cv.fit_joint(
+        X = X,
+        y_dict = y_dict,
+        constrained_map = constrained_map,
+        cv_splits = cv_splits,
+        scorer = None, 
+    )
 
-    coe_t = coe.loc[ticker].values
+    B = np.stack([betas_by_key[k] for k in keys], axis = 0) 
     
-    mv_debt = kpis['market_value_debt'].iat[0]
-    
-    E = market_cap[ticker]; V = E + mv_debt
-    
-    interest_rates = 0.042
-    
-    if pd.isna(tax_rate[ticker]): 
-        
-        tax_rate[ticker] = 0.22
-    
-    cost_of_debt = interest_rates * (1 - tax_rate[ticker])
-   
-    WACC = (coe_t * E / V) + (cost_of_debt * mv_debt / V)
-    
-    capex_rev_ratio = kpis['capex_rev_ratio'].iat[0]
+    rev_vals = forecast_df[["low_rev", "avg_rev", "high_rev"]].to_numpy(dtype = float)
 
-    rev_vals = forecast_df[['low_rev','avg_rev','high_rev']].to_numpy()
-    
-    eps_vals = forecast_df[['low_eps','avg_eps','high_eps']].to_numpy()
+    eps_vals = forecast_df[["low_eps", "avg_eps", "high_eps"]].to_numpy(dtype = float)
 
-    REVS_mesh = np.empty((years, 3, 3)); EPS_mesh = np.empty((years, 3, 3))
-   
-    for i in range(years):
-       
-        REVS_mesh[i], EPS_mesh[i] = np.meshgrid(rev_vals[i], eps_vals[i], indexing='ij')
 
-    rev_flat = REVS_mesh.reshape(years, -1); eps_flat = EPS_mesh.reshape(years, -1)
-   
-    idx = np.indices([rev_flat.shape[1]] * years).reshape(years, -1)
-  
-    REVS = rev_flat[np.arange(years)[:, None], idx].T  
-   
-    EPS = eps_flat[np.arange(years)[:, None], idx].T 
+    all_idx = np.array(list(itertools.product(range(3), repeat = years)), dtype = int)
 
-    ocf_p = beta_ocf[0] + (beta_ocf[1] * REVS) + (beta_ocf[2] * EPS)
-    
-    int_p = beta_interest[0] + (beta_interest[1] * REVS) + (beta_interest[2] * EPS)
-    
-    ebit_p = beta_ebit[0] + (beta_ebit[1] * REVS) + beta_ebit[2] * EPS
-    
-    da_p = beta_da[0] + (beta_da[1] * REVS )+ (beta_da[2] * EPS)
-    
-    sbc_p = beta_sbc[0] + (beta_sbc[1] * REVS) + (beta_sbc[2] * EPS)
-    
-    aq_p = beta_aq[0] + (beta_aq[1] * REVS) + (beta_aq[2] * EPS)
-    
-    ni_p = beta_ni[0] + (beta_ni[1] * REVS) + (beta_ni[2] * EPS)
-    
-    fcf_p = beta_fcf[0] + (beta_fcf[1] * REVS) + (beta_fcf[2] * EPS)
-    
-    ebitda_p = beta_ebitda[0] + (beta_ebitda[1] * REVS) + (beta_ebitda[2] * EPS)
-    
-    cwc_p = beta_cwc[0] + (beta_cwc[1] * REVS) + (beta_cwc[2] * EPS)
-    
-    ooa_p = beta_ooa[0] + (beta_ooa[1] * REVS) + (beta_ooa[2] * EPS)
+    n_combo = all_idx.shape[0]
 
-    capex = capex_rev_ratio * REVS  
-    
-    fcff_formulas = {
-        "ocf_int_capex": lambda: ocf_p  + int_p +   - capex,
-        "ebitda_based":  lambda: ebit_p + da_p + sbc_p + ooa_p + aq_p - cwc_p - capex,
-        "ni_based":      lambda: ni_p   + int_p + da_p + sbc_p + ooa_p + aq_p - cwc_p - capex,
-        "fcf_plus_int":  lambda: fcf_p  + int_p,
-        "ebitda_minus":  lambda: ebitda_p       - capex + aq_p - cwc_p,
-    }
-    
+    REVS = np.take_along_axis(rev_vals, all_idx.T, axis = 1).T 
+
+    EPS = np.take_along_axis(eps_vals, all_idx.T, axis = 1).T 
+
+    F = np.stack([np.ones_like(REVS), REVS, EPS], axis = -1)
+
+    Y = np.einsum("tj,cyj->tcy", B, F)
+
+    (
+        ocf_p, 
+        int_p, 
+        ebit_p, 
+        da_p, 
+        sbc_p,
+        aq_p,
+        ni_p, 
+        fcf_p, 
+        ebitda_p,
+        cwc_p, 
+        ooa_p
+    ) = Y
+
+    capex = capex_rev_ratio * REVS 
+
+    fcff_methods = [
+        ("ocf_int_capex", lambda: ocf_p + int_p - capex),
+        ("ebitda_based", lambda: ebit_p + da_p + sbc_p + ooa_p + aq_p - cwc_p - capex),
+        ("ni_based", lambda: ni_p + int_p + da_p + sbc_p + ooa_p + aq_p - cwc_p - capex),
+        ("fcf_plus_int", lambda: fcf_p + int_p),
+        ("ebitda_minus", lambda: ebitda_p - capex + aq_p - cwc_p),
+    ]
+
     valid_ff = []
-    
-    for name, fn in fcff_formulas.items():
-        
-        arr = fn()                   
-        
-        if np.isfinite(arr).all():   
-       
-            valid_ff.append(np.maximum(arr, 0))
-       
+   
+    for name, fn in fcff_methods:
+   
+        arr = fn()  
+   
+        if np.isfinite(arr).all():
+   
+            valid_ff.append(arr)
+   
         else:
-       
-            logger.info(f"  • skipping FCFF method {name} (missing inputs)")
+   
+            logger.info("• skipping FCFF method %s (non-finite inputs)", name)
 
     if not valid_ff:
        
-        logger.warning(f"No complete FCFF formulas for {ticker}; skipping.")
+        logger.warning("No complete FCFF formulas for %s; skipping.", ticker)
        
         _zero_dicts(
             ticker = ticker
         )
-       
+        
         continue
 
-    fcff_raw = np.stack(valid_ff, axis=0)
+    fcff_raw = np.stack(valid_ff, axis = 0) 
 
-    days = (forecast_df.index.to_numpy() - np.datetime64(today_ts)) / np.timedelta64(1, 'D')
-    discount_factors = 1.0 / ((1.0 + WACC) ** (days / 365.0)) 
+    days = (forecast_df.index.to_numpy() - np.datetime64(today_ts)) / np.timedelta64(1, "D")
 
-    disc_ff = fcff_raw * discount_factors[None, None, :]
-    sum_ff  = disc_ff.sum(axis = 2)
+    years_frac = days / 365.0
 
-    final_rev = REVS[:, -1] 
+    coe_t = float(coe.loc[ticker].iat[0])
 
-    evs_arr = evs_list.values
-    
-    tv_raw = evs_arr[:, None] * final_rev[None, :]
-    
-    tv_disc = tv_raw / ((1 + WACC) ** years)
+    mv_debt = float(kpis["market_value_debt"].iat[0])
+
+    E = float(market_cap[ticker])
+
+    V = E + mv_debt
+     
+    WACC = (coe_t * E / V) + (cost_of_debt[ticker] * mv_debt / V)
+
+    discount_factors = 1.0 / np.power(1.0 + WACC, years_frac) 
+
+    disc_ff = fcff_raw * discount_factors[None, None, :]   
+   
+    sum_ff = disc_ff.sum(axis = 2)                              
+
+    evs_arr = evs_list.to_numpy(dtype = float) 
+   
+    final_rev = REVS[:, -1]             
+   
+    tv_raw = evs_arr[:, None] * final_rev[None, :]                 
+   
+    tv_disc = tv_raw / np.power(1.0 + WACC, years)                 
 
     dcf = sum_ff[None, :, :] + tv_disc[:, None, :]
 
-    lb = config.lbp * latest_prices_series[ticker] 
-    ub = config.ubp * latest_prices_series[ticker]
+    shares_out = float(shares_outstanding[ticker])
     
-    shares_out = shares_outstanding[ticker]
+    mc_ev_shares = mc_ev / shares_out 
+   
+    prices = (mc_ev_shares * dcf).clip(lb[ticker], ub[ticker])
+   
+    px = prices.reshape(-1)
     
-    prices = np.clip(mc_ev * dcf / shares_out, lb, ub)  
-
-    all_prices = prices.flatten()
-    
-    low_price_dict[ticker] = max(all_prices.min(), 0)
-    avg_price_dict[ticker] = max(all_prices.mean(), 0)
-    high_price_dict[ticker] = max(all_prices.max(), 0)
-
     disc_ff_expanded = np.broadcast_to(disc_ff[None, :, :, :], (len(evs_arr),) + disc_ff.shape)
     
-    na = forecast_df['num_analysts'].to_numpy(dtype=float)
+    na = forecast_df['num_analysts'].to_numpy(dtype = float)
     
-    se_by_year = np.std(disc_ff_expanded, axis=(0,1,2), ddof=1) / np.sqrt(na)
-   
-    tv_rep = np.repeat(tv_disc[:, :, None], 5, axis=2).flatten()
+    se_by_year = np.std(disc_ff_expanded, axis = (0, 1, 2), ddof = 1) / np.sqrt(na)
     
-    tv_se = np.std(tv_rep, ddof=1) / np.sqrt(float(forecast_df['num_analysts'].iat[-1]))
+    tv_rep = np.repeat(tv_disc[:, :, None], 5, axis = 2).flatten()
+    
+    tv_se = np.std(tv_rep, ddof = 1) / np.sqrt(float(forecast_df['num_analysts'].iat[-1]))
 
-    se = np.sqrt(np.sum(se_by_year**2) + tv_se**2) * mc_ev / shares_out
-    
+    se = np.sqrt(np.sum(se_by_year ** 2) + tv_se ** 2) * mc_ev_shares
+
+    low_price = float(np.nanpercentile(px, 10))
+    med_price = float(np.nanpercentile(px, 50))
+    high_price = float(np.nanpercentile(px, 90))
+
+    low_price_dict[ticker] = low_price
+    avg_price_dict[ticker] = med_price
+    high_price_dict[ticker] = high_price
     se_dict[ticker] = se
 
     latest_price = latest_prices[ticker]
-    
-    returns_dict[ticker] = max((avg_price_dict[ticker] / latest_price) - 1, -1)
+    returns_dict[ticker] = float((med_price / latest_price - 1.0))
 
-    logger.info(f"Ticker: {ticker}, Low: {low_price_dict[ticker]:.2f}, Avg: {avg_price_dict[ticker]:.2f}, "
-                f"High: {high_price_dict[ticker]:.2f}, SE: {se_dict[ticker]:.2f}")
+    logger.info(
+        "Ticker: %s | Low (P10): %.2f | Med (P50): %.2f | High (P90): %.2f | SE: %.2f ",
+        ticker, low_price, med_price, high_price, se
+    )
 
-dcf_df = pd.DataFrame({
-    'Low Price': low_price_dict,
-    'Avg Price': avg_price_dict,
-    'High Price': high_price_dict,
-    'SE': se_dict
-})
+dcf_df = pd.DataFrame(
+    {
+        "Low Price": low_price_dict,
+        "Avg Price": avg_price_dict, 
+        "High Price": high_price_dict,
+        "SE": se_dict,
+    }
+)
 
-dcf_df.index.name = 'Ticker'
+dcf_df.index.name = "Ticker"
 
 with pd.ExcelWriter(
-    config.MODEL_FILE,
-    mode = 'a', 
-    engine = 'openpyxl', 
-    if_sheet_exists = 'replace'
+    config.MODEL_FILE, mode = "a", engine = "openpyxl", if_sheet_exists = "replace"
 ) as writer:
-    
-  dcf_df.to_excel(writer, sheet_name='DCF')
+   
+    dcf_df.to_excel(writer, sheet_name = "DCF")
