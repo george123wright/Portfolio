@@ -21,7 +21,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 import config
 
 
-nltk.download('vader_lexicon', quiet=True)
+nltk.download('vader_lexicon', quiet = True)
 
 logger = logging.getLogger(__name__)
 
@@ -35,27 +35,157 @@ console_handler.setFormatter(console_formatter)
 
 logger.addHandler(console_handler)
 
+
 STOPWORDS = {
-    "the", "and", "to", "a", "in", "of", "for", "is", "on", "that",
-    "with", "as", "at", "this", "it", "by", "from", "are", "an", "i",
-    "you", "but", "if", "or", "be", "was", "so", "we", "they", "not",
-    "have", "has", "im", "can", "there", "what", "will", "all", "just",
-    "https", "s", "trump", "ukraine", "minerals", "there", "why", "wondering",
-    "apparently", "everyone", "there", "says", "their", "about",
-    "reddit", "r", "wallstreetbets", "amp", "http", "www", "com",
-    "figured", "last", "coffee", "people", "college", "university", 
-    "student", "obvious", "me", "bpunt", "slurping", "see", "guys", 
-    "should", "do", "people", "per", "usually"
+    "the",
+    "and", 
+    "to", 
+    "a", 
+    "in", 
+    "of", 
+    "for", 
+    "is", 
+    "on",
+    "that",
+    "with", 
+    "as",
+    "at", 
+    "this", 
+    "it", 
+    "by", 
+    "from", 
+    "are", 
+    "an",
+    "i",
+    "you",
+    "but", 
+    "if",
+    "or",
+    "be", 
+    "was",
+    "so", 
+    "we", 
+    "they", 
+    "not",
+    "have", 
+    "has", 
+    "im", 
+    "can",
+    "there",
+    "what", 
+    "will", 
+    "all",
+    "just",
+    "https",
+    "s", 
+    "trump",
+    "ukraine",
+    "minerals",
+    "there",
+    "why", 
+    "wondering",
+    "apparently", 
+    "everyone", 
+    "there", 
+    "says", 
+    "their",
+    "about",
+    "reddit", 
+    "r",
+    "wallstreetbets", 
+    "amp", 
+    "http", 
+    "www", 
+    "com",
+    "figured", 
+    "last", 
+    "coffee",
+    "people",
+    "college", 
+    "university", 
+    "student", 
+    "obvious",
+    "me", 
+    "bpunt", 
+    "slurping", 
+    "see", 
+    "guys", 
+    "should", 
+    "do", 
+    "people", 
+    "per", 
+    "usually"
 }
 
+
 NOTTICKERS = {
-    "CEO", "CFO", "CTO", "COO", "WSB", "DD", "YOLO", "TOS", "AOC", "GDP",
-    "OTM", "GAIN", "IS", "UK", "THE", "US", "NEVER", "OK", "FDA", "AM", "PM",
-    "RH", "EV", "IPO", "ATH", "TOS", "TD", "EDIT", "TLDR", "ROPE", "STAY", "SAFE",
-    "AUTO", "BOT", "AI", "IT", "ELON", "MUSK", "SEC", "TICK", "TOCK", "USD", "CPU",
-    "IS", "DOE", "OP", "NY", "DOJ", "IRA", "NOT", "ZERO", "II", "III", "IV",
-    "NFA", "IN", "BUY", "BUT", "JOBS", "THEIR", "WAS", "GOOD", "EU", "DVD", "EPS",
-    "IM", "RIF"
+    "CEO",
+    "CFO", 
+    "CTO", 
+    "COO", 
+    "WSB", 
+    "DD", 
+    "YOLO",
+    "TOS", 
+    "AOC", 
+    "GDP",
+    "OTM", 
+    "GAIN", 
+    "IS", 
+    "UK", 
+    "THE",
+    "US",
+    "NEVER",
+    "OK",
+    "FDA", 
+    "AM", 
+    "PM",
+    "RH", 
+    "EV", 
+    "IPO",
+    "ATH", 
+    "TOS", 
+    "TD", 
+    "EDIT",
+    "TLDR", 
+    "ROPE",
+    "STAY",
+    "SAFE",
+    "AUTO", 
+    "BOT",
+    "AI", 
+    "IT", 
+    "ELON",
+    "MUSK",
+    "SEC",
+    "TICK",
+    "TOCK",
+    "USD", 
+    "CPU",
+    "IS",
+    "DOE",
+    "OP", 
+    "NY", 
+    "DOJ",
+    "IRA",
+    "NOT",
+    "ZERO", 
+    "II", 
+    "III",
+    "IV",
+    "NFA", 
+    "IN",
+    "BUY",
+    "BUT",
+    "JOBS",
+    "THEIR", 
+    "WAS", 
+    "GOOD",
+    "EU",
+    "DVD",
+    "EPS",
+    "IM", 
+    "RIF"
 }
 
 
@@ -63,23 +193,43 @@ def get_wsb_posts(
     limit: int = 100
 ) -> List[Dict[str, Any]]:
     """
-    Fetch posts from r/wallstreetbets via Reddit’s public API. If rate-limited or any request
-    exception occurs, logs a warning and returns an empty list.
+    Fetch top posts from r/wallstreetbets via Reddit's public JSON endpoint.
 
-    Args:
-        limit (int): Number of top posts to fetch (default is 100).
+    Parameters
+    ----------
+    limit : int, default 100
+        Maximum number of posts to request (passed as the `?limit=` query parameter).
 
-    Returns:
-        A list of post dictionaries (empty list if an error occurs).
+    Returns
+    -------
+    list[dict[str, Any]]
+        A list of post "children" objects from the Reddit listing JSON
+        (each item typically exposes `.get("data", {})` with post fields).
+        Returns an empty list if an HTTP or parsing error occurs.
+
+    Network / Robustness
+    --------------------
+    - Uses a desktop-style `User-Agent`.
+    - Wraps `requests.get(...).raise_for_status()` in try/except and logs on failure.
+    - Endpoint: ``https://www.reddit.com/r/wallstreetbets/.json?limit={limit}``
+
+    Notes
+    -----
+    This unauthenticated endpoint is rate-limited and can throttle or block
+    excessive requests. If your volume grows, consider authenticated API access
+    via PRAW or Reddit's official OAuth2.
     """
+
 
     url = f"https://www.reddit.com/r/wallstreetbets/.json?limit={limit}"
 
-    headers = {'User-Agent': 'Mozilla/5.0 (compatible; TickerScraper/1.0)'}
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (compatible; TickerScraper/1.0)'
+    }
 
     try:
 
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout = 10)
 
         response.raise_for_status()
 
@@ -98,15 +248,49 @@ def get_comments_for_post(
     post_id: str
 ) -> List[str]:
     """
-    Fetch all top-level and nested comments from a given post ID in r/wallstreetbets.
-    Employs a small retry loop with exponential backoff if rate-limited.
+    Fetch all (top-level + nested) comments for a given r/wallstreetbets post ID
+    and return the plain-text bodies.
 
-    Args:
-        post_id (str): The Reddit post ID.
+    Parameters
+    ----------
+    post_id : str
+        Reddit post ID (e.g., 'abc123').
 
-    Returns:
-        A list of comment texts. Returns an empty list on failure or if no comments are found.
+    Returns
+    -------
+    list[str]
+        A flat list of comment bodies. Returns [] if the request fails,
+        if the response does not include a comments listing, or if there
+        are simply no comments.
+
+    Network / Backoff
+    -----------------
+    - Endpoint: ``https://www.reddit.com/r/wallstreetbets/comments/{post_id}/.json``
+    - Retries up to `max_retries = 2` times with simple exponential backoff
+    (sleep 5s, then 10s) when a 429 (rate limit) is detected.
+    - Other HTTP exceptions are logged and cause an early return [].
+
+    Implementation details
+    ----------------------
+    The Reddit comments JSON is a list of two listings:
+    1) the post
+    2) the comments tree
+
+    We extract the second element, traverse `data.children` recursively, and collect
+    comment bodies where `kind == "t1"`.
+
+    Pseudocode of recursion:
+        - If node.kind != 't1' → skip
+        - Append `node.data.body` if present
+        - If `node.data.replies` is a dict, recurse into `replies.data.children`
+
+    Caveats
+    -------
+    - Deleted/removed comments may have empty or missing `body`.
+    - Deeply nested threads are handled, but the total comment count is subject
+    to Reddit's collapsed/continued threads behavior in the JSON view.
     """
+
 
     url = f"https://www.reddit.com/r/wallstreetbets/comments/{post_id}/.json"
 
@@ -200,14 +384,34 @@ def extract_tickers(
     text: str
 ) -> List[str]:
     """
-    Extract potential stock ticker symbols from a given text, ignoring items from NOTTICKERS.
+        Extract likely stock ticker tokens from free text using a simple regex heuristic.
 
-    Args:
-        text (str): Input text to search for ticker candidates.
+        Parameters
+        ----------
+        text : str
+            Arbitrary text (title, selftext, or comment body).
 
-    Returns:
-        A list of uppercase ticker symbols, e.g. ["AAPL", "GOOG"], not in NOTTICKERS.
-    """
+        Returns
+        -------
+        list[str]
+            Uppercase tokens that look like tickers (2–5 capital letters), filtered
+            to exclude common all-caps words/acronyms listed in `NOTTICKERS`.
+
+        Method
+        ------
+        - Regex pattern: ``r'\\b[A-Z]{2,5}\\b'``
+        * ``\\b`` are word boundaries to avoid partial matches.
+        * ``[A-Z]{2,5}`` restricts to 2–5 uppercase letters (e.g., 'AAPL', 'TSLA').
+        - Post-filter to drop false positives using the curated `NOTTICKERS` set.
+
+        Limitations
+        -----------
+        - Symbols with dots/hyphens (e.g., 'BRK.B', 'RDS-A', 'SHOP.TO') are **not** captured.
+        - Multi-word tickers or casings with lowercase letters are excluded.
+        - This is intentionally conservative; expand the regex and false-positive filters
+        if you target international symbols or more exotic tickers.
+        """
+
 
     pattern = r'\b[A-Z]{2,5}\b'
 
@@ -220,13 +424,25 @@ def extract_words(
     text: str
 ) -> List[str]:
     """
-    Extract lowercased words from text, filtering out a predefined set of stopwords.
+    Tokenise text into lowercased words and remove common stopwords.
 
-    Args:
-        text (str): The text to tokenize.
+    Parameters
+    ----------
+    text : str
+        Input text.
 
-    Returns:
-        A list of words excluding stopwords.
+    Returns
+    -------
+    list[str]
+        A list of lowercase tokens where each token matches ``\\b\\w+\\b`` and is
+        not contained in the `STOPWORDS` set.
+
+    Notes
+    -----
+    - This is a lightweight tokeniser for bag-of-words features (e.g., top-3
+    words per ticker). It intentionally avoids stemming/lemmatisation to keep
+    the vocabulary interpretable.
+    - Emojis, punctuation-only tokens, and URLs are effectively discarded by the regex.
     """
 
     words = re.findall(r'\b\w+\b', text.lower())
@@ -239,11 +455,34 @@ def format_sheet_as_table(
     sheet_name: str
 ) -> None:
     """
-    Formats an existing sheet in an Excel file as a table for improved readability.
+    Format an existing Excel worksheet as an OpenXML table for readability and filtering.
 
-    Args:
-        excel_file (str): Path to the Excel file.
-        sheet_name (str): Name of the sheet to format.
+    Parameters
+    ----------
+    excel_file : str
+        Path to the .xlsx file.
+    sheet_name : str
+        Worksheet name to format (must already exist).
+
+    Effects
+    -------
+    - Wraps the used range A1:({last_col}{last_row}) in an Excel table.
+    - Applies `TableStyleMedium9` with row striping.
+    - Saves the workbook in-place.
+
+    Returns
+    -------
+    None
+
+    Robustness
+    ----------
+    - If the sheet does not exist, logs a warning and returns.
+    - Any exception during workbook operations is caught and logged.
+
+    Notes
+    -----
+    OpenPyXL tables add native Excel features: filtering, banded rows, and
+    styling. This function is typically called after writing a DataFrame to a sheet.
     """
 
     try:
@@ -293,17 +532,82 @@ def format_sheet_as_table(
 
 def main() -> None:
     """
-    Main function that:
-      1. Scrapes the latest WallStreetBets posts.
-      2. Extracts ticker mentions, comment texts, and performs sentiment analysis.
-      3. Aggregates ticker mentions, average sentiment, top words, etc.
-      4. Saves results to Excel and applies conditional formatting and table styling.
+    End-to-end Reddit WSB sentiment and ticker-mention pipeline.
+
+    Steps
+    -----
+    1) **Fetch posts**:
+    - Pull up to 100 latest items from r/wallstreetbets (`get_wsb_posts`).
+
+    2) **Initialise sentiment**:
+    - Create an NLTK VADER `SentimentIntensityAnalyzer`.
+    - Extend its lexicon with domain-specific weights (`custom_words`).
+        VADER computes:
+        - 'compound' score ∈ [-1, 1], a normalised sum of valence signals:
+            Let s = Σ (token valences with heuristics).
+            Then, per VADER, the normalisation is:
+                compound = s / √(s² + α),  with α = 15,
+            producing an S-shaped squashing.
+
+    3) **Process each post**:
+    - Extract tickers from post title (`extract_tickers`).
+    - Compute post sentiment on the concatenated "title + selftext".
+    - Tokenise “words” (lowercased, minus STOPWORDS) via `extract_words`.
+    - Accumulate per-ticker:
+        * Mentions count
+        * Bag-of-words counts (Counter)
+        * A list of 'compound' sentiment scores
+
+    4) **Fetch and process comments**:
+    - For each post, get all nested comments via `get_comments_for_post`.
+    - For each comment containing tickers:
+        * Compute VADER compound sentiment on the comment text
+        * Update per-ticker mentions, word Counter, and sentiment list
+
+    5) **Aggregate statistics**:
+    - For each ticker with sentiment list {s_i}_{i=1..n}:
+        * Average sentiment (population mean):
+                μ = (1/n) Σ s_i
+        * Dispersion (population standard deviation):
+                σ = √( (1/n) Σ (s_i − μ)² )
+            (When n = 1, set σ = 0.)
+    - Top words: take the three most common tokens from the ticker Counter.
+
+    6) **Sort & export**:
+    - Sort tickers by total mentions (descending).
+    - Build `findings_df` with columns:
+        ['ticker', 'mentions', 'avg_sentiment', 'sentiment_std', 'top_words'].
+    - Write to the `Sentiment Findings` sheet in `config.FORECAST_FILE`
+        (append/replace mode).
+    - Apply conditional formatting on the 'avg_sentiment' column:
+        * red fill if < 0
+        * green fill if > 0
+    - Finally, call `format_sheet_as_table(...)` to convert the sheet to an Excel table.
+
+    Performance / Rate Limits
+    -------------------------
+    - Inserts `time.sleep(1)` per post to be friendlier to Reddit's rate limits.
+    - `get_comments_for_post` adds simple exponential backoff for 429s.
+
+    Caveats
+    -------
+    - Regex-based ticker extraction is heuristic and conservative; adapt it for
+    international or dotted tickers.
+    - VADER is lexicon- and rule-based; sarcasm, memes, and non-standard slang
+    can yield noisy scores. The custom lexicon here reduces (but does not
+    eliminate) such effects.
+
+    Outputs
+    -------
+    - Excel file at `config.FORECAST_FILE` containing a sheet named
+    'Sentiment Findings' with mentions and sentiment summaries by ticker.
     """
+
 
     logger.info("Scraping WallStreetBets posts...")
 
     posts = get_wsb_posts(
-        limit=100
+        limit = 100
     )
 
     if not posts:
@@ -315,20 +619,65 @@ def main() -> None:
     sia = SentimentIntensityAnalyzer()
 
     custom_words = {
-        "buy": 4.0, "sell": -4.0, "bull": 4, "bullish": 4, "bear": -4,
-        "bearish": -4, "moon": 4, "rocket": 4, "crash": -4, "yolo": 2,
-        "tendies": 2, "stonks": 2, "omg": 1, "fomo": 1, "fml": -1,
-        "up": 4, "down": -4, "long": 4, "short": -4, "overvalued": -3,
-        "undervalued": 3, "pump": 4, "dump": -4, "bagholder": -2,
-        "moonshot": 2, "highs": 2, "lows": -2, "underrated": 3,
-        "overrated": -3, "pumping": 2, "dumping": -3, "recession": -2,
-        "depression": -2, "crisis": -2, "soaring": 3, "soars": 2,
-        "soared": 2, "plunges": -3, "plunged": -2, "plunge": -3,
-        "surge": 4, "surges": 4, "surged": 2, "collapses": -4,
-        "collapsed": -2, "collapse": -4, "rally": 2, "rallies": 2,
-        "rallied": 2, "crashes": -4, "crashed": -2, "buy the dip": 4,
-        "put": -4, "call": 4, "buying": 4, "selling": -4, "cheap": 4,
-        "expensive": -4, "late": -4
+        "buy": 4.0, 
+        "sell": -4.0, 
+        "bull": 4, 
+        "bullish": 4, 
+        "bear": -4,
+        "bearish": -4, 
+        "moon": 4, 
+        "rocket": 4, 
+        "crash": -4, 
+        "yolo": 2,
+        "tendies": 2, 
+        "stonks": 2, 
+        "omg": 1, 
+        "fomo": 1,
+        "fml": -1,
+        "up": 4, 
+        "down": -4, 
+        "long": 4, 
+        "short": -4, 
+        "overvalued": -3,
+        "undervalued": 3, 
+        "pump": 4, 
+        "dump": -4,
+        "bagholder": -2,
+        "moonshot": 2, 
+        "highs": 2, 
+        "lows": -2, 
+        "underrated": 3,
+        "overrated": -3, 
+        "pumping": 2,
+        "dumping": -3,
+        "recession": -2,
+        "depression": -2, 
+        "crisis": -2, 
+        "soaring": 3,
+        "soars": 2,
+        "soared": 2, 
+        "plunges": -3,
+        "plunged": -2,
+        "plunge": -3,
+        "surge": 4, 
+        "surges": 4, 
+        "surged": 2, 
+        "collapses": -4,
+        "collapsed": -2, 
+        "collapse": -4, 
+        "rally": 2,
+        "rallies": 2,
+        "rallied": 2, 
+        "crashes": -4,
+        "crashed": -2,
+        "buy the dip": 4,
+        "put": -4, 
+        "call": 4, 
+        "buying": 4, 
+        "selling": -4,
+        "cheap": 4,
+        "expensive": -4, 
+        "late": -4
     }
 
     sia.lexicon.update(custom_words)
@@ -496,4 +845,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    
     main()
+
