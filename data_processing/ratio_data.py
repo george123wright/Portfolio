@@ -12,11 +12,66 @@ import config
 
 class RatioData:
     """
-    Loads weighted PB, PE and forward PE ratios by Industry, Sector and Region.
+    RatioData
+
+    Central loader/adapter for valuation ratios, analyst snapshots, prices/returns,
+    and group-level aggregates (industry, sector, region, market-cap buckets).
+    Exposes convenience helpers to align group signals (Sharpe/momentum), construct
+    factor inputs, and map tickers to benchmark indexes.
+
+    Loaded inputs
+    -------------
+    From `ind_data_mc_all_simple_mean.xlsx` (path1):
+    - Industry:                per-industry metrics
+    - Sector MC Group:         (Sector, MC_Group_Merged) → metrics
+    - Region-Industry:         (Region, Industry) → metrics
+    - Region-Sector:           (Region, Sector) → metrics
+    - MC Bounds:               market-cap bucket bounds
+    - Industry MC Group:       (Industry, MC_Group_Merged) → metrics
+
+    From `FORECAST_FILE` (path2):
+    - Analyst Data:            fundamentals/qualitative fields per ticker
+    - Analyst Target:          includes 'Current Price'
+    - Sector/Industry/Index Data, Factor ETFs: performance summaries
+
+    From `DATA_FILE` (path3):
+    - Close, Weekly Close, Historic Returns, Historic Weekly Returns
+    - Currency, Index Close, Sector Close, Industry Close, Factor Returns
+
+    Key attributes
+    --------------
+    today : datetime.date
+    path1, path2, path3 : pathlib.Path
+    year_ago, five_year_ago : pandas.Timestamp/str (from config)
+    industry, sector_mc, region_ind, region_sec, bounds, industry_mc : pd.DataFrame
+    analyst, sector_data, industry_data, index_data, factor_data : pd.DataFrame
+    close, weekly_close, daily_rets, weekly_rets, index_close, sector_close, industry_close : pd.DataFrame
+    quarterly_close, quarterly_rets : pd.DataFrame
+    last_price : pd.Series
+    mcap, shares_outstanding, tax_rate : pd.Series
+    currency : pd.Series
+    tickers : Sequence[str]
+
+    Notes
+    -----
+    - All frames are sorted ascending by index where relevant.
+    - Returns are simple returns unless noted; some methods log-sum weekly returns.
+    - No network calls happen here except where explicitly stated (e.g., FX via yfinance).
     """
+
     
-    def __init__(self):
-        
+    def __init__(
+        self
+    ):
+        """
+        Initialise container paths/dates from `config` and load all dependent datasets.
+
+        Side effects
+        ------------
+        - Stores `today`, workbook paths, and common lookback anchors.
+        - Calls `self._load()` to populate all public attributes.
+        """
+
         self.today = config.TODAY
        
         self.path1 = config.BASE_DIR / 'ind_data_mc_all_simple_mean.xlsx'  
@@ -32,8 +87,36 @@ class RatioData:
         self._load()
 
 
-    def _load(self):
-      
+    def _load(
+        self
+    ):
+        """
+        Read all required Excel sheets and derive secondary structures.
+
+        Loads
+        -----
+        - Group ratio tables and MC bounds from `path1` (industry/sector/region views).
+        - Analyst/target/aggregate performance tables from `path2`.
+        - Price/return panels (close, returns, index/sector/industry/factors) from `path3`.
+
+        Post-processing
+        ---------------
+        - Normalises key index levels (e.g., renames 'Industry_grouped' → 'Industry').
+        - Sets default tax rate to 22% if missing.
+        - Sorts time series ascending.
+        - Creates quarterly closes/returns.
+        - Caches 'Current Price' from 'Analyst Target' as `last_price`.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        - Any pandas/openpyxl IO errors on missing files/sheets.
+        - KeyError if required columns are missing in the provided workbooks.
+        """
+
         sheets1 = pd.read_excel(
             self.path1,
             sheet_name = [
@@ -81,6 +164,12 @@ class RatioData:
         self.index_data = sheets2['Index Data']
         
         self.factor_data = sheets2['Factor ETFs']
+        
+        self.mcap = self.analyst['marketCap']
+        
+        self.shares_outstanding = self.analyst['sharesOutstanding']
+        
+        self.tax_rate = self.analyst['Tax Rate'].fillna(0.22)
 
         sheets3 = pd.read_excel(
             self.path3,
@@ -120,6 +209,23 @@ class RatioData:
     def determine_region(
         country
     ):
+        """
+        Heuristic mapping from a free-form country string to a coarse region bucket.
+
+        Parameters
+        ----------
+        country : Any
+            Country name; case-insensitive. Non-str values map to 'Emerging Mkts (ex-Asia)'.
+
+        Returns
+        -------
+        str
+            One of {'United States', 'Europe', 'Canada/Australia', 'Asia', 'Emerging Mkts (ex-Asia)'}.
+
+        Notes
+        -----
+        - Uses substring checks on a lowercased string; conservative fallbacks on unknowns.
+        """
       
         if not isinstance(country, str):
            
@@ -152,6 +258,23 @@ class RatioData:
     def determine_region_fama(
         country
     ):
+        """
+        Map a country to Fama-French–style regional buckets.
+
+        Parameters
+        ----------
+        country : Any
+            Country name; if not a str, returns 'Emerging_Markets'.
+
+        Returns
+        -------
+        str
+            One of {'North_America', 'Europe', 'Asia_Pacific', 'Japan', 'Emerging_Markets'}.
+
+        Notes
+        -----
+        - Logic uses substring checks; ensure input casing is consistent if modifying.
+        """
       
         if not isinstance(country, str):
             
@@ -179,19 +302,59 @@ class RatioData:
             return 'Emerging_Markets'
         
     
-    def default(self, 
-                val, 
-                fallback
+    def default(
+        self, 
+        val, 
+        fallback
     ):
+        """
+        Return `val` if it is not NA; otherwise return `fallback`.
+
+        Parameters
+        ----------
+        val : Any
+        fallback : Any
+
+        Returns
+        -------
+        Any
+        """
         
-        return val if pd.notna(val) else fallback
+        if pd.notna(val):
+            
+            return val 
+        
+        else:
+            
+            return fallback
 
     
-    def mc_group(self, 
-                 bounds, 
-                 market_cap
+    def mc_group(
+        self, 
+        bounds, 
+        market_cap
     ):
-      
+        """
+        Assign a market-capitalisation bucket given bounds and a point estimate.
+
+        Parameters
+        ----------
+        bounds : pd.DataFrame
+            Indexed by 'MC_Group_Merged' with columns ['Low Bound', 'High Bound'].
+        market_cap : float | int | NA
+            Company market cap.
+
+        Returns
+        -------
+        str
+            Matching bucket label from `bounds.index`, or 'Mid-Cap' as a default.
+
+        Notes
+        -----
+        - Lower bound inclusive, upper bound exclusive:  lower ≤ cap < upper.
+        - Treats NA market cap as 'Mid-Cap'.
+        """
+
         if pd.isna(market_cap):
             
             return 'Mid-Cap'
@@ -211,10 +374,43 @@ class RatioData:
     def dicts(
         self
     ):
+        """
+        Build a nested dictionary of core metrics for each ticker across four group lenses:
+        'Sector-MC', 'Region-Industry', 'Region-Sector', and 'Industry-MC'.
+
+        Metrics (per `core_metrics`)
+        ----------------------------
+        ['eps1y_5', 'eps1y', 'rev1y_5', 'rev1y', 'PB', 'PE', 'PS', 'EVS',
+        'FPE', 'FPS', 'FEVS', 'ROE', 'ROA', 'ROIC', 'PE10y']
+
+        Fallbacks
+        ---------
+        If a metric is NA, may fall back to its forward analogue:
+        {'PS': 'FPS', 'PE': 'FPE', 'EVS': 'FEVS'}
+        Additional fallbacks within region/industry lens:
+        - Region-Industry → Industry
+        - Industry-MC → Industry
+
+        Returns
+        -------
+        dict[str, dict[str, dict[str, float]]]
+            results[metric][ticker][bucket] = value
+
+        Notes
+        -----
+        - Tickers sourced from `self.tickers`.
+        - Region derived from `determine_region(country)`.
+        - Market-cap bucket derived via `mc_group`.
+        - Missing keys handled via try/except; NA preserved where no fallback resolves.
+        """
       
-        core_metrics = ['eps1y_5', 'eps1y', 'rev1y_5', 'rev1y', 'PB', 'PE', 'PS', 'EVS', 'FPE', 'FPS', 'FEVS', 'ROE', 'ROA', 'ROIC']
+        core_metrics = ['eps1y_5', 'eps1y', 'rev1y_5', 'rev1y', 'PB', 'PE', 'PS', 'EVS', 'FPE', 'FPS', 'FEVS', 'ROE', 'ROA', 'ROIC', 'PE10y']
       
-        fallback_map = {'PS': 'FPS', 'PE': 'FPE', 'EVS': 'FEVS'}
+        fallback_map = {
+            'PS': 'FPS', 
+            'PE': 'FPE', 
+            'EVS': 'FEVS'
+        }
       
         buckets = ['Industry', 'Sector-MC', 'Region-Industry', 'Region-Sector']
 
@@ -233,7 +429,7 @@ class RatioData:
             
             mc_group = self.mc_group(
                 bounds = self.bounds, 
-                market_cap = self.analyst.loc[t, 'marketCap']
+                market_cap = self.mcap[t]
             )
             
             region = self.determine_region(
@@ -382,11 +578,23 @@ class RatioData:
     def index_returns(
         self
     ) -> tuple[pd.Series, pd.DataFrame, pd.DataFrame]:
+        """
+        Compute index-level annualised return (5y), weekly returns, and quarterly returns.
 
-        #major_indexes = ['^GSPC', '^NDX', '^FTSE', '^GDAXI', '^FCHI', '^AEX', '^IBEX', '^GSPTSE', '^HSI', '^SSMI']
+        Returns
+        -------
+        tuple[pd.Series, pd.DataFrame, pd.DataFrame]
+            (annualised_rets, index_weekly_rets, index_quarterly_rets)
+        where
+        - annualised_rets : Series of (last/first)^(1/5) - 1 over the available window.
+        - index_weekly_rets : weekly pct-change of index closes (W resample, last), dropna.
+        - index_quarterly_rets : quarterly pct-change (QE resample, last), dropna.
 
-        #index_close = yf.download(major_indexes, start=self.five_year_ago, end=self.today)['Close'].squeeze().dropna()
-        
+        Notes
+        -----
+        - Assumes `self.index_close` starts ≥ 5y; if shorter, the annualisation uses full span.
+        """
+
         index_close = self.index_close
         
         index_weekly_close = index_close.resample('W').last()
@@ -411,6 +619,34 @@ class RatioData:
         bl_market_returns: pd.Series = None,
         freq: str = "weekly"
     ) -> tuple[float, pd.Series]:
+        """
+        Select the appropriate benchmark index series and its summary return per exchange.
+
+        Parameters
+        ----------
+        exchange : str
+            Exchange name (e.g., 'NasdaqGS', 'LSE', 'NYSE', etc.).
+        index_rets : pd.Series
+            Per-index summary scalar (e.g., expected return or Sharpe) keyed by index symbol.
+        index_weekly_rets : pd.DataFrame
+            Weekly returns by index symbol.
+        index_quarter_rets : pd.DataFrame
+            Quarterly returns by index symbol.
+        bl_market_returns : pd.Series, optional
+            Overrides `index_rets` if provided and contains the symbol.
+        freq : {'weekly', 'quarterly'}
+            Frequency for the returned time series.
+
+        Returns
+        -------
+        tuple[float, pd.Series]
+            (selected_index_scalar, selected_index_returns)
+
+        Notes
+        -----
+        - Hard-coded routing for major exchanges to symbols: ^NDX, ^GSPC, ^FTSE, ^GDAXI, etc.
+        - Defaults to S&P 500 (^GSPC) if exchange not recognised.
+        """
         
         def pick_ret(
             idx_name
@@ -620,7 +856,21 @@ class RatioData:
                 return index_ret, index_weekly_rets['^GSPC']
         
         
-    def load_index_pred(self) -> pd.DataFrame:
+    def load_index_pred(
+        self
+    ) -> pd.DataFrame:
+        """
+        Load stock market forecast table from `DATA_FILE` ('Stock_Market' sheet), numericise, and average duplicate rows.
+
+        Returns
+        -------
+        pd.DataFrame
+            Table with numeric columns (commas removed), mean-aggregated over duplicate indices.
+
+        Notes
+        -----
+        - Treats '0' as NA via `na_values=0` in the Excel read, then coerces numerics.
+        """
 
         data = pd.read_excel(
             self.path3,
@@ -637,7 +887,21 @@ class RatioData:
         return data.groupby(level=0).mean()
     
     
-    def crp(self):
+    def crp(
+        self
+    ):
+        """
+        Load country risk premium (CRP) table from 'crp.xlsx'.
+
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with index 'Country' and a 'CRP' column.
+
+        Raises
+        ------
+            - FileNotFoundError or parser errors if sheet/path is missing.
+        """
 
         crp_file = config.BASE_DIR / 'crp.xlsx'
       
@@ -655,17 +919,28 @@ class RatioData:
         country_to_pair: dict[str, str],
     ) -> pd.DataFrame:
         """
-        Download daily FX rates for all GBP-to-foreign currency pairs and compute annual returns.
+        Download GBP-cross FX weekly closes for given pairs and compute period returns.
 
-        Args:
-            country_to_pair: Mapping from country name to currency-pair code (e.g. 'GBPUSD').
-            start_date: ISO date string 'YYYY-MM-DD' for the start of the history.
-            end_date: ISO date string 'YYYY-MM-DD' for the end of the history.
+        Parameters
+        ----------
+        country_to_pair : dict[str, str]
+            Map of country → currency pair code without '=X' suffix (e.g., {'United States': 'GBPUSD'}).
 
-        Returns:
-            DataFrame indexed by calendar year (int), columns are currency codes (e.g. 'USD'),
-            values are annual total returns (float).
+        Returns
+        -------
+        tuple[pd.Series, pd.DataFrame]
+            (ann_ret, rets)
+        where
+        - ann_ret : Series of total return over [YEAR_AGO, TODAY] for each pair
+                    computed as (1 + weekly_ret).prod() - 1.
+        - rets    : DataFrame of weekly pct-change returns.
+
+        Notes
+        -----
+        - Pulls `start=self.year_ago`, `end=self.today`, `interval='1wk'` from yfinance with auto-adjust.
+        - Pairs are passed as '{PAIR}=X' tickers (e.g., 'GBPUSD=X').
         """
+
         
         yf_tickers = [f"{pair}=X" for pair in country_to_pair.values()]
    
@@ -689,8 +964,15 @@ class RatioData:
         self
     ) -> pd.Series:
         """
-        Aligns ticker with Sector Sharpe Ratios.
+        Map each ticker to its sector's expected Sharpe ratio.
+
+        Returns
+        -------
+        pd.Series
+            Index=ticker, value=sector expected Sharpe (from 'Sector Data' → 'Exp Sharpe Ratio'),
+            defaulting to 0 when sector not found.
         """
+
                 
         sharpe = {}
         
@@ -714,8 +996,15 @@ class RatioData:
         self
     ) -> pd.Series:
         """
-        Aligns ticker with Sector Sharpe Ratios.
+        Map each ticker to its industry's expected Sharpe ratio.
+
+        Returns
+        -------
+        pd.Series
+            Index=ticker, value=industry expected Sharpe (from 'Industry Data' → 'Exp Sharpe Ratio'),
+            defaulting to 0 when industry not found.
         """
+
                 
         sharpe = {}
         
@@ -738,9 +1027,27 @@ class RatioData:
         self
     ) -> pd.Series:
         """
-        Aligns ticker with Index Sharpe Ratios.
+        Compute an exchange-aligned expected Sharpe ratio per ticker using index returns.
+
+        Procedure
+        ---------
+        - Take index weekly returns (5y), focus on last year.
+        - Compute exponentially-weighted expected return/std with halflife = 0.1 * N,
+        then annualise to an expected Sharpe via:  (E[R] − 0.0435) / E[σ].
+        - Map each ticker's `fullExchangeName` to an index via `match_index_rets`
+        and pick the corresponding scalar.
+
+        Returns
+        -------
+        pd.Series
+            Index=ticker, value=exchange-matched expected Sharpe.
+
+        Notes
+        -----
+        - Uses a hard-coded 4.35% annual risk-free in the Sharpe (consistent with your pipeline).
+        - Prints intermediate Series for debugging.
         """
-        
+
         sharpe = {}
         
         index_rets = self.index_returns()[1]
@@ -787,8 +1094,19 @@ class RatioData:
         period: int = 52
     ) -> pd.Series:
         """
-        Compute the last-period pct-change (momentum) for each column in price_df
-        using `period` weeks, then return its cross-sectional z-score.
+        Compute cross-sectional z-score of group momentum.
+
+        Parameters
+        ----------
+        price_df : pd.DataFrame
+            Price level time series (columns = groups: sectors/industries/indices).
+        period : int, default 52
+            Lookback periods (weeks) for momentum as pct-change.
+
+        Returns
+        -------
+        pd.Series
+            z = (mom − mean(mom)) / std(mom), for the last available row.
         """
 
         mom = price_df.pct_change(periods=period).iloc[-1]   
@@ -804,9 +1122,24 @@ class RatioData:
         period: int = 52
     ) -> pd.Series:
         """
-        Map each ticker to the z-score of its sector’s momentum, 
-        defaulting missing sectors to the *mean* sector momentum.
+        Map each ticker to the z-scored momentum of its sector.
+
+        Parameters
+        ----------
+        price_df : pd.DataFrame
+            Sector price levels indexed by date.
+        tickers : Sequence[str]
+        ticker_to_sector : pd.Series
+            Map ticker → sector string present in `price_df.columns`.
+        period : int, default 52
+            Lookback in weeks.
+
+        Returns
+        -------
+        pd.Series
+            Ticker-aligned sector momentum z-scores. Missing sectors get the mean z.
         """
+
 
         z = self._group_momentum_z(
             price_df = price_df, 
@@ -833,8 +1166,22 @@ class RatioData:
         period: int = 52
     ) -> pd.Series:
         """
-        Map each ticker to the z-score of its industry’s momentum.
+        Map each ticker to the z-scored momentum of its industry.
+
+        Parameters
+        ----------
+        price_df : pd.DataFrame
+            Industry price levels indexed by date.
+        tickers : pd.Index
+        ticker_to_industry : pd.Series
+        period : int, default 52
+
+        Returns
+        -------
+        pd.Series
+            Ticker-aligned industry momentum z-scores. Missing industries get the mean z.
         """
+
         
         z = self._group_momentum_z(
             price_df = price_df, 
@@ -861,10 +1208,23 @@ class RatioData:
         period: int = 52
     ) -> pd.Series:
         """
-        Map each ticker to the z-score of its benchmark index’s momentum.
-        `index_price_df` has one column per index (weekly close).
-        `ticker_to_index` maps ticker → index symbol.
+        Map each ticker to the z-scored momentum of its benchmark index.
+
+        Parameters
+        ----------
+        index_price_df : pd.DataFrame
+            Index price levels (weekly close), columns=index symbols.
+        tickers : pd.Index
+        ticker_to_index : pd.Series
+            Ticker → index symbol present in `index_price_df.columns`.
+        period : int, default 52
+
+        Returns
+        -------
+        pd.Series
+            Ticker-aligned index momentum z-scores. Missing indexes get the mean z.
         """
+
         
         z = self._group_momentum_z(
             price_df = index_price_df, 
@@ -888,8 +1248,20 @@ class RatioData:
         exchange_name: str
     ) -> str:
         """
-        Given an exchange name, returns the primary benchmark index ticker symbol.
-        Defaults to S&P 500 if the exchange isn’t in the map.
+        Return the primary benchmark index symbol for a given exchange.
+
+        Parameters
+        ----------
+        exchange_name : str
+
+        Returns
+        -------
+        str
+            Index symbol (e.g., '^GSPC'). Falls back to '^GSPC' if not in `ExchangeMapping`.
+
+        Notes
+        -----
+        - Uses `ExchangeMapping.get(exchange_name.upper(), '^GSPC')`.
         """
 
         return ExchangeMapping.get(exchange_name.upper(), '^GSPC')
@@ -899,8 +1271,14 @@ class RatioData:
         self
     ) -> pd.Series:
         """
-        Maps each ticker to its primary benchmark index based on the exchange.
+        Build a per-ticker Series of benchmark index symbols using 'fullExchangeName'.
+
+        Returns
+        -------
+        pd.Series
+            Index=ticker, value=index symbol (e.g., '^GSPC', '^NDX', '^FTSE', ...).
         """
+
         
         ticker_to_index_series = self.analyst['fullExchangeName'].map(self.pick_index)
         
@@ -911,6 +1289,30 @@ class RatioData:
         self, 
         tickers = None
     ):
+        """
+        Assemble a per-ticker daily factor/design frame for regression/attribution.
+
+        Parameters
+        ----------
+        tickers : list[str] | None
+            Universe; defaults to `config.tickers` when None.
+
+        Returns
+        -------
+        dict[str, pd.DataFrame]
+            For each ticker t, a DataFrame indexed by date with columns:
+            - factor ETF returns (from `self.factor_rets`)
+            - 'Industry Return'  (daily pct-change of ticker's industry, if available)
+            - 'Sector Return'    (daily pct-change of ticker's sector, if available)
+            - 'Index Excess Return' (daily index return − RF_PER_DAY)
+            - 'Ticker Excess Return' (ticker daily return − RF_PER_DAY)
+
+        Notes
+        -----
+        - If the industry/sector/index series is missing, a NaN-aligned Series is used.
+        - Uses `ticker_to_index_series()` to map the market series.
+        """
+
         if tickers is None:
             
             tickers = list(config.tickers)
@@ -978,14 +1380,36 @@ class RatioData:
         self, 
         tickers = None
     ):
+        """
+        Construct a per-ticker table of expected returns from industry/sector/index and factor ETFs.
+
+        Parameters
+        ----------
+        tickers : list[str] | None
+            Universe; defaults to `config.tickers`.
+
+        Returns
+        -------
+        pd.DataFrame
+            Columns: ['Industry','Sector','Index','Momentum','Quality','Size','Volatility','Value'],
+            indexed by ticker.
+
+        Sources
+        -------
+        - Industry/Sector/Index: 'Exp Returns' from respective aggregate tables.
+        - Factor exposures: 'Exp Returns' of ETFs MTUM, QUAL, SIZE, USMV, VLUE.
+        """
         
         if tickers is None:
         
             tickers = list(config.tickers)
 
         idx_exp = self.index_data['Exp Returns']      
+       
         ind_exp = self.industry_data['Exp Returns']  
+       
         sec_exp = self.sector_data['Exp Returns']     
+       
         fac_exp = self.factor_data['Exp Returns']    
 
         idx_map = self.ticker_to_index_series()
@@ -1013,10 +1437,98 @@ class RatioData:
             })
 
         return pd.DataFrame(rows).set_index('Ticker')
-                
-                
-                
+    
+    
+    def factor_weekly_rets(
+        self,
+        resample_str = "W-FRI",
+        after_date = None,
+    ) -> pd.DataFrame:
+        """
+        Compute weekly factor ETF returns (log-summed) with optional start date.
+
+        Parameters
+        ----------
+        resample_str : str, default "W-FRI"
+            Pandas resample rule for weekly bars.
+        after_date : str | pd.Timestamp | None
+            If provided, restricts the sample to dates ≥ after_date.
+
+        Returns
+        -------
+        pd.DataFrame
+            Weekly factor returns for the set ['MTUM','QUAL','SIZE','USMV','VLUE'] present in data,
+            computed as log(1+r) summed by week and dropped if all-NA.
+        """
+        
+        FACTORS = ['MTUM', 'QUAL', 'SIZE', 'USMV', 'VLUE']
+        
+        factor_daily = self.factor_rets
+        
+        if after_date is not None:
             
+            factor_daily = factor_daily.loc[after_date:]
+        
+        fac_w = (np.log1p(factor_daily)).resample(resample_str).sum().rename(columns=lambda c: str(c))
+       
+        fac_w = fac_w[[c for c in FACTORS if c in fac_w.columns]].dropna(how = "all")
+        
+        return fac_w
+                
+    
+    def factor_index_ind_sec_weekly_rets(
+        self,
+        merge: bool = True
+    ) -> pd.DataFrame:
+        """
+        Return weekly returns for factor ETFs, major indexes, industries, and sectors.
+
+        Parameters
+        ----------
+        merge : bool, default True
+            If True, returns a single DataFrame with all groups concatenated.
+            If False, returns a 4-tuple.
+
+        Returns
+        -------
+        pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]
+            If merge:
+                columns = [indexes | factors | industries | sectors] weekly returns.
+            Else:
+                (factor_weekly, index_weekly, industry_weekly, sector_weekly),
+                each resampled to 'W-SUN' and pct-change (dropna).
+
+        Notes
+        -----
+        - Index weekly returns come from `index_returns()[1]`.
+        - Factor weekly returns are built via `factor_weekly_rets(resample_str="W-SUN", after_date=five_year_ago)`.
+        - Industry/Sector returns are resampled closes (last of week) → pct_change.
+        """
+                
+        index_weekly = self.index_returns()[1]
+        
+        factor_weekly = self.factor_weekly_rets(
+            resample_str = "W-SUN",
+            after_date = self.five_year_ago
+        )
+        
+        ind_weekly_rets = self.industry_close.resample("W-SUN").last().pct_change().dropna()
+        
+        sec_weekly_rets = self.sector_close.resample("W-SUN").last().pct_change().dropna()
+        
+        if merge:
+        
+            df = pd.concat(
+                [index_weekly, factor_weekly, ind_weekly_rets, sec_weekly_rets],
+                axis = 1
+            ).dropna(how = "all")
+            
+            return df
+        
+        else:
+            
+            return factor_weekly, index_weekly, ind_weekly_rets, sec_weekly_rets
+                    
             
             
             
