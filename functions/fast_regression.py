@@ -1,5 +1,71 @@
 """
-Utility for constrained or unconstrained elastic‑net regression with CVXPY and grid‑search hyperparameter tuning.
+
+Huber–Elastic-Net regression with time-series cross-validation and optional
+monotonicity constraints on slopes.
+
+Overview
+--------
+
+Let X ∈ ℝ^{n×p} be the design matrix and y ∈ ℝ^n a target series. For a given
+target the method solves, on *standardised and orthogonalised* features, a
+Huber-loss + elastic-net objective with optional non-negativity constraints
+on the slope coefficients:
+
+    β̂ = argmin_{β ∈ ℝ^{p+1}}  ∑_{i=1}^n ρ_M( (x̄_i^⊤ β - ȳ_i) ) + λ_1 ‖β_{1:}‖_1 + λ_2 ‖β_{1:}‖_2^2 + ε ‖β_{1:}‖_2^2
+
+where:
+
+- β = (β_0, β_1, …, β_p) contains an intercept and p slopes; penalties exclude the intercept (only β_{1:} are penalised).
+
+- ρ_M(·) is the Huber loss with threshold M>0:
+     
+      ρ_M(r) = 0.5 r^2                            if |r| ≤ M
+             = M(|r| - 0.5M)                      if |r| > M .
+
+- (x̄_i, ȳ_i) are the standardised / transformed observations (see below).
+
+- (λ_1, λ_2) are the L1/L2 elastic-net weights; a small ε>0 ridge term ensures strong convexity.
+
+- Optional constraints enforce β_{1:} ≥ 0 (monotone non-decreasing mapping).
+
+Standardisation and Orthogonalisation
+-------------------------------------
+
+Before fitting, features are standardised columnwise using training means μ_X and
+standard deviations σ_X. 
+
+The second feature is orthogonalised to the first to reduce collinearity: with 
+
+    z_1 = (x_1 - μ_1)/σ_1, z_2^raw = (x_2 - μ_2)/σ_2,
+
+    c_{21} = ⟨z_2^raw, z_1⟩ / ⟨z_1, z_1⟩ ,    z_2 = z_2^raw - c_{21} z_1.
+
+Targets are standardised as ȳ = (y - μ_y)/σ_y. 
+
+Coefficients are mapped back to the original scale after solving so outputs are always
+on the raw units.
+
+Joint Hyper-parameter Selection
+-------------------------------
+
+For a set of targets {y^k}, a single triple (M, λ, α) is selected jointly by
+time-series K-fold CV (sklearn TimeSeriesSplit), where λ_1 = α λ and λ_2 = (1-α) λ.
+
+The selected triple minimises the mean CV error across the targets, where the CV
+error per fold is the average Huber loss on the test part.
+
+Implementation Notes
+--------------------
+
+- The solver is built with CVXPY as a parameterised problem; (X, y, λ_1, λ_2, M)
+  are Parameters and β are Variables.
+
+- Fold-level parallelism is performed with `joblib.Parallel`; parameter batches
+  within a fold may be evaluated with threads.
+
+- EPS ⟂ Revenue orthogonalisation is implemented exactly as described above.
+
+- All returned coefficients include the intercept as the first element.
 """
 
 
@@ -21,19 +87,55 @@ def _get_solver(
     constrained: bool
 ):
     """
-    Build & cache a CVXPY Problem with Parameters for given (n, p_eff) and constraint flag.
-    Returns: (Xd_param, y_param, lam1_param, lam2_param, M_param, beta, problem)
+    Build and cache a parameterised CVXPY problem for a Huber–elastic-net model.
+
+    Objective
+    ---------
+   
+    For standardised design X̃ ∈ ℝ^{n×p_eff} (with an explicit intercept column added
+    internally) and standardised response ỹ ∈ ℝ^n, the problem is:
+
+        minimise_{β ∈ ℝ^{p_eff+1}}  ∑_{i=1}^n ρ_M( (X̃β - ỹ)_i )
+                                     + λ_1 ‖β_{1:}‖_1 + λ_2 ‖β_{1:}‖_2^2 + ε ‖β_{1:}‖_2^2,
+
+    with ε = 1e-8. The Huber loss is:
+
+        ρ_M(r) = 0.5 r^2                          if |r| ≤ M,
+                 M(|r| - 0.5 M)                   if |r| > M.
+
+    Constraints
+    -----------
+    If `constrained` is True, the slope vector obeys β_{1:} ≥ 0. The intercept is
+    unconstrained and is not penalised.
+
+    Parameters
+    ----------
+    
+    n : int
+        Number of training observations in the fold.
+   
+    p_eff : int
+        Number of *kept* features after standardisation / dropping near-constant columns.
+   
+    constrained : bool
+        Whether to impose β_{1:} ≥ 0.
+
+    Returns
+    -------
+    (Xd_param, y_param, lam1_param, lam2_param, M_param, beta, problem)
+        CVXPY Parameters for the design (with intercept column), response, penalties,
+        Huber threshold, the coefficient Variable β, and the compiled Problem.
     """
 
     Xd_param = cp.Parameter((n, p_eff + 1))
 
     y_param = cp.Parameter(n)
 
-    lam1_param = cp.Parameter(nonneg=True)   
+    lam1_param = cp.Parameter(nonneg = True)   
 
-    lam2_param = cp.Parameter(nonneg=True)   
+    lam2_param = cp.Parameter(nonneg = True)   
 
-    M_param = cp.Parameter(nonneg=True)    
+    M_param = cp.Parameter(nonneg = True)    
 
     beta = cp.Variable(p_eff + 1)           
 
@@ -44,9 +146,9 @@ def _get_solver(
     ridge_eps = 1e-8
 
     penalty = (
-        lam1_param * cp.norm1(beta)
-        + lam2_param * cp.sum_squares(beta)
-        + ridge_eps   * cp.sum_squares(beta)
+        lam1_param * cp.norm1(beta[1: ]) +
+        lam2_param * cp.sum_squares(beta[1: ]) +
+        ridge_eps * cp.sum_squares(beta[1: ])
     )
 
     if constrained:
@@ -64,11 +166,63 @@ def _get_solver(
 
 class HuberENetCV:
     """
-    Joint hyper-parameter search across multiple targets (per ticker):
-      • TimeSeriesSplit (no leakage)
-      • Fold-parallel (processes), parameter-parallel inside fold (threads)
-      • Solver caching by (n, p_eff, constrained) – module-level LRU
-      • Train-only standardisation & EPS ⟂ Revenue orthogonalisation
+    Huber–elastic-net regression with joint hyper-parameter selection across targets.
+
+    For a collection of targets {y^k}, a single hyper-parameter triple (M, λ, α)
+    is selected that minimises the mean time-series CV error across k. Within a
+    fold, each target is fitted on standardised and orthogonalised features, with
+    optional non-negativity constraints on slopes.
+
+    Hyper-parameters
+    ----------------
+    
+    - M ∈ Ms : Huber threshold.
+    
+    - λ ∈ lambdas : overall penalty weight; decomposed as λ_1 = α λ (L1) and
+    
+      λ_2 = (1 - α) λ (L2).
+    
+    - α ∈ alphas : elastic-net mixing parameter.
+
+    Cross-validation
+    ----------------
+  
+    A `TimeSeriesSplit(n_splits)` is used to avoid look-ahead bias. For each
+    candidate (M, λ, α) and for each fold, the model is trained on the training
+    segment and scored on the test segment using the Huber loss:
+
+        CVError(M, λ, α) = (1/|K|) ∑_{k∈K} (1/n_te) ∑_{i∈te} ρ_M( y_i^k - ŷ_i^k(M,λ,α) ).
+
+    The best triple minimises the average CV error across folds and targets.
+
+    Scaling and Orthogonalisation
+    -----------------------------
+    Let x_j denote feature j and y the target. The training transform computes
+    μ_xj, σ_xj and μ_y, σ_y. The first two standardised features z_1, z_2 are
+    defined by:
+   
+        z_1 = (x_1 - μ_1)/σ_1,
+   
+        z_2 = (x_2 - μ_2)/σ_2 - c_{21} z_1,
+   
+    where 
+    
+        c_{21} = ⟨(x_2 - μ_2)/σ_2, (x_1 - μ_1)/σ_1⟩ / ⟨(x_1 - μ_1)/σ_1, (x_1 - μ_1)/σ_1⟩.
+
+    Coefficient Mapping Back
+    ------------------------
+    If b_std are the coefficients in the standardised space (intercept first), the
+    original-scale coefficients b are recovered componentwise with the same
+    orthogonalisation inverse and:
+
+        b_j = (σ_y / σ_{xj}) * b_std,j,    for j ≥ 1,
+  
+        b_0 = μ_y + σ_y b_std,0 - ⟨b_{1:}, μ_X⟩.
+
+    Parallelism
+    -----------
+    Fold-level evaluation is parallelised with processes. Within a fold, the
+    parameter grid is optionally partitioned into thread-level batches.
     """
 
 
@@ -83,7 +237,7 @@ class HuberENetCV:
         solver_order: Tuple = (cp.OSQP, cp.ECOS, cp.SCS),
         n_jobs: int = -1,
         param_threads: int = 1,
-    ):
+    ):   
         
         self.alphas = np.array(list(alphas), dtype = float)
        
@@ -116,21 +270,44 @@ class HuberENetCV:
         constrained_map: Dict[str, bool],
         *,
         cv_splits: Optional[List[Tuple[np.ndarray, np.ndarray]]] = None,
-        scorer=None,
+        scorer = None,
     ) -> Tuple[Dict[str, np.ndarray], float, float, float]:
         """
-        Fit all targets with a single set of hyper-parameters selected jointly.
+        Fit all targets with a single (M, λ, α) selected jointly by time-series CV.
 
-        Returns:
-            betas_by_key : dict[target_key] -> beta (intercept first, original scale)
-            best_lambda, best_alpha, best_M
-        """
+        Procedure
+        ---------
+        
+        1) For each candidate (M, λ, α) on `self.grid`, compute the per-fold CV error
+        for each target using Huber loss on the test segment; average over targets.
+        
+        2) Select the triple minimising the mean error; form a local refinement grid
+        around the best triple (geometric for λ, linear for α, bounded for M).
+        
+        3) Repeat step (1) on the refine grid; choose the best triple.
+        
+        4) Refit each target on the full sample with the selected triple, returning
+        coefficients on the original scale.
+
+        Returns
+        -------
+      
+        betas_by_key : Dict[str, np.ndarray]
+            Mapping from target key to coefficient vector b ∈ ℝ^{p+1} (intercept first).
+      
+        best_lambda : float
+      
+        best_alpha : float
+      
+        best_M : float
+            Selected hyper-parameters.
+        """     
         
         X = np.ascontiguousarray(X, dtype = float)
       
         keys = list(y_dict.keys())
       
-        Y = {k: np.ascontiguousarray(v, dtype=float) for k, v in y_dict.items()}
+        Y = {k: np.ascontiguousarray(v, dtype = float) for k, v in y_dict.items()}
 
         if cv_splits is None:
 
@@ -219,9 +396,25 @@ class HuberENetCV:
         grid: List[Tuple[float, float, float]],
     ) -> Tuple[np.ndarray, int]:
         """
-        Pure helper: compute mean CV error vector for a provided grid (no self.grid mutation).
+        Compute mean cross-validated errors for a given hyper-parameter grid.
+
+        For each fold f and each (M, λ, α) in `grid`, a problem is solved on the
+        training segment and scored on the test segment via the Huber loss,
+
+            score_f(M,λ,α) = (1/|K|) ∑_{k∈K} (1/n_te) ∑_{i∈te} ρ_M( y_i^k - ŷ_i^k ).
+
+        The method returns the vector of mean scores across folds, aligned to `grid`.
+
+        Returns
+        -------
+    
+        mean_err : np.ndarray, shape (len(grid),)
+            Average CV error per triple.
+    
+        int
+            The grid length (for convenience).
         """
-       
+        
         errs_mat = Parallel(n_jobs = self.n_jobs, prefer = "processes")(
             delayed(self._eval_one_fold)(
                 X_full = X,
@@ -254,11 +447,20 @@ class HuberENetCV:
         solvers: Tuple = (cp.OSQP, cp.ECOS, cp.SCS),
     ) -> np.ndarray:
         """
-        Final fit (no CV): Elastic-Net + Huber
-          • train-only standardisation
-          • drop near-constant features
-          • EPS ⟂ Revenue orthogonalisation
-        Returns beta on original scale (intercept first).
+        Final single fit (no CV) with Huber–elastic-net on transformed features.
+
+        The procedure applies:
+    
+        (i) training-only standardisation of X and y,
+    
+        (ii) orthogonalisation of the second feature to the first, and
+    
+        (iii) convex optimisation with the objective
+
+            ∑_{i=1}^n ρ_M( (X̃β - ỹ)_i ) + λ_1 ‖β_{1:}‖_1 + λ_2 ‖β_{1:}‖_2^2 + ε ‖β_{1:}‖_2^2,
+
+        with optional constraints β_{1:} ≥ 0. The returned coefficients are mapped
+        back to the original feature scale (intercept first).
         """
         
         X = np.ascontiguousarray(X, dtype = float)
@@ -324,11 +526,14 @@ class HuberENetCV:
         grid: Optional[List[Tuple[float, float, float]]] = None,   
     ) -> np.ndarray:
         """
-        Evaluate all params for one fold. Returns errors aligned with 'grid'.
-        Uses:
-          - process parallelism at the fold level (caller)
-          - threading inside this method for param batches (self.param_threads)
+        Evaluate a hyper-parameter subset on a single time-series fold.
+
+        Let tr and te denote the train/test indices for the fold. For each (M, λ, α)
+        in `grid`, the solver is parameterised with (X̃_tr, ỹ_tr, λ_1=αλ, λ_2=(1-α)λ, M),
+        solved, and the predictions on te are scored with the Huber loss. The errors
+        are averaged across targets and returned aligned to `grid`.
         """
+
       
         tr, te = cv_splits[fold_idx]
       
@@ -388,6 +593,7 @@ class HuberENetCV:
         else:
             
             local_grid = list(grid)
+            
 
         def _errs_for_params(
             params_subset: List[Tuple[float, float, float]]
@@ -508,10 +714,27 @@ class HuberENetCV:
         tol: float = 1e-12
     ) -> Dict:
         """
-        Train-only transforms:
-          • standardise each column
-          • drop near-constant columns (std <= tol)
-          • orthogonalise column 2 to column 1 (EPS ⟂ Revenue) when both exist
+        Fit the feature transformation on the training segment.
+
+        Steps
+        -----
+     
+        1) Columnwise means μ_x and standard deviations σ_x are computed.
+     
+        2) Columns with σ_x ≤ tol are dropped (only the first is kept if all are dropped).
+     
+        3) Standardise kept columns: Z = (X - μ_x)/σ_x.
+     
+        4) Orthogonalise the second kept column to the first:
+     
+            c_{21} = ⟨Z[:,1], Z[:,0]⟩ / ⟨Z[:,0], Z[:,0]⟩,
+     
+            Z[:,1] ← Z[:,1] - c_{21} Z[:,0].
+
+        Returns
+        -------
+     
+        dict with keys {"mean_x", "std_x", "keep", "c_21"}.
         """
        
         X_tr = np.ascontiguousarray(X_tr, dtype = float)
@@ -559,7 +782,10 @@ class HuberENetCV:
         xf: Dict
     ) -> np.ndarray:
         """
-        Apply fitted transform to any X (standardise kept cols and EPS ⟂ Revenue).
+        Apply a previously fitted feature transform.
+
+        Standardises kept columns using xf["mean_x"], xf["std_x"], and applies the
+        stored orthogonalisation coefficient xf["c_21"] to the second kept column.
         """
       
         X = np.ascontiguousarray(X, dtype=float)
@@ -581,14 +807,32 @@ class HuberENetCV:
         p_full: int
     ) -> np.ndarray:
         """
-        Map beta on standardised & orthogonalised features back to original feature space.
+        Map coefficients from the standardised, orthogonalised space back to original units.
+
+        If b_std = (b0_std, b1_std, b2_std, …) are the coefficients on [1, Z1, Z2, …], then
+        with the orthogonalisation adjustment for the second feature,
+
+            b_1 = (σ_y/σ_{x1}) * (b1_std - c_{21} b2_std),
+         
+            b_2 = (σ_y/σ_{x2}) * b2_std,
+         
+            b_j = (σ_y/σ_{xj}) * b_{j,std},  j ≥ 3,
+
+        and intercept
+
+            b_0 = μ_y + σ_y b0_std − ⟨b_{1:}, μ_X⟩.
+
+        Returns
+        -------
+        np.ndarray
+            Coefficient vector (intercept first) on the original feature scale.
         """
-    
+        
         beta0_std = b_std[0]
     
         rest_std = b_std[1:]
     
-        full_rest = np.zeros(p_full, dtype=float)
+        full_rest = np.zeros(p_full, dtype = float)
 
         kept_idx = np.where(xf["keep"])[0]
      
@@ -627,14 +871,22 @@ class HuberENetCV:
         y_pred: np.ndarray,
         M: float
     ) -> float:
-    
+        """
+        Compute the mean Huber loss with threshold M:
+
+            ρ_M(r) = 0.5 r^2                          if |r| ≤ M,
+                    M(|r| - 0.5 M)                   if |r| > M,
+
+        where r = y_true − y_pred. Returns the average over samples.
+        """    
+        
         r = y_true - y_pred
     
         a = np.abs(r)
     
         quad = 0.5 * np.minimum(a, M) ** 2
     
-        lin  = M * (a - np.minimum(a, M))
+        lin = M * (a - np.minimum(a, M))
     
         return float(np.mean(quad + lin))
 
@@ -650,8 +902,16 @@ class HuberENetCV:
         solvers: Tuple,
     ) -> np.ndarray:
         """
-        Solve the standardised problem; return beta on standardised scale.
-        Uses the module-level LRU-cached solver factory.
+        Solve the standardised Huber–elastic-net problem and return β on the standardised scale.
+
+        The design matrix is X̃ (with an intercept column appended). Parameters are set as:
+       
+        - lam1 = α λ, lam2 = (1−α) λ,
+       
+        - M = huber_M,
+       
+        and the CVXPY problem is solved with the specified solver order, warm-started.
+        The return value is β on [1, Z1, Z2, …].
         """
        
         Xs = np.ascontiguousarray(Xs, dtype = float)
@@ -706,7 +966,9 @@ def constrained_regression(
     solvers: Tuple = (cp.OSQP, cp.ECOS, cp.SCS),
 ) -> np.ndarray:
     """
-    Elastic-Net + Huber with β[1:] ≥ 0 (single fit, no CV).
+    Convenience wrapper for a single constrained Huber–elastic-net fit:
+    solves with β_{1:} ≥ 0 on standardised / orthogonalised features and
+    returns coefficients on the original scale (intercept first).
     """
     
     return HuberENetCV.fit_single(
@@ -732,7 +994,9 @@ def ordinary_regression(
     solvers: Tuple = (cp.OSQP, cp.ECOS, cp.SCS),
 ) -> np.ndarray:
     """
-    Elastic-Net + Huber unconstrained (single fit, no CV).
+    Convenience wrapper for a single unconstrained Huber–elastic-net fit:
+    solves without monotonicity constraints and returns coefficients on the
+    original scale (intercept first).
     """
 
     return HuberENetCV.fit_single(
@@ -745,5 +1009,3 @@ def ordinary_regression(
         tol = tol, 
         solvers = solvers
     )
-
-
