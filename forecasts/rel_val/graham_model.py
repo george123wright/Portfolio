@@ -4,7 +4,9 @@ Computes Graham number–style valuations using industry averages instead of 22.
 
 import numpy as np
 import pandas as pd
+
 from pbv import bvps
+import config
 
 
 def graham_number(
@@ -20,6 +22,63 @@ def graham_number(
     avg_eps_y, 
     high_eps_y
 ):
+    """
+    Generalised Graham valuation combining earnings and book via industry multiples.
+    
+    The origional Graham number is defined as:
+    
+        Graham(E; PE, PB) = sqrt(22.5 · EPS · BVPS )
+    
+    where 22.5 = 15 · 1.5 is the product of Graham's preferred P/E and P/B ratios.
+    
+    I have adapted this to use industry averages isntead as I believe these valuations
+    are outdated in todays markets.
+        
+    For each EPS scenario E and for each pair of industry multiples (PE_ind, PB_ind),
+    form a Graham-style value using the geometric mean of earnings and book drivers:
+      
+        BVPS_next = BVPS_prev + EPS − DPS
+      
+        Graham(E; PE, PB) = sqrt( PE · E · PB · BVPS_next )
+
+    We aggregate across:
+   
+    • EPS scenarios: {eps_low, eps_avg, eps_high, low_eps_y, avg_eps_y, high_eps_y}.
+   
+    • PE_ind ∈ { pe_ind['Region-Industry'], pe_ind['Industry-MC'] }.
+   
+    • PB_ind ∈ { pb_ind['Region-Industry'], pb_ind['Industry-MC'] }.
+
+    Each Graham value is clipped to [0.2·Price_current, 5·Price_current] to guard outliers.
+    We return min/mean/max and the mean/std of the relative returns to current price.
+
+    Parameters
+    ----------
+    pe_ind : dict-like
+        Industry P/E multipliers with keys 'Region-Industry' and 'Industry-MC'.
+    eps_low, eps_avg, eps_high : float
+        Current-period EPS scenarios.
+    price : float
+        Current stock price used for clipping and relative returns.
+    pb_ind : dict-like
+        Industry P/B multipliers with keys 'Region-Industry' and 'Industry-MC'.
+    bvps_0 : float
+        Starting book value per share (BVPS_prev).
+    dps : float
+        Dividends per share.
+    low_eps_y, avg_eps_y, high_eps_y : float
+        Next-period EPS scenarios.
+
+    Returns
+    -------
+    (min_price, mean_price, max_price, mean_rel_ret, std_rel_ret) : tuple
+        Summary of Graham valuations across all combinations.
+
+    Notes
+    -----
+    • BVPS update equation: BVPS_next = BVPS_prev + EPS − DPS.
+    • Any NaNs from inputs are ignored; if no values remain, zeros are returned.
+    """    
     
     eps_list  = pd.Series([eps_low, eps_avg, eps_high, low_eps_y, avg_eps_y, high_eps_y]).dropna()
     
@@ -31,8 +90,10 @@ def graham_number(
         [pb_ind['Region-Industry'], pb_ind['Industry-MC']]
     ).dropna()
     
-    lb = 0.2 * price
-    ub = 5 * price
+    
+    lb = config.lbp * price
+    
+    ub = config.ubp * price
     
     gn_vals = []
     
@@ -47,6 +108,8 @@ def graham_number(
         for p in pe_list:
     
             for pb in ptb_list:
+                
+                e = max(e, 0)
     
                 val = np.sqrt(p * float(e) * float(pb) * fv)
     
@@ -56,7 +119,7 @@ def graham_number(
 
     gn = np.array(pd.Series(gn_vals).dropna())
     
-    if len(gn)!=0:
+    if len(gn) != 0:
     
         rel_ret = (gn / price) - 1
 
