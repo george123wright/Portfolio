@@ -38,7 +38,6 @@ This module provides:
    - Cornish–Fisher modified VaR_α:      z_cf = z + (z²−1)s / 6 + (z³ − 3z)(k − 3) / 24 − (2z³ − 5z) s² / 36
                                         
                                          mVaR_α = −(μ + z_cf σ)
-   
    - Historical VaR/CVaR:                empirical quantile/mean of tail
 
    - Ulcer index:                        UI = √(mean(DD_t²))
@@ -2949,6 +2948,9 @@ class PortfolioAnalytics:
         w_comb2: np.ndarray,
         w_comb3: np.ndarray,
         w_comb4: np.ndarray,
+        w_comb5: np.ndarray,
+        w_comb6: np.ndarray,
+        w_comb7: np.ndarray,
         w_deflated_msr: np.ndarray,
         w_adjusted_msr: np.ndarray,
         comb_rets: pd.Series,
@@ -2964,6 +2966,9 @@ class PortfolioAnalytics:
         vol_comb2: float,
         vol_comb3: float,
         vol_comb4: float,
+        vol_comb5: float,
+        vol_comb6: float,
+        vol_comb7: float,
         vol_deflated_msr: float,
         vol_adjusted_msr: float,
         vol_msr_ann: float,
@@ -2976,6 +2981,9 @@ class PortfolioAnalytics:
         vol_comb2_ann: float,
         vol_comb3_ann: float,
         vol_comb4_ann: float,
+        vol_comb5_ann: float,
+        vol_comb6_ann: float,
+        vol_comb7_ann: float,
         vol_deflated_msr_ann: float,
         vol_adjusted_msr_ann: float,
         comb_score: pd.Series,
@@ -3003,13 +3011,16 @@ class PortfolioAnalytics:
             "Black-Litterman": w_bl, 
             "MIR": w_mir,
             "MSP": w_msp,
+            "Deflated MSR": w_deflated_msr,
+            "Adjusted MSR": w_adjusted_msr,            
             "Combination": w_comb, 
             "Combination1": w_comb1, 
             "Combination2": w_comb2,
             "Combination3": w_comb3,
             "Combination4": w_comb4,
-            "Deflated MSR": w_deflated_msr,
-            "Adjusted MSR": w_adjusted_msr,
+            "Combination5": w_comb5,
+            "Combination6": w_comb6,
+            "Combination7": w_comb7,
         }
         
         vols_weekly = {
@@ -3018,13 +3029,16 @@ class PortfolioAnalytics:
             "Black-Litterman": vol_bl, 
             "MIR": vol_mir,
             "MSP": vol_msp,
+            "Deflated MSR": vol_deflated_msr,
+            "Adjusted MSR": vol_adjusted_msr,            
             "Combination": vol_comb, 
             "Combination1": vol_comb1,
             "Combination2": vol_comb2, 
             "Combination3": vol_comb3, 
             "Combination4": vol_comb4,
-            "Deflated MSR": vol_deflated_msr,
-            "Adjusted MSR": vol_adjusted_msr,
+            "Combination5": vol_comb5,
+            "Combination6": vol_comb6,
+            "Combination7": vol_comb7,
         }
         
         vols_annual = {
@@ -3033,13 +3047,16 @@ class PortfolioAnalytics:
             "Black-Litterman": vol_bl_ann, 
             "MIR": vol_mir_ann,
             "MSP": vol_msp_ann,
+            "Deflated MSR": vol_deflated_msr_ann, 
+            "Adjusted MSR": vol_adjusted_msr_ann,
             "Combination": vol_comb_ann,
             "Combination1": vol_comb1_ann, 
             "Combination2": vol_comb2_ann,
             "Combination3": vol_comb3_ann, 
             "Combination4": vol_comb4_ann,
-            "Deflated MSR": vol_deflated_msr_ann, 
-            "Adjusted MSR": vol_adjusted_msr_ann,
+            "Combination5": vol_comb5_ann,
+            "Combination6": vol_comb6_ann,
+            "Combination7": vol_comb7_ann,
         }
 
         return self.report_portfolio_metrics_batch(
