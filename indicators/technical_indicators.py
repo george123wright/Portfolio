@@ -1,6 +1,296 @@
 """
-Computes classic technical analysis signals from price data stored in Excel. 
-It loads OHLCV sheets, scores each ticker and writes “Signal Scores” back to the workbook.
+Technical signal calibration, backtesting, and composite scoring from OHLCV data
+
+Overview
+--------
+This module loads end-of-day OHLCV data from an Excel workbook, calibrates a
+suite of classic technical analysis indicators by backtesting threshold grids,
+and produces a per-ticker, per-date composite integer score that reflects the
+weighted agreement of active buy/sell signals. The composite scores are written
+back to the same workbook on a sheet named "Signal Scores". Optional
+calibration results (best parameters, performance statistics, and assigned
+weights per indicator) are persisted to a separate calibration workbook.
+
+Data interface
+--------------
+Input workbook sheets (wide format, DateTime index; columns are tickers):
+  - "High":   session highs
+  - "Low":    session lows
+  - "Close":  closing prices
+  - "Volume": trading volume
+
+Output workbook sheet:
+  - "Signal Scores": a Date column followed by one column per ticker with an
+    integer score clipped to a symmetric range.
+
+All datetimes written to Excel are converted to timezone-naive UTC. Index order
+is enforced as ascending by time.
+
+Indicators and formulas
+-----------------------
+For each ticker, the following indicators are precomputed and later used to
+generate entry and exit pulses. Where applicable, parameters are searched over
+grids and tuned by in-sample backtesting with simple performance statistics.
+
+1) Relative Strength Index (RSI)
+   - RSI_t = 100 − 100 / (1 + RS_t), where RS_t is an exponentially smoothed
+     ratio of average gains to average losses over a fixed window.
+ 
+   - Signals: cross up of RSI above a buy threshold and cross down below a sell
+     threshold.
+
+2) Money Flow Index (MFI)
+   - Typical price tp_t = (High_t + Low_t + Close_t) / 3.
+  
+   - Money flow mf_t = tp_t × Volume_t.
+   
+   - Positive and negative money flow are aggregated over a lookback depending
+     on the sign of tp_t − tp_{t−1}.
+   
+   - MFI_t = 100 − 100 / (1 + positive_flow_sum / negative_flow_sum).
+   
+   - Signals: cross up of MFI above a buy threshold and cross down below a sell
+     threshold.
+
+3) Bollinger Bands (BB)
+   - Mid_t = simple moving average of Close over a fixed window.
+  
+   - Std_t = rolling standard deviation of Close over the same window (ddof=0).
+   
+   - Upper_t = Mid_t + n_std × Std_t
+   
+   - Lower_t = Mid_t − n_std × Std_t.
+   
+   - Signals: price crossing above Lower_t (buy) and below Upper_t (sell).
+
+4) Average True Range (ATR) breakouts
+   - True range TR_t = max(High_t − Low_t, |High_t − Close_{t−1}|, |Low_t − Close_{t−1}|).
+   
+   - ATR_t = simple moving average of TR over a fixed window.
+   
+   - Rolling highs/lows of High/Low over a break window are shifted by one bar.
+   
+   - Up threshold_t = prior_window_high_t + m × ATR_{t−1}.
+   
+   - Down threshold_t = prior_window_low_t  − m × ATR_{t−1}.
+   
+   - Signals: Close_t > Up threshold_t (buy) and Close_t < Down threshold_t (sell).
+
+5) Stochastic Oscillator (%K, %D)
+   - %K_t = 100 × (Close_t − rolling_min(Low)) / (rolling_max(High) − rolling_min(Low)).
+   
+   - %D_t = simple moving average of %K over a short window.
+   
+   - Signals: 
+   
+        (%K < lower_bound and %K crosses above %D) is buy
+        
+        (%K > upper_bound and %K crosses below %D) is sell.
+
+6) Exponential Moving Average (EMA) crossover
+   - EMA is computed with the standard recursive formula with span s:
+     
+         EMA_t = EMA_{t−1} + alpha × (Close_t − EMA_{t−1}), 
+         
+    where alpha = 2 / (s + 1).
+   
+   - Signals: fast EMA crossing above slow EMA (buy) and below (sell).
+
+7) MACD line vs signal
+   - MACD line = EMA_fast(Close) − EMA_slow(Close).
+   
+   - Signal line = EMA of MACD line over a short window.
+   
+   - Signals: MACD line crossing above signal (buy) and below (sell).
+
+8) Rolling VWAP crossover
+   - Typical price tp_t = (High_t + Low_t + Close_t) / 3.
+   
+   - Rolling VWAP_t = sum(tp_i × Volume_i) / sum(Volume_i) over a fixed window.
+   
+   - Signals: Close crossing above VWAP (buy) and below VWAP (sell).
+
+9) On-Balance Volume (OBV) divergence
+   - Direction_t = sign(Close_t − Close_{t−1}).
+   
+   - OBV_t = cumulative sum of Direction_t × Volume_t.
+   
+   - Divergence conditions compare rolling highs/lows in price and OBV:
+     buy if price makes a lower low while OBV does not; sell if price makes a
+     higher high while OBV does not.
+
+Trend and volume gating
+-----------------------
+Signals can be conditioned on trend and liquidity filters:
+
+- Trend filter via ADX (Average Directional Index):
+  
+  * Directional movement is computed with the standard +DM and −DM rules.
+  
+  * +DI_t = 100 × EMA(+DM) / ATR; −DI_t = 100 × EMA(−DM) / ATR.
+  
+  * DX_t  = 100 × |+DI_t − −DI_t| / (+DI_t + −DI_t); ADX_t = EMA(DX).
+  
+  * A pro-trend gate requires ADX_t ≥ ADX_ENTRY; an anti-trend gate requires
+    ADX_t < ADX_ENTRY.
+
+- Volume confirmation:
+  
+  * A boolean mask flags bars with volume at or above a rolling median over a
+    confirmation window.
+
+Signal pulses, position state, and conflict handling
+----------------------------------------------------
+For any threshold θ, "cross up" at time t means value_t > θ and value_{t−1} ≤ θ,
+and "cross down" means value_t < θ and value_{t−1} ≥ θ. Buy and sell pulses are
+constructed as boolean time series (or matrices when evaluating parameter
+grids). Pulses are converted into a position_t ∈ {−1, 0, +1} by a small state
+machine that:
+
+- applies an optional signal lag L bars,
+
+- enforces a cooldown of K bars after any position change, and
+
+- resolves simultaneous buy/sell pulses using a configurable policy:
+  "sell wins", "buy wins", or "mutual exclude" (drop both).
+
+Backtest returns alignment and statistics
+-----------------------------------------
+To avoid look-ahead bias when evaluating a position time series pos_t against
+simple returns r_t = Close_t / Close_{t−1} − 1:
+
+- effective position is pos_{t−1}, effective return is r_t;
+- the first bar is discarded; returns with NaN are ignored.
+
+For each scenario (parameter setting), the realised trade series is
+X_t = pos_{t−1} × r_t.
+
+Given n valid bars:
+
+- Mean return: mean_X = (1 / n) × sum(X_t).
+
+- Sample standard deviation: 
+
+    sd_X = sqrt( (1 / (n − 1)) × sum( (X_t − mean_X)^2 ) ).
+
+- Annualised Sharpe ratio: 
+
+    Sharpe = sqrt(A) × mean_X / sd_X, where A is the
+  annualisation constant (e.g., 252).
+
+- One-sample t-statistic for mean > 0: 
+
+    t = mean_X / (sd_X / sqrt(n)).
+
+- One-sided p-value under Student-t with df = n − 1: p = survival_function(t, df).
+
+If sd_X is zero or no valid returns exist, the scenario is penalised
+(Sharpe = −infinity; t = 0; p = 1) to fall to the bottom of rankings.
+
+Calibration and model selection
+-------------------------------
+For indicators with tunable parameters (e.g., RSI buy/sell thresholds, MFI
+thresholds, Bollinger standard deviation multiplier, ATR breakout multiplier,
+stochastic bounds), the module performs grid search:
+
+1) Optional coarse screen on a small grid.
+
+2) If the best coarse scenario passes a significance gate defined by
+   p < alpha and Sharpe ≥ min_sharpe, refinement proceeds on either:
+
+   - the full fine grid; or
+   
+   - a local neighbourhood around the coarse optimum.
+
+3) The best scenario among significant candidates is chosen; if none are
+   significant, the best overall Sharpe is chosen.
+
+Each indicator receives a discrete weight in {0, 1, 2, 3, 4} based on
+(significance, Sharpe level). The mapping thresholds are configurable.
+
+Composite score construction
+----------------------------
+For a ticker and date t, each active indicator contributes weight × position_t,
+with position_t ∈ {−1, 0, +1}. The composite integer score is the sum across
+indicators, clipped to a symmetric cap to avoid extreme values. This score is a
+heuristic proxy for consensus across momentum, reversal, breakout, and
+volume-confirmed signals after trend gating and conflict resolution.
+
+Persistence and caching
+-----------------------
+- Calibration results (best parameters, weights, Sharpe, t-stat, p-value, trade
+  count, data start/end, last updated timestamp) are upserted to a calibration
+  workbook. A JSON blob stores indicator parameters per ticker.
+
+- If calibrations are available, they are reused to compute scores; otherwise
+  the module calibrates on the fly.
+
+Computation and implementation notes
+------------------------------------
+- Vectorised grid evaluation is used extensively by broadcasting time × grid
+  arrays to build buy/sell pulse matrices in one pass per indicator.
+
+- Numba is used to JIT-compile the pulse-to-position state machine for speed.
+
+- Cross detection is implemented as elementwise comparisons between a series
+  and its one-period lag.
+
+- The ATR breakout uses ATR_{t−1} and prior window highs/lows (shifted) to
+  avoid contemporaneous dependence.
+
+- ADX and volume gates are applied multiplicatively to suppress pulses.
+
+- All performance statistics are computed on aligned series to avoid look-ahead.
+
+- Excel I/O uses openpyxl; conditional formatting highlights positive scores in
+  green and negative scores in red.
+
+Configuration
+-------------
+Key parameters are set at module scope:
+
+- Significance gate: SIGNIFICANCE_ALPHA (p-value), MIN_SHARPE_FOR_SIG.
+
+- Coarse-to-fine search toggles and grids.
+
+- Indicator default thresholds, windows, and spans.
+
+- Conflict resolution mode, signal lag, and cooldown.
+
+- Annualisation constant.
+
+- Per-indicator default weights (used if no calibration is present).
+
+Assumptions and limitations
+---------------------------
+- The framework uses simple, in-sample grid search with basic statistics; no
+  walk-forward validation, cross-validation, or transaction costs are applied.
+
+- Signals are daily and assume end-of-day execution with lag L; intraday effects,
+  slippage, and spreads are ignored.
+
+- ADX/volume gates and window choices are heuristic; their impact is data- and
+  asset-dependent.
+
+- Multiple-testing inflation can occur when scanning large grids; the
+  significance gate is a coarse filter rather than a formal correction.
+
+Typical workflow
+----------------
+1) Read OHLCV sheets from `config.DATA_FILE`.
+
+2) For each ticker:
+
+   - Use cached calibrations if present; otherwise calibrate indicators.
+   
+   - Build per-indicator positions and aggregate to a composite score series.
+
+3) Optionally upsert calibration rows to the calibration workbook.
+
+4) Write the "Signal Scores" sheet to the data workbook.
+
+The `main()` function orchestrates the above steps and logs progress,
+skipped tickers, and file writes.
 """
 
 from __future__ import annotations
