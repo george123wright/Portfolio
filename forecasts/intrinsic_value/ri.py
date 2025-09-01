@@ -1,5 +1,239 @@
 """
-Implements a residual income valuation model combining book value growth, cost of equity and analyst estimates.
+Residual-income valuation with analyst-path enumeration, clean-surplus book dynamics, and terminal mix (RI and P/B)
+
+Purpose
+-------
+This module implements a residual income (RI) equity valuation framework that
+combines: 
+
+(i) per-share book value compounding via the clean-surplus relation,
+(
+ii) analyst low/average/high EPS scenarios across a multi-year horizon,
+
+(iii) discounting with a flat cost of equity on an irregular calendar, and
+
+(iv) a set of terminal value candidates (company/industry RI and price-to-book).
+
+For each ticker, it outputs a distribution of present values (over all EPS paths
+and terminal candidates) and an uncertainty estimate (standard error, SE).
+
+Core identity and valuation formulae
+------------------------------------
+Let BVPS_0 denote current book value per share, EPS_t the (per-share) earnings
+in period t, DPS_t the per-share dividend, and k the cost of equity.
+
+1) Clean-surplus (per-share) book value update:
+   
+       BVPS_{t+1} = BVPS_t + EPS_{t+1} − DPS_{t+1}.
+
+2) Residual income in period t (per path i):
+   
+       RI_{i,t} = EPS_{i,t} − k × BVPS_{i,t}^{prev},
+   
+   where BVPS_{i,t}^{prev} is the book value just before recognising EPS_{i,t}.
+
+3) Discount factors (irregular calendar):
+   
+   Let τ_t be the forecast date for period t and τ_0 the valuation date.
+   
+   Define Δ_t = (τ_t − τ_0) / 365 (year fraction, 365-day convention).
+   
+       disc_t = (1 + k)^{−Δ_t}.
+
+4) Present value of finite-horizon residual income (per path i):
+   RI\_PV_i = Σ_{t=0}^{T−1} ( RI_{i,t} × disc_t ).
+
+5) Terminal candidates (per path i):
+   
+   • Company RI terminal (if denominator > 0):
+   
+       g_comp = growth proxy,
+       
+       EPS_{i,T+1} = EPS_{i,T} × (1 + g_comp),
+       
+       RI_{i,T+1} = EPS_{i,T+1} − k × BVPS_{i,T}^{book},
+       
+       TV^{RI,comp}_i = RI_{i,T+1} / (k − g_comp) × disc_T.
+   
+   • Industry RI terminal (if denominator > 0):
+   
+       g_ind is the region–industry growth:
+       
+       TV^{RI,ind}_i = ( EPS_{i,T+1} − k × BVPS_{i,T}^{book} ) / (k − g_ind) × disc_T.
+   
+   • Company P/B terminal:
+   
+       TV^{PB,comp}_i = (P/B)_{comp} × BVPS_{i,T}^{book} × disc_T.
+   
+   • Industry P/B terminal:
+   
+       TV^{PB,ind}_i = (P/B)_{ind} × BVPS_{i,T}^{book} × disc_T.
+
+6) Equity value distribution (per path i, per terminal candidate j):
+  
+   V_{j,i} = BVPS_0 + RI\_PV_i + TV_{j,i}.
+
+The full distribution is the collection { V_{j,i} } across all EPS paths i and
+all terminal candidates j admitted by the gating rules.
+
+Scenario construction and shapes
+--------------------------------
+For each forecast period t ∈ {0,…,T−1}, the module takes three EPS options:
+low_eps_t, avg_eps_t, high_eps_t. It enumerates all paths:
+
+• Number of paths: P = 3^T.
+
+• EPS grid: eps_grid ∈ ℝ^{P×T}, with eps_grid[i, t] ∈ {low, avg, high}_t.
+
+• Dividends per share (DPS) are projected by a constant-growth model
+  DPS_t = DPS_0 × (1 + g_div)^t, so dps_vec ∈ ℝ^{T}.
+
+• Previous BVPS along each path is built via cumulative retained earnings:
+  BVPS_{i,0}^{prev} = BVPS_0,
+  BVPS_{i,t>0}^{prev} = BVPS_0 + Σ_{k=0}^{t−1} ( EPS_{i,k} − DPS_k ),
+  giving BVPS_prev ∈ ℝ^{P×T}.
+
+• Discount vector: disc ∈ ℝ^{T}, aligned to the (possibly irregular) forecast index.
+
+Uncertainty quantification (SE)
+-------------------------------
+Uncertainty is summarised via a standard error that blends period-by-period
+dispersion of discounted RI with terminal-block dispersion, both scaled by
+analyst counts:
+
+1) For each t, compute the cross-path standard deviation of discounted RI:
+   
+       σ_t = std( RI_terms[:, t], ddof = 1 ),
+   
+   where 
+   
+       RI_terms[:, t] = ( EPS[:, t] − k × BVPS_prev[:, t] ) × disc_t.
+   
+   With n_t = max(num_analysts_t, 1):
+   
+       SE_t = σ_t / √(n_t).
+
+2) For terminals, stack whichever candidates pass gating into a matrix
+   term_disc_mat ∈ ℝ^{P×n_terms}, flatten, and compute:
+   
+       σ_term = std( vec(term_disc_mat), ddof = 1 ).
+   
+   With 
+   
+       n_term_eff = max(num_analysts_{T−1}, 1) × n_terms:
+   
+       SE_term = σ_term / √(n_term_eff).
+
+3) Combine in quadrature:
+   
+       SE_total = √( Σ_{t=0}^{T−1} SE_t^2 + SE_term^2 ).
+
+Key functions and their mathematical roles
+------------------------------------------
+• bvps(eps, prev_bvps, dps) → float  
+  
+  One-step clean-surplus update:
+      
+      BVPS_{t+1} = BVPS_t + EPS_{t+1} − DPS_{t+1}.
+
+• growth(kpis, ind_g) → float  
+  
+  Returns g_comp used in the terminal logic:
+      
+      If ROE < 0: g_comp = ind_g; else g_comp = ROE × (1 − payout_ratio).
+
+• calc_div_growth(div: Series) → float  
+  L
+  ong-run dividend growth via geometric mean of period growth rates:
+  
+      g_div = exp( mean( log(1 + r_t) ) ) − 1, clipped to [−0.8, 5.0].
+
+• build_dps_vector(dps, div_growth, years) → ℝ^{T}  
+  
+      DPS_t = dps × (1 + g_div)^t.
+
+• build_eps_grid(valid) → ℝ^{P×T}  
+  
+  Cartesian product of low/avg/high EPS per period.
+
+• build_discount_factor_vector(coe_t, valid, today_ts) → ℝ^{T}  
+  
+      disc_t = (1 + k)^{−( (τ_t − today_ts) / 365 )}, 
+
+  using day counts from the forecast index.
+
+• build_prev_bvps_vector(bvps_0, eps_grid, dps_vec, combos) → ℝ^{P×T}  
+  BVPS_prev constructed by cumulative retained earnings, shifted one period.
+
+• build_tv_mat(coe_t, g_comp, ind_g_ri, ind_pb, price_book, term_raw, last_bvps,
+               na_m1, disc1d, min_threshold) → (ℝ^{P×n_terms}, float)  
+  Terminal candidates:
+  
+  – RI denominators (k − g) gated by min_threshold > 0, discounted by disc_T.
+  
+  – P/B terminals as multiples of last-period BVPS, discounted by disc_T.
+  
+  Returns stacked terminals and SE_term computed from their dispersion.
+
+• total_ri_preds(kpis, fin_df, forecast_df, coe_t, ind_g, ind_g_ri, ind_pb, shares_out)
+  → (Series, float)  
+  
+  End-to-end path enumeration and present-value distribution:
+  
+  – Build EPS paths, DPS vector, BVPS_prev, discount vector.
+  
+  – RI_terms = (EPS − k × BVPS_prev) × disc (broadcast).
+  
+  – RI_sum = Σ_t RI_terms[:, t].
+  
+  – Terminal candidates via build_tv_mat.
+  
+  – base_ri = BVPS_0 + RI_sum; total_RI_mat = base_ri[:, None] + term_disc_mat.
+  
+  – Flatten to a Series of present values, drop NaNs; compute SE_total as above.
+
+Operational flow (main)
+-----------------------
+For each ticker:
+1) Load financials, forecasts, KPIs, shares outstanding, and COE.
+
+2) Obtain region–industry growth and P/B benchmarks.
+
+3) Call total_ri_preds to obtain the price-level distribution and SE.
+
+4) Clip prices to bounds derived from latest prices:
+   price ← min( max(price, lb), ub ).
+
+5) Report Low/Avg/High as the min/mean/max of the clipped distribution, floored at 0,
+   and record SE. Results are written to the 'RI' sheet of `config.MODEL_FILE`.
+
+Assumptions and limitations
+---------------------------
+• EPS paths are unweighted (equiprobable low/average/high); if probabilities are
+  known, weighting should be incorporated downstream.
+
+• Constant dividend growth is a stylised device; in practice DPS may be policy-driven.
+
+• Flat cost of equity and simple annual compounding (365-day convention).
+
+• RI terminals require strictly positive denominators (k − g) to avoid explosive
+  continuing values; gating is enforced via a small positive threshold.
+
+• SE aggregation assumes independence across years and treats analyst counts as
+  precision weights; it is a heuristic, not a full stochastic model.
+
+Units and data hygiene
+----------------------
+• All inputs are per share when used in clean-surplus and terminal formulae.
+
+• Ensure forecast index is timezone-naïve and chronological for discounting.
+
+• Analyst counts are floored at 1 to prevent division by zero in SE scaling.
+
+• NaN checks are pervasive; unavailable terminals degrade gracefully to those
+  available (or zero, with SE_term = 0).
+
+This module is provided for analytical illustration only and does not constitute investment advice.
 """
 
 import numpy as np
