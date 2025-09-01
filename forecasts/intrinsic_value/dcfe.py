@@ -1,6 +1,212 @@
 """
-Calculates discounted cash‑flow to equity valuations using constrained regression on financials and analyst forecasts.
+Discounted cash-flow to equity (DCFE) valuation with robust, constrained regression and PE-based terminals
+
+Purpose
+-------
+This module estimates per-share equity values using a discounted cash-flow to equity
+(DCFE) framework. Forecast revenue/EPS paths are combined with a robust,
+constrained regression that maps fundamentals to free cash flow to equity (FCFE).
+Period FCFE is discounted on an irregular calendar using a flat cost of equity,
+and a price/earnings (PE)–based terminal value is appended. Multiple forecast
+paths and terminal PE candidates are evaluated; the resulting distribution is
+summarised into low/average/high price points and a standard error (SE).
+Results are exported to Excel.
+
+Data inputs and provenance
+--------------------------
+- Historical annual financials per ticker with at least:
+  ["Revenue", "EPS", "OCF", "NetBorrowing", "Capex"].
+
+- Forecast frame per ticker with, per period:
+  low/average/high revenue and EPS, and analyst counts:
+  ['low_rev','avg_rev','high_rev','low_eps','avg_eps','high_eps','num_analysts'].
+
+- KPI frame with expected PE (exp_pe) and dictionaries for industry PE and 10-year
+  industry PE benchmarks.
+
+- Cost of equity (COE) per ticker from the workbook sheet 'COE'.
+
+- Shares outstanding and latest prices from `fdata.macro.r`.
+
+Pre-processing and normalisation
+--------------------------------
+1) Forecast cleaning
+  
+   - Revenue strings suffixed with magnitudes are coerced to floats via:
+   
+     "T" → "e12", "B" → "e9", "M" → "e6", then `float`.
+   
+   - Index is coerced to `DatetimeIndex` and sorted ascending.
+
+2) Regression target construction
+   
+   - From the historical financials, build:
+    
+     X_t = [Revenue_t, EPS_t]
+     
+     y_t = OCF_t + NetBorrowing_t + Capex_t
+     
+     Notes on sign conventions:
+     
+       Many definitions use FCFE_t = CFO_t − Capex_t + NetBorrowing_t.
+       If Capex is stored as a negative spend (as in the data used here),
+       y_t as written matches the intended sign.
+
+Modelling technique: robust constrained regression
+--------------------------------------------------
+The mapping from fundamentals to FCFE is approximated linearly and estimated
+with a Huberised Elastic-Net model selected by time-series cross-validation:
+
+- Model: FCFE_t ≈ β0 + β1·Revenue_t + β2·EPS_t
+
+- Estimation: `HuberENetCV` with grids over:
+
+    • alpha (elastic-net mixing),
+    
+    • lambda (penalty strength),
+    
+    • M (Huber loss parameter),
+  
+  using `TimeSeriesSplit` to respect temporal ordering.
+
+- Optionally, constraints can be imposed on targets (e.g., positivity) via
+  the `constrained_map` settings passed through to the joint fit routine.
+
+Scenario construction: path enumeration
+---------------------------------------
+For a horizon of T forecast periods, low/average/high paths are enumerated for
+both revenue and EPS:
+
+- For each t in {0,…,T−1}:
+
+    Revenue_t ∈ {low_rev_t, avg_rev_t, high_rev_t}  
+    EPS_t     ∈ {low_eps_t, avg_eps_t, high_eps_t}
+
+- The Cartesian product yields P = 3^T distinct paths.
+
+- Path matrices have shape (P, T):
+    rev[i, t] = chosen revenue for path i at period t
+    eps[i, t] = chosen EPS     for path i at period t
+
+Cash-flows, discounting, and present values
+-------------------------------------------
+1) FCFE per path and period:
+ 
+   FCFE_{i,t} = β0 + β1·Revenue_{i,t} + β2·EPS_{i,t}
+
+2) Irregular-calendar discount factors (flat COE):
+  
+   For each forecast date τ_t and valuation date τ_0 (today),
+  
+     days_t = (τ_t − τ_0) in days
+     
+     Δ_t    = days_t / 365
+     
+     disc_t = (1 + COE)^(−Δ_t)
+   
+   Discount factors form a vector disc ∈ ℝ^T aligned with the forecast index.
+
+3) Present value per period and horizon sum:
+  
+   DCF_{i,t} = FCFE_{i,t} × disc_t
+   
+   SumDCF_i  = Σ_{t=0}^{T−1} DCF_{i,t}
+
+Terminal value via PE multiples
+-------------------------------
+A PE-based terminal value is formed for each path using the final-year EPS and
+up to three PE candidates, then discounted to present using the last discount
+factor disc_T:
+
+- Candidate multiples, in order of preference:
+    PE_used  = exp_pe (if positive) else Industry-MC
+    PE_ind   = Region-Industry (current)
+    PE_10y   = Region-Industry (10-year)
+- For candidate j and path i:
+    TV_raw[j,i]  = PE_j × EPS_{i,T−1} × SharesOut
+    TV_disc[j,i] = TV_raw[j,i] × disc_T
+- Stacking over candidates yields TV_disc ∈ ℝ^{K×P}, K ∈ {1,2,3}.
+
+Equity value per path and terminal candidate
+--------------------------------------------
+For candidate j and path i:
+ 
+  V_{j,i} = SumDCF_i + TV_disc[j,i]
+
+In array form:
+ 
+  dcfe_vals = SumDCF[None, :] + TV_disc
+
+so dcfe_vals has shape (K, P).
+
+Per-share prices and clipping
+-----------------------------
+- Convert to per-share prices via:
+   
+    Price_{j,i} = dcfe_vals[j,i] / SharesOut
+
+- Clip each price to user-configured bounds per ticker:
+    lb = lower bound multiple × latest price
+    ub = upper bound multiple × latest price
+  so that: Price_{j,i} ← min( max(Price_{j,i}, lb), ub )
+
+Uncertainty quantification (standard error)
+-------------------------------------------
+A conservative SE combines cross-path dispersion of discounted period cash-flows
+and dispersion of terminal values, with analyst-count scaling:
+
+1) Per-period dispersion over paths:
+ 
+   σ_t = std( DCF[:, t], ddof = 1 )
+   
+   n_t = analyst count at period t (non-positive or NaN coerced to 1)
+   
+   SE_t = σ_t / sqrt(n_t)
+
+2) Terminal dispersion over all candidates and paths:
+   
+   σ_term = std( vec(TV_disc), ddof = 1 )
+   
+   n_term = analyst count at the terminal year (≤ 0 → 1)
+   
+   SE_term = σ_term / sqrt(n_term)
+
+3) Combine in quadrature and convert to per-share:
+   
+   SE_total = sqrt( Σ_t SE_t^2 + SE_term^2 )
+   
+   SE_price = SE_total / SharesOut
+
+Outputs
+-------
+- For each ticker:
+  • Low Price = max over finite clipped prices’ minimum, floored at 0.
+  • Avg Price = max over finite clipped prices’ mean, floored at 0.
+  • High Price = max over finite clipped prices’ maximum, floored at 0.
+  • SE = SE_price from the uncertainty routine.
+- A DataFrame with columns ['Low Price', 'Avg Price', 'High Price', 'SE']
+  is written to the 'DCFE' sheet of `config.MODEL_FILE`.
+
+Operational notes
+-----------------
+- Logging reports per-ticker price points and SE.
+
+- Missing or invalid inputs (e.g., absent columns, zero/NaN shares, empty
+  forecasts) result in skips with logged warnings.
+
+- Analyst counts are used as a heuristic precision weight in SE computation,
+  not as a formal sampling model.
+
+Reproducibility
+---------------
+- Given fixed inputs, the regression cross-validation and valuation are
+  deterministic.
+- Date alignment matters: discount factors depend on the forecast index and the
+  valuation date `config.TODAY`.
+
+This module is intended for analytical support. It is not investment advice.
 """
+
 
 import pandas as pd
 import datetime as dt
