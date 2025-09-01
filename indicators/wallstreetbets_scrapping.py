@@ -1,6 +1,185 @@
 """
-Scrapes posts and comments from r/wallstreetbets, extracts ticker mentions, analyses sentiment using NLTK’s VADER, 
-and saves aggregated results with conditional formatting in Excel.
+Reddit r/WallStreetBets ticker extraction, sentiment analysis, and Excel reporting
+==================================================================================
+
+Purpose
+-------
+This module automates the collection of posts and comments from the subreddit
+r/wallstreetbets, extracts candidate equity tickers from the text, measures
+sentiment using NLTK’s VADER model (with a domain-specific lexicon extension),
+and aggregates per-ticker statistics that are exported to Excel with basic
+conditional formatting and table styling.
+
+Data sources and endpoints
+--------------------------
+Posts and comments are retrieved from Reddit’s public JSON endpoints without
+authentication:
+
+- Posts listing:
+  
+      https://www.reddit.com/r/wallstreetbets/.json?limit={limit}
+
+- Post comments:
+  
+      https://www.reddit.com/r/wallstreetbets/comments/{post_id}/.json
+
+A desktop-style User-Agent string is supplied. Simple exponential backoff is
+applied for rate-limit responses when fetching comments.
+
+Pipeline overview
+-----------------
+1) Fetch a batch of recent posts from r/wallstreetbets.
+
+2) For each post:
+
+   - Extract potential tickers from the post title.
+   
+   - Compute VADER sentiment for the concatenated title and selftext.
+   
+   - Tokenise content into lower-cased words and remove common stopwords.
+
+3) Fetch and traverse all top-level and nested comments for the post:
+
+   - Extract potential tickers from each comment body.
+   
+   - Compute VADER sentiment per comment containing tickers.
+   
+   - Tokenise the comment body for top-word tallies.
+
+4) Aggregate per-ticker metrics across all posts and comments:
+
+   - Mentions count, average sentiment, sentiment dispersion, and top words.
+
+5) Sort results by mentions and write an Excel sheet named "Sentiment Findings"
+   to the workbook configured in `config.FORECAST_FILE`, including conditional
+   formatting on the average sentiment column and conversion to an Excel table
+   for filtering and readability.
+
+Ticker extraction (regex and filters)
+------------------------------------
+Candidate tickers are detected by a conservative uppercase token heuristic:
+
+- Pattern: word boundary, two to five uppercase letters, word boundary.
+  In regex: \\b[A-Z]{2,5}\\b
+
+This favours common US-style symbols and avoids long acronyms. A curated set of
+known non-ticker all-caps tokens (e.g., CEO, IPO) is used to filter false
+positives. Limitations include the exclusion of dotted, hyphenated, or
+international suffix symbols (e.g., BRK.B, RDS-A, SHOP.TO), and any mixed-case
+tickers. The approach is intentionally cautious to reduce noise in the
+downstream counts.
+
+Word tokenisation for top terms
+-------------------------------
+A lightweight tokeniser captures alphanumeric words via \\b\\w+\\b on lower-cased
+text and removes a hand-crafted set of common stopwords and subreddit-specific
+fillers (e.g., "amp", "http", "wallstreetbets"). The resulting tokens are
+counted per ticker to surface the three most frequent context words.
+
+Sentiment model and scoring (VADER)
+-----------------------------------
+Sentiment is computed using NLTK’s VADER (Valence Aware Dictionary and sEntiment
+Reasoner) `SentimentIntensityAnalyzer`. VADER is a rule- and lexicon-based
+model tailored to social media; it uses a dictionary of word valences and
+heuristics for punctuation, degree modifiers, negation, and emphasis.
+
+For an input text, VADER returns a "compound" score in the closed interval
+[-1, 1] obtained by normalising the sum of valence signals. Let s denote the
+unnormalised sum after applying VADER’s heuristics; the compound score c is:
+
+- c = s / sqrt(s^2 + alpha)
+
+where alpha is a positive constant (alpha = 15 in the reference implementation)
+that produces an S-shaped squashing and bounds c between −1 and +1.
+
+Domain lexicon adaptation
+-------------------------
+The base VADER lexicon is extended with finance- and forum-specific phrases to
+better capture community jargon (for example, "buy", "sell", "bullish", "crash",
+"rocket", "buy the dip"). Each entry assigns a positive or negative valence
+weight that influences s and thus the compound score. Multi-word expressions
+are also supported (e.g., "buy the dip").
+
+Per-ticker aggregation and statistics
+-------------------------------------
+For each ticker t, sentiment scores from all associated texts (posts and
+comments that mention t) are pooled. Denote these compound scores by
+{s_i}_{i=1..n}.
+
+The following summary statistics are computed:
+
+- Mentions count:
+  
+  n = number of texts that contained ticker t.
+
+- Average sentiment:
+  
+  mu = (1 / n) * sum over i of s_i.
+
+- Sentiment dispersion (population standard deviation):
+  
+      sigma = sqrt( (1 / n) * sum over i of (s_i − mu)^2 ).
+  
+  When n = 1, sigma is set to 0.
+
+Additionally, a per-ticker bag-of-words Counter aggregates tokens from all
+texts mentioning t; the three most frequent tokens are joined as a comma-separated
+string to provide quick qualitative colour.
+
+Sorting and export
+------------------
+Tickers are sorted in descending order by mentions. A DataFrame with columns
+
+- ticker
+- mentions
+- avg_sentiment
+- sentiment_std
+- top_words
+
+is written to the Excel workbook configured by `config.FORECAST_FILE`, into the
+sheet "Sentiment Findings". Basic conditional formatting is applied to the
+avg_sentiment column: cells greater than zero are shaded green and cells less
+than zero are shaded red. The sheet is then wrapped as an Excel table with a
+medium banded style to enable native filtering and improve readability.
+
+Robustness and rate limiting
+----------------------------
+- Network calls use a short timeout and log errors without raising.
+
+- Comment fetching retries on rate-limit responses (HTTP 429) with exponential
+  backoff (sleep 5 seconds, then 10 seconds).
+
+- A one-second pause is inserted between processing posts to be courteous to
+  Reddit’s public endpoints.
+
+- Failures to write or format the Excel workbook are caught and logged.
+
+Configuration and logging
+-------------------------
+- Excel output path: `config.FORECAST_FILE`.
+
+- Logging is emitted to the console with timestamps and levels.
+
+Assumptions, caveats, and limitations
+-------------------------------------
+- The unauthenticated JSON endpoints are subject to change, throttling, and
+  incomplete comment trees; results are therefore best-effort snapshots.
+
+- The ticker regex is conservative and US-centric; international listings,
+  preferred shares, and dotted or hyphenated symbols are not captured.
+
+- VADER is sensitive to slang, sarcasm, emojis, and negations; even with the
+  custom lexicon, community in-jokes may still skew scores.
+
+- Aggregation treats each text equally and does not de-duplicate users or weigh
+  by karma or comment depth. No temporal decay or spam filtering is applied.
+
+Reproducibility notes
+---------------------
+- NLTK’s VADER is deterministic given the same input text and lexicon.
+
+- The ordering of posts from Reddit’s listing can vary over time; running at
+  different times will naturally produce different snapshots.
 """
 
 import re
