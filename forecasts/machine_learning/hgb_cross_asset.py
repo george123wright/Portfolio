@@ -1,3 +1,181 @@
+"""
+Annual equity-return modelling with cross-asset lags, bootstrap ensembling, and
+quasi–Monte Carlo simulation.
+
+Overview
+--------
+This module implements a full pipeline to estimate and simulate one-period
+(typically annual) equity returns across a universe of tickers. It:
+
+1) Builds a long panel of per-ticker fundamentals and returns.
+
+2) Engineers cross-asset lagged features (market, sector, peer-K means).
+
+3) Fits a base forecaster per ticker (HistGradientBoostingRegressor or Ridge)
+   using time-series cross-validation with safeguards for small samples.
+
+4) Trains a bootstrap ensemble via circular block resampling to capture model
+   and sampling uncertainty.
+
+5) Generates predictive distributions by quasi–Monte Carlo simulation of key
+   drivers (revenue and EPS growth), using analyst-informed targets and
+   dispersions.
+
+6) Summarises the predictive distribution per ticker (10th, 50th, 90th
+   percentiles and standard error) and exports results.
+
+Notation and feature construction
+---------------------------------
+Let r_{t,j} denote the realised return of ticker j at date t (from column
+'Return'). Cross-asset lag features are computed from lagged returns r_{t-1,·}
+to avoid look-ahead:
+
+• MKT_L1 (leave-one-out market mean):
+
+    MKT_L1_{t,j} = (sum over l in A_t \ {j} of r_{t-1,l}) / (|A_t| - 1),
+
+  where A_t is the set of tickers with non-missing r_{t-1,·} on date t.
+
+• SECTOR_L1 (leave-one-out sector mean):
+
+    SECTOR_L1_{t,j} = (sum over l in A_{t,S(j)} \ {j} of r_{t-1,l}) / (|A_{t,S(j)}| - 1),
+  
+  where S(j) is ticker j’s sector and A_{t,S(j)} are tickers in that sector
+  with non-missing r_{t-1,·}. If the denominator is zero, the value falls
+  back to MKT_L1_{t,j}.
+
+• PEERK_L1 (top-K peer mean by absolute correlation):
+  
+  For each j, compute Pearson correlations C(j,k) between the histories of j
+  and k on pairwise complete observations (minimum sample size enforced).
+  
+  Select the K tickers with largest |C(j,k)| and define:
+  
+    PEERK_L1_{t,j} = mean over k in TopK(j) of r_{t-1,k}.
+  
+  If no peers qualify, fall back to MKT_L1_{t,j}.
+  For moderate universes (N ≤ threshold) a full float32 correlation matrix is
+  formed; otherwise, correlations are computed on the fly to bound memory.
+
+Modelling
+---------
+Base learner selection depends on sample size n:
+
+• For n < 2: a trivial Ridge model is fitted (API compliance).
+
+• For n < 8: Ridge regression with L2 penalty selected by time-series CV.
+
+• For 8 ≤ n < 20: HistGradientBoostingRegressor (HGBR) with conservative,
+  capped complexity is trained (no hyperparameter search).
+
+• For n ≥ 20: a one-off global hyperparameter search for HGBR is performed
+  using HalvingGridSearchCV with TimeSeriesSplit, and the resulting best
+  parameters are cached and reused across tickers.
+
+Time-series cross-validation preserves temporal order; folds are constructed
+so that training windows respect a minimum length, and validation always
+occurs on future observations relative to training.
+
+Bootstrap ensembling uses a circular block bootstrap of the index:
+blocks of length b are drawn with replacement by selecting random start points
+and wrapping modulo n; blocks are concatenated and truncated to length n.
+Each resample is used to fit a clone of the base model, yielding an ensemble
+of predictors that captures sampling variability and model instability.
+
+Driver simulation and transforms
+--------------------------------
+Predictive uncertainty is propagated by simulating revenue and EPS growth.
+
+• Revenue growth G_rev is modelled as log-normal:
+
+    Z_rev ~ Normal(mu_rev, sigma_rev^2),  G_rev = exp(Z_rev),
+
+  where mu_rev = log(max(targ_rev, 1e-12)) and sigma_rev is inferred from
+  analyst information.
+
+• EPS growth G_eps is modelled on the signed log-one-plus scale:
+
+    Transform T(x) = sign(x) * log(1 + |x|),
+
+    Inverse  T^{-1}(y) = sign(y) * (exp(|y|) - 1).
+
+  Draw Z_eps ~ Normal(mu_eps, sigma_eps^2) with mu_eps = T(targ_eps), and set
+  G_eps = T^{-1}(Z_eps). This accommodates negative and heavy-tailed growth.
+
+Quasi–Monte Carlo sampling uses a scrambled Sobol sequence u in [0,1)^2,
+mapped via Z = Phi^{-1}(u) (componentwise Gaussian inverse CDF) to obtain
+(Z_rev, Z_eps). Quasi-random points reduce integration variance relative to
+independent sampling for smooth functionals.
+
+Prediction aggregation
+----------------------
+For each draw, the feature template vector is copied and the revenue and EPS
+entries are replaced by the simulated values. Predictions are produced either
+by:
+
+• Mixture sampling: choose a bootstrap model at random per draw and predict; or
+
+• Fixed averaging: predict with a fixed subset of models and average.
+
+Chunked inference avoids materialising a dense n_draws × p matrix; features are
+constructed and predicted in bounded-size chunks to control peak memory.
+
+Outputs
+-------
+The main entry point `main()` logs progress, trains per-ticker bundles in
+parallel, runs the global Monte Carlo simulation, and writes an output table
+with index 'Ticker' and columns:
+
+  'Low Returns' (10th percentile),
+  'Returns' (50th percentile),
+  'High Returns' (90th percentile),
+  'SE' (sample standard deviation of draws).
+
+Results are exported to the Excel workbook indicated by `config.MODEL_FILE`.
+
+Performance and reproducibility
+-------------------------------
+• Arrays are stored as float32 where appropriate to reduce auxiliary space.
+
+• Native thread pools (BLAS/MKL/OpenBLAS) are capped per process to prevent
+  oversubscription under process-based parallelism.
+
+• `HalvingGridSearchCV` is used for a single global HGBR parameter search to
+  amortise hyperparameter tuning.
+
+• Seeds are derived deterministically per ticker by hashing the symbol and
+  combining with a base seed (reproducible runs).
+
+Assumptions and limitations
+---------------------------
+• The per-ticker DataFrames must contain a numeric 'Return' and the features
+  'Revenue Growth' and 'EPS Growth' for simulation-time injection.
+
+• Cross-asset features rely on sufficient overlap of return histories.
+
+• Analyst-informed targets and dispersions are expected to be coherent across
+  providers; missing values are handled with sensible fallbacks.
+
+• The system is intended for research and operational forecasting; it does not
+  constitute investment advice.
+
+Quick start
+-----------
+Typical usage:
+
+    if __name__ == "__main__":
+        logging.info("Starting annual return modelling with cross-asset lags")
+        main()
+
+Configuration and dependencies
+------------------------------
+Configuration is read from `config`, including the ticker universe and output
+file path. The pipeline depends on NumPy, pandas, scikit-learn, joblib,
+threadpoolctl, tqdm, SciPy (for Sobol and Gaussian CDF), and psutil (optional
+memory logging).
+
+"""
+
 from __future__ import annotations
 import logging
 from pathlib import Path
@@ -708,7 +886,7 @@ def _cross_asset_features(
             
                 continue
 
-            corrs = np.full(N, np.nan, dtype=np.float32)
+            corrs = np.full(N, np.nan, dtype = np.float32)
             
             for k in range(N):
             
@@ -834,9 +1012,12 @@ def _block_bootstrap_indices(
     Construction
     ------------
     • Let b = block_size. The number of blocks is ceil(n / b).
+    
     • Draw starting positions s_1, ..., s_B uniformly from {0, 1, ..., n-1}.
+    
     • For each start s_b, form a length-b block:
         (s_b + 0) mod n, (s_b + 1) mod n, ..., (s_b + b - 1) mod n.
+    
     • Concatenate blocks and truncate to length n.
 
     Returns
@@ -2283,7 +2464,7 @@ def main() -> None:
 
     Outcome
     -------
-    Produces a sheet 'HGB Returns (MC)' containing per-ticker predictive
+    Produces a sheet 'hgb_cross_asset' containing per-ticker predictive
     statistics suitable for portfolio construction or reporting.
     """
 
