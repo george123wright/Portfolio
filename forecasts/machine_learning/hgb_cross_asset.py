@@ -208,8 +208,8 @@ from TVP_GARCH_MC import _analyst_sigmas_and_targets_combined
 from sklearn.experimental import enable_halving_search_cv   
 from sklearn.model_selection import HalvingGridSearchCV
 
-from financial_forecast_data4 import FinancialForecastData
-from export_forecast import export_results
+from data_processing.financial_forecast_data import FinancialForecastData
+from functions.export_forecast import export_results
 import config
 
 import os
