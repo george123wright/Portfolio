@@ -85,7 +85,7 @@ from statsmodels.tsa.stattools import adfuller
 from arch import arch_model
 
 from export_forecast import export_results
-from financial_forecast_data4 import FinancialForecastData
+from data_processing.financial_forecast_data import FinancialForecastData
 import config
 
 
