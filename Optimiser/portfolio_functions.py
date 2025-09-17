@@ -38,6 +38,7 @@ This module provides:
    - Cornish–Fisher modified VaR_α:      z_cf = z + (z²−1)s / 6 + (z³ − 3z)(k − 3) / 24 − (2z³ − 5z) s² / 36
                                         
                                          mVaR_α = −(μ + z_cf σ)
+                                         
    - Historical VaR/CVaR:                empirical quantile/mean of tail
 
    - Ulcer index:                        UI = √(mean(DD_t²))
@@ -915,6 +916,7 @@ class PortfolioAnalytics:
         CAPM regression with HAC errors; reports annualised alpha and robust SE/t-stats.
 
         Same model as `jensen_alpha_r2`. Alpha is compounded to annual:
+           
             α_ann = (1 + α_pp)^P − 1.
 
         Returns a dictionary with alpha_ann, alpha_se (per-period), alpha_t, beta,
@@ -1473,7 +1475,15 @@ class PortfolioAnalytics:
         """
         Edgeworth expansion to inject skewness and kurtosis into standardised shocks.
 
-        Let Z ~ N(0,1), g₁ = skew, g₂ = kurt − 3 (excess kurtosis). Construct
+        Let 
+        
+            Z ~ N(0,1), 
+            
+            g₁ = skew, 
+            
+            g₂ = kurt − 3 (excess kurtosis). 
+            
+        Construct
 
             ε = Z + (g₁ / 6)(Z² − 1) + (g₂ / 24)(Z³ − 3Z) − (g₁² / 36)(2Z³ − 5Z),
 
@@ -2418,7 +2428,6 @@ class PortfolioAnalytics:
             "Prophet Pred": "Prophet",
             "Analyst Target": "AnalystTarget",
             "Exponential Returns": "EMA",
-            "Lin Reg Returns": "LinReg",
             "DCF": "DCF",
             "DCFE": "DCFE",
             "Daily Returns": "Daily",
@@ -2429,8 +2438,13 @@ class PortfolioAnalytics:
             "Factor Exponential Regression": "FER",
             "SARIMAX Monte Carlo": "SARIMAX",
             "Rel Val Pred": "RelVal",
-            "LSTM": "LSTM",
-            "GRU": "GRU",
+            "LSTM_DirectH": "LSTM_DirectH",
+            "LSTM_Cross_Asset": "LSTM_Cross_Asset",
+            "Prophet PCA": "ProphetPCA",
+            "HGB Returns (MC)": "HGB Returns (MC)",
+            "HGB Returns": "HGB Returns",
+            'GRU_cal': 'GRU_cal',
+            'GRU_raw': 'GRU_raw',
         }
         
         model_returns: Dict[str, pd.Series] = {}
@@ -2951,6 +2965,7 @@ class PortfolioAnalytics:
         w_comb5: np.ndarray,
         w_comb6: np.ndarray,
         w_comb7: np.ndarray,
+        w_comb8: np.ndarray,
         w_deflated_msr: np.ndarray,
         w_adjusted_msr: np.ndarray,
         comb_rets: pd.Series,
@@ -2969,6 +2984,7 @@ class PortfolioAnalytics:
         vol_comb5: float,
         vol_comb6: float,
         vol_comb7: float,
+        vol_comb8: float,
         vol_deflated_msr: float,
         vol_adjusted_msr: float,
         vol_msr_ann: float,
@@ -2984,6 +3000,7 @@ class PortfolioAnalytics:
         vol_comb5_ann: float,
         vol_comb6_ann: float,
         vol_comb7_ann: float,
+        vol_comb8_ann: float,
         vol_deflated_msr_ann: float,
         vol_adjusted_msr_ann: float,
         comb_score: pd.Series,
@@ -3021,6 +3038,7 @@ class PortfolioAnalytics:
             "Combination5": w_comb5,
             "Combination6": w_comb6,
             "Combination7": w_comb7,
+            "Combination8": w_comb8
         }
         
         vols_weekly = {
@@ -3039,6 +3057,7 @@ class PortfolioAnalytics:
             "Combination5": vol_comb5,
             "Combination6": vol_comb6,
             "Combination7": vol_comb7,
+            "Combination8": vol_comb8
         }
         
         vols_annual = {
@@ -3057,6 +3076,7 @@ class PortfolioAnalytics:
             "Combination5": vol_comb5_ann,
             "Combination6": vol_comb6_ann,
             "Combination7": vol_comb7_ann,
+            "Combination8": vol_comb8_ann
         }
 
         return self.report_portfolio_metrics_batch(
