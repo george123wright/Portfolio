@@ -66,7 +66,6 @@ Pipeline outline
             Advantage: long-horizon discipline around BL equilibrium.
        
        • `comb_port4`  = As in 3 with L1 to BL + **sector risk caps** (linearised).  
-           
             Advantage: limits sector risk concentration with sparse BL tilts.
        
        • `comb_port5`  = Sharpe + Sortino + BL-Sharpe + IR(1y) + Score/CVaR + ASR.  
@@ -80,6 +79,13 @@ Pipeline outline
        • `comb_port7`  = As in 6 with L1 to BL + **sector risk caps** (linearised).  
             
             Advantage: sector budgets + sparse BL tilts + long-horizon risk.
+
+       • `comb_port8`  = Sharpe + Sortino + BL-Sharpe + Score/CVaR + Adjusted Sharpe 
+            
+            Advantage: pure reward composite that balances mean–variance, downside/tails,
+            and higher moments; BL posterior alignment **without** proximity penalties; 
+            auto-scaling equalises gradient pushes across terms.
+
 
 5) **Reporting**
   
@@ -117,8 +123,6 @@ from typing import Tuple, List
 import numpy as np
 import pandas as pd
 import yfinance as yf
-import pandas as pd
-
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.formatting.rule import CellIsRule, FormulaRule
@@ -126,14 +130,13 @@ from openpyxl.styles import PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.styles import PatternFill
+import pandas as pd
 from openpyxl.formatting.rule import ColorScaleRule 
-
 import portfolio_functions as pf
 from functions.cov_functions import shrinkage_covariance
 from portfolio_optimisers import PortfolioOptimiser
-from data_poratio_data import RatioData
+from data_processing.ratio_data import RatioData
 import config
-
 
 r = RatioData()
 
@@ -504,15 +507,19 @@ def write_excel_results(
 
     with pd.ExcelWriter(excel_file, engine = "openpyxl", mode = "a", if_sheet_exists = "replace") as writer:
         
-        tperf = ensure_headers_are_strings(sheets["Ticker Performance"].copy())
+        tperf = ensure_headers_are_strings(
+            df = sheets["Ticker Performance"].copy()
+        )
         
-        tperf.to_excel(writer, sheet_name="Ticker Performance", index=True)
+        tperf.to_excel(writer, sheet_name="Ticker Performance", index = True)
         
         ws_tp = writer.sheets["Ticker Performance"]
 
-        tbs = ensure_headers_are_strings(sheets["Today_Buy_Sell"].copy())
+        tbs = ensure_headers_are_strings(
+            df = sheets["Today_Buy_Sell"].copy()
+        )
         
-        tbs.to_excel(writer, sheet_name="Today_Buy_Sell", index=False)
+        tbs.to_excel(writer, sheet_name = "Today_Buy_Sell", index = False)
 
         ws = writer.sheets["Today_Buy_Sell"]
         
@@ -526,29 +533,49 @@ def write_excel_results(
        
         ws.conditional_formatting.add(f"C2:C{n}", CellIsRule(operator = "equal", formula = ["FALSE"], fill = red))
         
-        _add_table(writer.sheets['Ticker Performance'], "TickerPerformanceTable")
+        _add_table(
+            ws = writer.sheets['Ticker Performance'], 
+            table_name = "TickerPerformanceTable"
+        )
         
-        _add_table(ws, "TodayBuySellTable")
+        _add_table(
+            ws = ws, 
+            table_name = "TodayBuySellTable"
+        )
 
-        cov = ensure_headers_are_strings(sheets["Covariance"].copy())
+        cov = ensure_headers_are_strings(
+            df = sheets["Covariance"].copy()
+        )
 
-        bnds = ensure_headers_are_strings(sheets["Bounds"].copy())
+        bnds = ensure_headers_are_strings(
+            df = sheets["Bounds"].copy()
+        )
         
-        bnds.to_excel(writer, sheet_name="Bounds")
+        bnds.to_excel(writer, sheet_name = "Bounds")
         
         bnds_ws = writer.sheets["Bounds"]
         
-        _add_table(bnds_ws, "BoundsTable")
+        _add_table(
+            ws = bnds_ws, 
+            table_name = "BoundsTable"
+        )
 
-        cov.to_excel(writer, sheet_name="Covariance")
+        cov.to_excel(writer, sheet_name = "Covariance")
         
         cov_ws = writer.sheets["Covariance"]
         
-        _add_table(cov_ws, "CovarianceTable")
+        _add_table(
+            ws = cov_ws, 
+            table_name = "CovarianceTable"
+        )
 
         data = cov.values.astype(float)
 
-        min_val, mean_val, max_val = data.min(), data.mean(), data.max()
+        min_val = data.min()
+        
+        mean_val = data.mean()
+        
+        max_val = data.max()
         
         color_rule = ColorScaleRule(
             start_type = 'num', start_value = str(min_val), start_color = 'FFFFFF',
@@ -560,25 +587,49 @@ def write_excel_results(
        
         cov_ws.conditional_formatting.add(rng, color_rule)
         
-        cov_desc = ensure_headers_are_strings(sheets['Covariance Description'].copy())
-        cov_desc.to_excel(writer, sheet_name="Covariance Description", index=True)
+        cov_desc = ensure_headers_are_strings(
+            df = sheets['Covariance Description'].copy()
+        )
+        
+        cov_desc.to_excel(writer, sheet_name = "Covariance Description", index = True)
+        
         cov_desc_ws = writer.sheets["Covariance Description"]
                 
-        _add_table(cov_desc_ws, "CovarianceDescriptionTable")
+        _add_table(
+            ws = cov_desc_ws, 
+            table_name = "CovarianceDescriptionTable"
+        )
 
-        def dump_weight_sheet(df_key: str, sheet_name: str, tablename: str) -> None:
+
+        def dump_weight_sheet(
+            df_key: str,
+            sheet_name: str, 
+            tablename: str
+        ) -> None:
        
-            df = ensure_headers_are_strings(sheets[df_key].copy())
+            df = ensure_headers_are_strings(
+                df = sheets[df_key].copy()
+            )
        
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
+            df.to_excel(writer, sheet_name = sheet_name, index = False)
        
             ws = writer.sheets[sheet_name]
        
-            add_weight_cf(ws)
+            add_weight_cf(
+                ws = ws
+            )
        
-            _add_table(ws, tablename)
+            _add_table(
+                ws = ws, 
+                table_name = tablename
+            )
 
-        dump_weight_sheet("Weights", "Portfolio Weights", "WeightsTable")
+
+        dump_weight_sheet(
+            df_key = "Weights", 
+            sheet_name = "Portfolio Weights", 
+            tablename = "WeightsTable"
+        )
 
         for key, sheet_name, tablename in [
             ("Portfolio Performance", "Portfolio Performance", "PortfolioPerformanceTable"),
@@ -586,9 +637,16 @@ def write_excel_results(
            ("Sector Breakdown", "Sector Breakdown", "SectorBreakdownTable"),
         ]:
        
-            df = ensure_headers_are_strings(sheets[key].copy())
+            df = ensure_headers_are_strings(
+                df = sheets[key].copy()
+            )
+           
             df.to_excel(writer, sheet_name = sheet_name, index = "Industry" not in key)
-            _add_table(writer.sheets[sheet_name], tablename)
+           
+            _add_table(
+                ws = writer.sheets[sheet_name],
+                table_name = tablename
+            )
             
 
 def benchmark_rets(
@@ -630,27 +688,27 @@ def benchmark_rets(
     
     if benchmark.upper() == 'SP500':
         
-        close = yf.download('^GSPC', start=start, end=end)['Close'].squeeze()
+        close = yf.download('^GSPC', start = start, end = end)['Close'].squeeze()
     
     elif benchmark.upper() == 'NASDAQ':
         
-        close = yf.download('^IXIC', start=start, end=end)['Close'].squeeze()
+        close = yf.download('^IXIC', start = start, end = end)['Close'].squeeze()
     
     elif benchmark.upper() == 'FTSE':
         
-        close = yf.download('^FTSE', start=start, end=end)['Close'].squeeze()
+        close = yf.download('^FTSE', start = start, end = end)['Close'].squeeze()
         
     elif benchmark.upper() == 'FTSE ALL-WORLD':
         
-        close = yf.download('VWRL.L', start=start, end=end)['Close'].squeeze()
+        close = yf.download('VWRL.L', start = start, end = end)['Close'].squeeze()
     
     elif benchmark.upper() == 'ALL':
     
         close_sp = yf.download('^GSPC', start = start, end = end)['Close'].squeeze()
      
-        close_nd = yf.download('^IXIC', start=start, end = end)['Close'].squeeze()
+        close_nd = yf.download('^IXIC', start = start, end = end)['Close'].squeeze()
      
-        close_ft = yf.download('^FTSE', start=start, end = end)['Close'].squeeze()
+        close_ft = yf.download('^FTSE', start = start, end = end)['Close'].squeeze()
     
         rets_sp = close_sp.resample('W').last().pct_change().dropna()
      
@@ -692,6 +750,7 @@ def compute_mcap_bounds(
     Compute per-ticker lower/upper weight bounds informed by capacity and quality.
 
     Bound logic (long-only):
+        
         - Base capacity proxy: mcap / vol, modulated by a factor predictor (>=0.1 floored).
         
         - Eligibility: assets with er>0 and score>0 receive positive bounds; others get 0.
@@ -728,7 +787,6 @@ def compute_mcap_bounds(
         - Non-eligible tickers receive (lb, ub) = (0, 0).
     """
 
-    
     score_max = score.max()
     
     mcap_sqrt = market_cap
@@ -966,6 +1024,8 @@ def main() -> None:
     
     w_comb7 = opt.comb_port7()
     
+    w_comb8 = opt.comb_port8()
+    
     deflated_w_msr = opt.optimise_deflated_sharpe()
     
     adjusted_w_msr = opt.optimise_adjusted_sharpe()
@@ -1149,6 +1209,18 @@ def main() -> None:
         covmat = weekly_cov
     )
     
+    print("Combination8 Weights:", w_comb8)
+    
+    vol_comb8_ann = pa.portfolio_volatility(
+        weights = w_comb8, 
+        covmat = ann_cov
+    )
+    
+    vol_comb8 = pa.portfolio_volatility(
+        weights = w_comb8, 
+        covmat = weekly_cov
+    )
+    
     weights_df = pd.DataFrame({
         "MSR": w_msr,
         "Sortino": w_sortino,
@@ -1164,7 +1236,8 @@ def main() -> None:
         "Combination4": w_comb4,
         "Combination5": w_comb5,
         "Combination6": w_comb6,
-        "Combination7": w_comb7
+        "Combination7": w_comb7,
+        "Combination8": w_comb8,
     })
     
     portfolio_weights = weights_df.reindex(tickers).multiply(money_in_portfolio).reset_index().rename(columns = {"index": "Ticker"})
@@ -1209,6 +1282,7 @@ def main() -> None:
         w_comb5 = w_comb5,
         w_comb6 = w_comb6,
         w_comb7 = w_comb7,
+        w_comb8 = w_comb8,
         w_deflated_msr = deflated_w_msr,
         w_adjusted_msr = adjusted_w_msr,
         comb_rets = comb_rets,
@@ -1227,6 +1301,7 @@ def main() -> None:
         vol_comb5 = vol_comb5,
         vol_comb6 = vol_comb6,
         vol_comb7 = vol_comb7,
+        vol_comb8 = vol_comb8,
         vol_deflated_msr = vol_deflated_msr,
         vol_adjusted_msr = vol_adjusted_msr,
         vol_msr_ann = vol_msr_ann,
@@ -1242,6 +1317,7 @@ def main() -> None:
         vol_comb5_ann = vol_comb5_ann,
         vol_comb6_ann = vol_comb6_ann,
         vol_comb7_ann = vol_comb7_ann,
+        vol_comb8_ann = vol_comb8_ann,
         vol_deflated_msr_ann = vol_deflated_msr_ann,
         vol_adjusted_msr_ann = vol_adjusted_msr_ann,
         comb_score = comb_score,
