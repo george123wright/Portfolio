@@ -73,6 +73,12 @@ parts and (optionally) sector risk-contribution caps. Modelling distinctions:
 
 - `comb_port7`  : As in comb_port6 but with L1 proximity to BL and **sector risk caps** (linearised).
                   Enforces sector budgets, sparse BL tilts, long-horizon and tail-risk features.
+                  
+- 'comb_port8'  : Sharpe + Sortino + Black–Litterman Sharpe + Score/CVaR + Adjusted Sharpe.
+                  Solved via a CCP majorise–minimise loop that linearises the composite at the
+                  current portfolio and performs a convex ascent step, followed by Armijo
+                  backtracking on the true nonlinear objective. No proximity penalties; sector
+                  and risk-contribution caps are enforced through linearised constraints..
 
 Constraints and modelling
 -------------------------
@@ -119,7 +125,7 @@ from scipy.integrate import quad
 
 import portfolio_grad as g
 from functions.black_litterman_model import black_litterman
-from functions.cov_functions import _nearest_psd_preserve_diag
+from data_processing.cov_functions import _nearest_psd_preserve_diag
 import config
 
 
@@ -1420,7 +1426,7 @@ class PortfolioOptimiser:
         prob: cp.Problem
     ) -> bool:
         """
-        Robust CVXPY solve helper: tries multiple solvers with warm-starts and tolerances.
+        Robust CVXPY solve helper: tries multiple solvers with warm-starts and tolerances; caches last successful choice.
         """
 
         order = []
@@ -1596,9 +1602,7 @@ class PortfolioOptimiser:
         
             off = total_var(w_t) − gradᵀ w_t. 
         
-        The constraint becomes 
-        
-            wᵀ M_s w ≤ α_s * ( off + gradᵀ w ).
+        The constraint becomes wᵀ M_s w ≤ α_s * ( off + gradᵀ w ).
 
         This function therefore returns:
         
@@ -4106,46 +4110,111 @@ class PortfolioOptimiser:
         eps: float = 1e-12,
     ):
         """
-        Calibrate scale factors for Sharpe, Sortino, BL-Sharpe, and (MIR,MSP) penalties
-        by equalising average gradient norms.
+        Calibrate **component scale factors** for a mixed reward–penalty composite so that
+        the **effective gradient pushes** of Sharpe, Sortino, BL-Sharpe, and the MIR/MSP
+        penalty are comparable in magnitude under the selected geometry (L1 or L2).
 
-        Inputs
-        ------
-        gamma : tuple
-            User weights (γ_s, γ_so, γ_bl, γ_pen, _). Only the first four are used here.
-        use_l1_penalty : bool
-            If True, calibrate penalty scale using L1 geometry; otherwise L2.
-        eps : float
-            Numerical floor when computing ratios.
-
-        Method
-        ------
-        Let A_s, A_so, A_bl be the average ℓ2 norms of the gradients of Sharpe, Sortino,
-        and BL-Sharpe across random feasible portfolios (from `_W_rand_vals`).
+        Purpose and Context
+        -------------------
+        The (smoothed) working objective used by the CCP linearisation has the form
+      
+            F(w) = γ_s κ_s S(w) + γ_so κ_so SO(w) + γ_bl κ_bl S_BL(w) − γ_pen κ_pen P(w),
        
-        Let A_pen be the average norm of the penalty gradient in the chosen geometry.
+        where P(w) aggregates the MIR/MSP proximity penalties (in L1 or L2 geometry).
+       
+        The gradient entering the linear surrogate is
+       
+            g_F(w) = γ_s κ_s ∇S + γ_so κ_so ∇SO + γ_bl κ_bl ∇S_BL − γ_pen κ_pen ∇P.
+       
+        Without calibration, terms with naturally larger gradient norms dominate the ascent
+        direction irrespective of γ. This procedure **equalises the average magnitude** of
+        γ_i κ_i ∇V_i across terms, making γ reflect preference rather than unit scale.
 
-        Choose a common target magnitude
-         
+        Reference Statistics
+        --------------------
+        From `self._W_rand_vals`, the routine expects the following **average gradient norms**
+        computed over a set of random feasible portfolios S:
+       
+            • A_s       ≈ mean_{w∈S} ||∇S(w)||₂
+       
+            • A_so      ≈ mean_{w∈S} ||∇SO(w)||₂
+       
+            • A_bl      ≈ mean_{w∈S} ||∇S_BL(w)||₂
+       
+            • A_pen     ≈ mean_{w∈S} ||∇P(w)|| (L1 or L2 norm according to geometry)
+       
+        and **penalty denominators** used by the MIR/MSP construction:
+       
+            • den_mir_l1 / den_mir_l2, den_msp_l1 / den_msp_l2
+       
+        together with a BL factor `Ab` retained for downstream whitening/metric use.
+
+        Calibration Rule
+        ----------------
+        Given 
+        
+            γ = (γ_s, γ_so, γ_bl, γ_pen, •), 
+        
+        define a common **target push level**
+          
             target = mean( γ_s A_s, γ_so A_so, γ_bl A_bl, γ_pen A_pen ).
-
-        Define scale factors to make γ_i * scale_i * A_i ≈ target:
         
-            scale_i = clip( target / (γ_i * max(A_i, eps)), 1/cap, cap ),
+        Each scale is then chosen as
         
-        with a large `cap` to avoid extreme multipliers (implemented in `_safe_scale`).
+            κ_i = _safe_scale( target, γ_i, A_i, eps ),
+        
+        which yields γ_i κ_i A_i ≈ target (up to the ε floor in denominators), thus
+        balancing the typical contribution of each component to g_F.
 
-        Return scales and the penalty denominators used by L2 geometry:
-            (scale_s, scale_so, scale_bl, scale_pen, den_mir, den_msp, Ab)
+        Geometry Choice
+        ---------------
+        • If `use_l1_penalty=True`, the calibration uses:
+       
+            den_mir = den_mir_l1, 
+            
+            den_msp = den_msp_l1, 
+            
+            A_pen = A_pen_mir_msp_l1,
+        
+        and the underlying penalty gradient norm is computed in **L1 geometry**.
+        
+        • Otherwise it uses:
+        
+            den_mir = den_mir_l2, den_msp = den_msp_l2, A_pen = A_pen_mir_msp_l2,
+        
+        corresponding to **L2 geometry**.
 
-        where:
-        - den_mir, den_msp are the L1 or L2 denominators chosen for the MIR/MSP penalty terms.
-        - Ab is the BL Cholesky factor retained for downstream use.
+        Numerical Safeguards
+        --------------------
+        The helper `_safe_scale` guards against extreme multipliers via an ε floor in
+        denominators (and optional internal clipping), stabilising CCP linearisation and
+        subsequent Armijo checks in solvers that use this calibration.
+
+        Parameters
+        ----------
+        gamma : tuple
+            (γ_s, γ_so, γ_bl, γ_pen, •). Only the first four entries are used.
+        use_l1_penalty : bool, default False
+            Selects the geometry for the MIR/MSP penalty (L1 vs L2) during calibration.
+        eps : float, default 1e-12
+            Numerical floor to prevent division by very small norms.
 
         Returns
         -------
         tuple
-            (scale_s, scale_so, scale_bl, scale_pen, den_mir, den_msp, Ab)
+            (κ_s, κ_so, κ_bl, κ_pen, den_mir, den_msp, Ab)
+       
+        where `den_mir`/`den_msp` are the geometry-specific denominators for MIR/MSP
+        penalties and `Ab` is the stored BL factor (e.g., a Cholesky-type factor) for
+        downstream metric operations.
+
+        Notes
+        -----
+        • The calibration acts as a diagonal preconditioner for the composite gradient,
+        improving conditioning of the CCP step and making γ interpretable as preference.
+        
+        • The MIR/MSP family of penalties is treated in aggregate through `A_pen` and the
+        denominators, allowing the optimiser to operate consistently under either L1 or L2.
         """
         
         vals = self._W_rand_vals
@@ -4218,27 +4287,73 @@ class PortfolioOptimiser:
         eps: float = 1e-12
     ):
         """
-        Calibrate scale factors for Sharpe, Sortino, BL-Sharpe, Information Ratio (1y),
-        and Score/CVaR by equalising average gradient norms.
+        Calibrate **scale factors** for Sharpe, Sortino, BL-Sharpe, 1-year Information Ratio,
+        and Score/CVaR so that the average **gradient contributions** of all terms are balanced.
 
-        Inputs
-        ------
+        Rationale
+        ---------
+        The composite used in CCP linearisation is
+        
+            F(w) = γ_s κ_s S + γ_so κ_so SO + γ_bl κ_bl S_BL + γ_ir κ_ir IR₁ + γ_sc κ_sc SC,
+        
+        with surrogate gradient
+        
+            g_F = γ_s κ_s ∇S + γ_so κ_so ∇SO + γ_bl κ_bl ∇S_BL + γ_ir κ_ir ∇IR₁ + γ_sc κ_sc ∇SC.
+        
+        The goal is to choose κ_i such that E[||γ_i κ_i ∇V_i||] is comparable across i, ensuring
+        that γ encodes **preference** rather than the native scale of each ratio.
+
+        Reference Statistics
+        --------------------
+        From `self._W_rand_vals`:
+        
+            • A_s      ≈ mean ||∇S||₂,
+        
+            • A_so     ≈ mean ||∇SO||₂,
+        
+            • A_bl     ≈ mean ||∇S_BL||₂,
+        
+            • A_ir_1y  ≈ mean ||∇IR₁||₂,
+        
+            • A_sc     ≈ mean ||∇SC||₂,
+        
+        computed over random feasible portfolios.
+
+        Calibration Rule
+        ----------------
+        With γ = (γ_s, γ_so, γ_bl, γ_ir, γ_sc),
+           
+            target = mean( γ_s A_s, γ_so A_so, γ_bl A_bl, γ_ir A_ir_1y, γ_sc A_sc ),
+           
+            κ_i    = _safe_scale( target, γ_i, A_i, eps ).
+       
+        Hence 
+        
+            γ_i κ_i A_i ≈ target (up to the ε floor).
+
+        Numerical Considerations
+        ------------------------
+        The ε floor prevents blow-ups when a component exhibits very small average gradient
+        norm. `_safe_scale` may internally clip outliers to improve stability of the CCP step.
+
+        Parameters
+        ----------
         gamma : tuple
             (γ_s, γ_so, γ_bl, γ_ir, γ_sc).
-        eps : float
-            Numerical floor.
-
-        Method
-        ------
-        From `_W_rand_vals`, obtain A_s, A_so, A_bl, A_ir_1y, A_sc (average gradient norms).
-        Set
-            target = mean( γ_s A_s, γ_so A_so, γ_bl A_bl, γ_ir A_ir_1y, γ_sc A_sc ).
-        Then compute scale_i = _safe_scale(target, γ_i, A_i, eps) for each term.
+        eps : float, default 1e-12
+            Numerical floor for denominators.
 
         Returns
         -------
         tuple
-            (scale_s, scale_so, scale_bl, scale_ir, scale_sc, Ab)
+            (κ_s, κ_so, κ_bl, κ_ir, κ_sc, Ab)
+        where `Ab` is the stored BL factor (e.g., a Cholesky-type factor) returned
+        for downstream routines that rely on a BL-whitened metric.
+
+        Notes
+        -----
+        • The inclusion of IR₁ balances short-horizon benchmark-relative skill with
+        moment-based ratios; scaling keeps the CCP direction well conditioned.
         """
 
         vals = self._W_rand_vals
@@ -4308,33 +4423,70 @@ class PortfolioOptimiser:
         eps: float = 1e-12,
     ):
         """
-        Calibrate scale factors for Sharpe, Sortino (1y), IR(5y), Score/CVaR(1y),
-        and a BL-centred penalty term (either L1 or L2).
+        Calibrate **scale factors** for Sharpe, Sortino, IR(5y), Score/CVaR, and a
+        **BL-centred proximity penalty** under a chosen geometry (L1 or L2), so that
+        average gradient magnitudes are harmonised across all components.
 
-        Inputs
-        ------
+        Objective Context
+        -----------------
+        The CCP working composite typically reads
+         
+            F(w) = γ_sh κ_sh S + γ_so κ_so SO + γ_ir κ_ir IR₅ + γ_sc κ_sc SC − γ_pen κ_pen P_BL(w),
+        
+        with P_BL(w) = ‖w − w_BL‖ (L1 or L2). The linear surrogate uses
+        
+            g_F = γ_sh κ_sh ∇S + γ_so κ_so ∇SO + γ_ir κ_ir ∇IR₅ + γ_sc κ_sc ∇SC − γ_pen κ_pen ∇P_BL.
+        
+        Calibrating κ ensures that no single component dominates simply due to scale.
+
+        Reference Statistics
+        --------------------
+        From `self._W_rand_vals`:
+        
+            • A_s      ≈ mean ||∇S||₂,
+        
+            • A_so     ≈ mean ||∇SO||₂,
+        
+            • A_ir_5y  ≈ mean ||∇IR₅||₂,
+        
+            • A_sc     ≈ mean ||∇SC||₂,
+        
+            • A_pen    ≈ mean ||∇P_BL|| (L1 or L2 norm according to geometry).
+
+        Calibration Rule
+        ----------------
+        With γ = (γ_sh, γ_so, γ_ir, γ_sc, γ_pen),
+          
+            target = mean( γ_sh A_s, γ_so A_so, γ_ir A_ir_5y, γ_sc A_sc, γ_pen A_pen ),
+          
+            κ_i    = _safe_scale( target, γ_i, A_i, eps ),
+        
+        producing γ_i κ_i A_i ≈ target.
+
+        Geometry Choice
+        ---------------
+        • L1 penalty:  A_pen = A_pen_bl_l1 (subgradient norm in L1).
+        
+        • L2 penalty:  A_pen = A_pen_bl_l2 (gradient norm in L2).
+
+        Parameters
+        ----------
         gamma : tuple
             (γ_sh, γ_so, γ_ir, γ_sc, γ_pen).
-        use_l1_penalty : bool
-            Select the geometry of the BL penalty used in calibration.
-        eps : float
-            Numerical floor.
-
-        Method
-        ------
-        From `_W_rand_vals`, obtain average norms A_sh, A_so, A_ir_5y, A_sc, and A_pen_bl_(L1/L2).
-        Compute
-           
-            target = mean( γ_sh A_sh, γ_so A_so, γ_ir A_ir_5y, γ_sc A_sc, γ_pen A_pen ).
-       
-        Then 
-        
-            scale_i = _safe_scale(target, γ_i, A_i, eps).
+        use_l1_penalty : bool, default False
+            Selects **L1** or **L2** geometry for the BL proximity penalty during calibration.
+        eps : float, default 1e-12
+            Numerical floor for denominators.
 
         Returns
         -------
         tuple
-            (scale_sh, scale_so, scale_ir, scale_sc, scale_pen)
+            (κ_sh, κ_so, κ_ir, κ_sc, κ_pen)
+
+        Notes
+        -----
+        • The calibrated κ_pen balances the **regularising pull** towards BL against the
+        reward terms, so that γ_pen is interpretable independent of geometry choice.
         """
         
         vals = self._W_rand_vals
@@ -4409,30 +4561,54 @@ class PortfolioOptimiser:
         eps: float = 1e-12,
     ):
         """
-        Calibrate scale factors for Sharpe, Sortino, BL-Sharpe, IR(1y), Score/CVaR, and ASR.
+        Calibrate **scale factors** for Sharpe, Sortino, BL-Sharpe, IR(1y), Score/CVaR,
+        and Adjusted Sharpe so that their **average gradient pushes** are comparable.
 
-        Inputs
-        ------
+        Rationale
+        ---------
+        The composite is
+     
+            F(w) = γ_s κ_s S + γ_so κ_so SO + γ_bl κ_bl S_BL + γ_ir κ_ir IR₁ + γ_sc κ_sc SC + γ_asr κ_asr ASR,
+       
+        with surrogate gradient
+       
+            g_F = ∑ γ_i κ_i ∇V_i.
+       
+        Adjusted Sharpe (ASR) can have a very different numeric range due to higher-moment
+        sensitivity; the calibration normalises its influence relative to the others.
+
+        Reference Statistics
+        --------------------
+        From `self._W_rand_vals`:
+       
+            • A_s, A_so, A_bl, A_ir_1y, A_sc, A_asr  (average ||∇V_i||₂ over random feasible w).
+
+        Calibration Rule
+        ----------------
+        With γ = (γ_s, γ_so, γ_bl, γ_ir, γ_sc, γ_asr),
+       
+            target = mean( γ_s A_s, γ_so A_so, γ_bl A_bl, γ_ir A_ir_1y, γ_sc A_sc, γ_asr A_asr ),
+       
+            κ_i    = _safe_scale( target, γ_i, A_i, eps ).
+       
+        Hence γ_i κ_i A_i ≈ target (up to the ε floor).
+
+        Parameters
+        ----------
         gamma : tuple
             (γ_s, γ_so, γ_bl, γ_ir, γ_sc, γ_asr).
-        eps : float
-            Numerical floor.
-
-        Method
-        ------
-        Use averages A_s, A_so, A_bl, A_ir_1y, A_sc, A_asr from `_W_rand_vals`.
-        Set
-       
-            target = mean(γ_s A_s, γ_so A_so, γ_bl A_bl, γ_ir A_ir_1y, γ_sc A_sc, γ_asr A_asr),
-       
-        and 
-        
-            scale_i = _safe_scale(target, γ_i, A_i, eps).
+        eps : float, default 1e-12
+            Numerical floor for denominators.
 
         Returns
         -------
         tuple
-            (scale_s, scale_so, scale_bl, scale_ir, scale_sc, scale_asr)
+            (κ_s, κ_so, κ_bl, κ_ir, κ_sc, κ_asr)
+
+        Notes
+        -----
+        • Balancing ASR via κ_asr improves conditioning of the CCP step where higher-moment
+        terms would otherwise overwhelm or vanish relative to Sharpe/Sortino/IR/SC.
         """
        
         vals = self._W_rand_vals
@@ -4512,35 +4688,67 @@ class PortfolioOptimiser:
         eps: float = 1e-12,
     ):
         """
-        Calibrate scale factors for Sharpe, Sortino, IR(5y), Score/CVaR, ASR, and a BL-penalty.
+        Calibrate **scale factors** for Sharpe, Sortino, IR(5y), Score/CVaR, Adjusted Sharpe,
+        and a BL-proximity penalty (L1 or L2), ensuring **balanced gradient magnitudes**
+        across reward and penalty components.
 
-        Inputs
-        ------
+        Objective Context
+        -----------------
+        The working composite is
+        
+            F(w) = γ_sh κ_sh S + γ_so κ_so SO + γ_ir5 κ_ir5 IR₅ + γ_sc κ_sc SC + γ_asr κ_asr ASR − γ_pen κ_pen P_BL(w),
+       
+        with surrogate gradient
+       
+            g_F = γ_sh κ_sh ∇S + γ_so κ_so ∇SO + γ_ir5 κ_ir5 ∇IR₅ + γ_sc κ_sc ∇SC + γ_asr κ_asr ∇ASR − γ_pen κ_pen ∇P_BL.
+
+        Reference Statistics
+        --------------------
+        From `self._W_rand_vals`:
+          
+            • A_s, A_so, A_ir_5y, A_sc, A_asr, and A_pen_bl_(L1/L2) depending on geometry.
+
+        Calibration Rule
+        ----------------
+        With γ = (γ_sh, γ_so, γ_ir5, γ_sc, γ_asr, γ_pen),
+          
+            target = mean( γ_sh A_s, γ_so A_so, γ_ir5 A_ir_5y, γ_sc A_sc, γ_asr A_asr, γ_pen A_pen ),
+           
+            κ_i    = _safe_scale( target, γ_i, A_i, eps ).
+       
+        Hence each component contributes a similar expected magnitude to g_F.
+
+        Geometry Choice
+        ---------------
+        • If `use_l1_penalty=True`:  
+        
+            A_pen = A_pen_bl_l1 (L1 norm/subgradient).
+        
+        • Else:                      
+        
+            A_pen = A_pen_bl_l2 (L2 norm/gradient).
+
+        Parameters
+        ----------
         gamma : tuple
             (γ_sh, γ_so, γ_ir5, γ_sc, γ_asr, γ_pen).
-        use_l1_penalty : bool
-            If True, use L1 geometry for the BL penalty; else L2.
-        eps : float
-            Numerical floor.
-
-        Method
-        ------
-        From `_W_rand_vals`, obtain A_sh, A_so, A_ir_5y, A_sc, A_asr, and A_pen_bl_(L1/L2).
-       
-        Set
-       
-            target = mean(γ_sh A_sh, γ_so A_so, γ_ir5 A_ir_5y, γ_sc A_sc, γ_asr A_asr, γ_pen A_pen),
-       
-        and 
-        
-            scale_i = _safe_scale(target, γ_i, A_i, eps).
+        use_l1_penalty : bool, default False
+            Choose **L1** or **L2** geometry for the BL proximity penalty during calibration.
+        eps : float, default 1e-12
+            Numerical floor for denominators.
 
         Returns
         -------
         tuple
-            (scale_sh, scale_so, scale_ir5, scale_sc, scale_asr, scale_pen)
-        """
+            (κ_sh, κ_so, κ_ir5, κ_sc, κ_asr, κ_pen)
 
+        Notes
+        -----
+        • Including both IR₅ and ASR often creates disparate scales; this calibration harmonises
+        their influence with Sharpe/Sortino/SC and the BL penalty, stabilising the CCP step
+        and Armijo line-search in downstream optimisers.
+        """
+        
         vals = self._W_rand_vals
 
         A_sh = vals["A_s"]
@@ -4615,6 +4823,171 @@ class PortfolioOptimiser:
         )
 
         return (scale_sh, scale_so, scale_ir5, scale_sc, scale_asr, scale_pen)
+
+
+    def _calibrate_scales_s_so_bl_sc_asr(
+            self,
+            gamma: tuple,
+            eps: float = 1e-12,
+        ):
+        """
+        Calibrate **component scale factors** κ = (κ_SH, κ_SO, κ_BL, κ_SC, κ_ASR)
+        so that, at typical feasible portfolios, the **effective gradient pushes**
+        of the composite terms are comparable in magnitude. This prevents any one
+        term from dominating purely due to units or curvature.
+
+        Rationale
+        ---------
+        The composite objective is
+          
+            F(w) = ∑_i γ_i κ_i V_i(w),
+        
+        with i ∈ {SH, SO, BL, SC, ASR}. Its gradient is
+         
+            g_F(w) = ∑_i γ_i κ_i g_i(w),
+       
+        where 
+        
+            g_i(w) = ∇V_i(w). 
+            
+        If κ_i are chosen naively (e.g., all 1), large-scale or high-curvature terms 
+        distort the ascent direction, making γ_i poor proxies for **preference**. 
+        
+        The calibration sets κ_i to roughly equalise E[‖γ_i · κ_i · g_i(w)‖] 
+        across i under a reference distribution of feasible portfolios w. This 
+        improves conditioning of the CCP linearisation and stabilises Armijo backtracking.
+
+        Construction
+        ------------
+        Let A_i denote an empirical proxy for the **average gradient norm** of the
+        i-th term:
+        
+            A_i ≈ mean_{w ∈ S} ‖ g_i(w) ‖,
+        
+        where S is a set of random feasible portfolios (stored in `self._W_rand_vals`).
+        The routine expects the following precomputed entries:
+        
+            • A_s    → for Sharpe;
+        
+            • A_so   → for Sortino;
+        
+            • A_bl   → for BL Sharpe;
+        
+            • A_sc   → for Score/CVaR;
+        
+            • A_asr  → for Adjusted Sharpe.
+
+        Given user weights γ = (γ_SH, γ_SO, γ_BL, γ_SC, γ_ASR), define a **target
+        push level**
+         
+            T = mean_i [ γ_i · A_i ].
+       
+        Each scale κ_i is then set to (with small ε > 0 for stability)
+       
+            κ_i = T / (γ_i · A_i + ε).
+
+        This achieves γ_i · κ_i · A_i ≈ T (up to ε), i.e., equalised average push,
+        while preserving **relative** user preferences through γ_i. If an element
+        of γ is zero (the user disables a term), the corresponding κ_i becomes
+        irrelevant to g_F and the term drops out.
+
+        Mathematical Context
+        --------------------
+        The calibration is akin to **Jacobi preconditioning** for gradient
+        components, making the composite optimisation numerically well balanced.
+        It is not a change of objective; it is a reparameterisation ensuring
+        that the linearisation step g_kᵀ w reflects preference weights rather
+        than scale artefacts.
+
+        Parameters
+        ----------
+        gamma : tuple of float
+         
+            (γ_SH, γ_SO, γ_BL, γ_SC, γ_ASR), the user preference weights.
+       
+        eps : float, default 1e-12
+         
+            Numerical floor added to denominators to avoid division by very small
+            estimated gradient norms.
+
+        Returns
+        -------
+        tuple of float
+            (κ_SH, κ_SO, κ_BL, κ_SC, κ_ASR), the component scales used by
+            `comb_port8`.
+
+        Expected Precomputed Quantities
+        -------------------------------
+        The method uses `self._W_rand_vals` which should contain keys:
+        
+            "A_s", "A_so", "A_bl", "A_sc", "A_asr".
+            
+        These are estimated once per run by sampling feasible weights and averaging
+        the corresponding gradient norms of each component ratio.
+
+        Caveats
+        -------
+        • If a component’s A_i is extremely small (flat direction), κ_i can become
+        large; the ε floor mitigates this. The subsequent Armijo line search
+        provides an additional safeguard by accepting steps only when the true
+        nonlinear composite increases sufficiently.
+        • Calibrated scales are **contextual** to the data, constraints, and
+        sampling set S. They should be recomputed if those change materially.
+        """
+
+        vals = self._W_rand_vals
+        A_s = vals["A_s"]
+        A_so = vals["A_so"]
+        A_bl = vals["A_bl"]
+        A_sc = vals["A_sc"]
+        A_asr = vals["A_asr"]
+
+        γ_sh, γ_so, γ_bl, γ_sc, γ_asr = gamma
+
+        target = np.mean([
+            γ_sh * A_s,
+            γ_so * A_so,
+            γ_bl * A_bl,
+            γ_sc * A_sc,
+            γ_asr* A_asr,
+        ])
+
+        scale_sh = self._safe_scale(
+            target = target,
+            weight = γ_sh,  
+            avg_norm = A_s,   
+            eps = eps
+        )
+        
+        scale_so = self._safe_scale(
+            target = target,
+            weight = γ_so,  
+            avg_norm = A_so,   
+            eps = eps
+        )
+        
+        scale_bl = self._safe_scale(
+            target = target,
+            weight = γ_bl,  
+            avg_norm = A_bl,   
+            eps = eps
+        )
+        
+        scale_sc = self._safe_scale(
+            target = target,
+            weight = γ_sc,  
+            avg_norm = A_sc,   
+            eps = eps
+        )
+        
+        scale_asr = self._safe_scale(
+            target = target,
+            weight = γ_asr,  
+            avg_norm = A_asr,   
+            eps = eps
+        )
+
+        return (scale_sh, scale_so, scale_bl, scale_sc, scale_asr)
 
 
     def _coerce_weights(
@@ -6481,52 +6854,188 @@ class PortfolioOptimiser:
 
     def comb_port5(
         self,
-        gamma: tuple = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),  # SH, SO, BL, IR(1y), SC, ASR
+        gamma: tuple = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),  
         max_iter: int = 1000,
         tol: float = 1e-12,
     ) -> pd.Series:
         """
-        CCP optimiser for a rich composite that **adds Adjusted Sharpe Ratio (ASR)** to
-        Sharpe, Sortino, BL-Sharpe, IR(1y), and Score/CVaR(1y). Final Score/CVaR uses exact RU LP.
+        Maximise a **scaled composite of six reward terms**—Sharpe, Sortino,
+        Black–Litterman Sharpe, 1-year Information Ratio, Score/CVaR(1y), and
+        Adjusted Sharpe—over a convex feasible set using a CCP-style
+        majorise–minimise loop with tolerance-based stopping. Final Score/CVaR
+        is reported using the **exact** Rockafellar–Uryasev LP. 
 
-        Objective (maximised)
-        ---------------------
-        Let ASR(w) denote the adjusted Sharpe that accounts for skewness and kurtosis
-        (via the practitioner’s approximation implemented in `_asr_val_grad_single`).
-        With γ = (γ_SH, γ_SO, γ_BL, γ_IR, γ_SC, γ_ASR) and scales κ from
-        `_calibrate_scales_by_grad_ir_sc_asr`, define
-        
-            F(w) = γ_SH κ_SH S(w) + γ_SO κ_SO SO(w) + γ_BL κ_BL S_bl(w) + γ_IR κ_IR IR₁(w) + γ_SC κ_SC SC(w) + γ_ASR κ_ASR ASR(w).
+        Overview
+        --------
+        The optimiser solves:
 
-        Gradients used
-        --------------
-        - ∇ S, ∇ SO, ∇ S_bl, ∇ IR₁, ∇ SC as in comb_port1.
-        
-        - ∇ ASR(w): taken from `_asr_val_grad_single`, which internally computes the gradient
-        of the adjusted Sharpe term wrt w using vectorised weekly central moments and the
-        annual (μ, Σ, r_f) Sharpe pieces.
+            maximise_w  F(w)
+           
+            subject to  w ∈ W
 
-        CCP linearisation and subproblem
-        --------------------------------
-        Linearise the full reward at w_t:
+        where W encodes portfolio constraints (e.g., long-only, budget, name/sector
+        caps), and
+
+            F(w) = γ_SH κ_SH · S(w)
+                + γ_SO κ_SO · SO(w)
+                + γ_BL κ_BL · S_BL(w)
+                + γ_IR κ_IR · IR₁(w)
+                + γ_SC κ_SC · SC(w)
+                + γ_ASR κ_ASR · ASR(w).
+
+        The scalars γ_• are user preference weights; κ_• are **auto-calibrated**
+        scales from `_calibrate_scales_by_grad_ir_sc_asr` designed to equalise
+        average gradient magnitudes of the terms so that the ascent direction
+        reflects preference rather than units/curvature.
+
+        Component Ratios
+        ----------------
+        1) Sharpe (annualised):
        
-            minimise   − ⟨lin_param, w⟩
-        
-        subject to feasibility, with 
-        
-            lin_param = ∇ F(w_t).
+            S(w) = (μ_p − rf_ann) / σ_p,
+       
+        with μ_p = wᵀ μ, σ_p = sqrt(wᵀ Σ w).
+       
+        Gradient:
+       
+            ∇S(w) = μ / σ_p − S(w) · (Σ w) / σ_p².
 
-        Stopping and acceptance
-        -----------------------
-        Stop on small step and subproblem objective change thresholds. For reporting,
-        recompute SC with exact RU LP CVaR.
+        2) Sortino with per-period target τ = rf_week:
+       
+            SO(w) = (μ̄_p − τ) / σ_d(w),
+       
+        where μ̄_p = mean_t [ wᵀ R_t ],
+       
+                σ_d(w) = sqrt( (1/T) ∑_t min(0, wᵀ R_t − τ)² ).
+       
+        A smooth hinge is used internally to obtain ∇SO(w) stably; the quotient
+        rule yields
+       
+            ∇SO = [ σ_d ∇μ̄_p − (μ̄_p − τ) ∇σ_d ] / σ_d²,
+       
+        with ∇μ̄_p = mean_t[R_t] and ∇σ_d computed via the smoothed downside term.
 
-        Modelling advantage
-        -------------------
-        ASR rewards portfolios that achieve Sharpe under favourable higher moments
-        (skew/kurtosis), complementing Sortino’s downside sensitivity and IR’s benchmark
-        discipline; BL-Sharpe adds stability to expected returns; the calibration of scales
-        harmonises the “push” of all terms during the CCP iterations.
+        3) BL Sharpe:
+       
+            S_BL(w) = (wᵀ μ_BL − rf_ann) / sqrt(wᵀ Σ_BL w),
+       
+        with gradient of identical form to Sharpe but using (μ_BL, Σ_BL).
+
+        4) Information Ratio over 1-year horizon:
+       
+        For period-level benchmark b_t and asset returns R_t,
+       
+            r_t^a(w) = wᵀ R_t − b_t, 
+       
+            μ_a(w)   = mean_t [ r_t^a(w) ],
+       
+            σ_te(w)  = std_t  [ r_t^a(w) ].
+       
+        Then
+       
+            IR₁(w) = μ_a(w) / σ_te(w).
+       
+        Using sample mean 
+        
+            μ_R = mean_t[R_t], 
+            
+            μ_b = mean_t[b_t],
+            
+            Σ_R = cov_t(R_t), 
+            
+            c = cov_t(R_t, b_t) (vector),
+            
+            v_b = var_t(b_t),
+            
+            var(r_t^a) = wᵀ Σ_R w − 2 wᵀ c + v_b,
+         
+            σ_te = sqrt(var(r_t^a)),
+         
+            ∇μ_a = μ_R (since μ_b is constant),
+         
+            ∇σ_te = (Σ_R w − c) / σ_te.
+        
+        Hence
+        
+            ∇IR₁(w) = μ_R / σ_te − IR₁(w) · (Σ_R w − c) / σ_te².
+
+        5) Score/CVaR (1-year tail risk):
+     
+            SC(w) = (sᵀ w) / CVaR_α(w),
+     
+        where CVaR_α is portfolio Conditional Value-at-Risk at tail level α for
+        losses 
+        
+            ℓ_t(w) = − wᵀ R_t. 
+            
+        The Rockafellar–Uryasev (RU) representation:
+       
+            CVaR_α(w) = min_z  z + (1 / ((1−α) T)) ∑_t max(0, ℓ_t(w) − z).
+       
+        At the optimal z*, a (sub)gradient in w is
+       
+            ∇CVaR_α(w) = − (1 / ((1−α) T)) ∑_{t : ℓ_t(w) > z*} R_t,
+       
+        smoothed in code for differentiability. The quotient rule gives
+       
+            ∇SC(w) = [ CVaR_α(w) · s − (sᵀ w) · ∇CVaR_α(w) ] / CVaR_α(w)².
+       
+        **Final reporting** recomputes CVaR via the **exact RU LP** for accuracy.
+
+        6) Adjusted Sharpe (higher-moment correction):
+        A common practitioner form (e.g., Pezier–White) adjusts for skewness γ₃
+        and kurtosis κ of r_t(w) = wᵀ R_t:
+       
+            ASR(w) = S(w) · [ 1 + (γ₃ / 6) S − ((κ − 3) / 24) S² − (γ₃² / 36) S³ ].
+       
+        The gradient follows by the chain rule using ∇S, ∇γ₃, ∇κ, encapsulated
+        in `_asr_val_grad_single`.
+
+        Scaling
+        -------
+        Scales κ_• are obtained from `_calibrate_scales_by_grad_ir_sc_asr` by
+        estimating average component gradient norms from random feasible weights
+        and choosing κ_• so that E[‖γ_i κ_i ∇V_i‖] is comparable across i.
+
+        Optimisation Method (CCP)
+        -------------------------
+        Each iteration linearises the composite at w_t to obtain a linear surrogate
+        objective g_tᵀ w (with g_t = ∇F(w_t)), and solves the convex subproblem:
+
+            maximise_w  g_tᵀ w
+            
+            subject to  w ∈ W,
+
+        implemented as minimising −g_tᵀ w. The loop stops when both the weight
+        change ‖w_{t+1} − w_t‖ and the subproblem objective change fall below a
+        tolerance. (No Armijo backtracking is used in this variant.)
+
+        Feasibility and Constraints
+        ---------------------------
+        `build_constraints` supplies the long-only/budget and any name/sector caps
+        configured in the class.
+
+        Returns
+        -------
+        pd.Series
+            The best portfolio weights among the initial seeds, labelled
+            `"comb_port5"`.
+
+        Notes
+        -----
+        • The 1-year IR term anchors allocations to benchmark-relative skill over a
+        recent horizon, while BL Sharpe incorporates posterior beliefs to provide
+        estimation-error robustness. Sortino and Score/CVaR enhance downside/tail
+        sensitivity, and ASR rewards higher-moment favourability. Scaling ensures
+        a balanced ascent direction consistent with γ preferences.
+        
+        Modelling advantage 
+        ------------------- 
+        ASR rewards portfolios that achieve Sharpe under favourable higher moments 
+        (skew/kurtosis), complementing Sortino’s downside sensitivity and IR’s 
+        benchmark discipline; BL-Sharpe adds stability to expected returns; the
+        calibration of scales harmonises the “push” of all terms during the CCP 
+        iterations.
         """
 
         self._assert_alignment()
@@ -6817,52 +7326,138 @@ class PortfolioOptimiser:
         max_iter: int = 1000,
     ) -> pd.Series:
         """
-        CCP optimiser that **combines IR(5y), Score/CVaR(1y), and ASR** with an **L2 proximity**
-        penalty to BL; includes Armijo backtracking on the true smoothed composite.
+        Maximise a **scaled composite of five rewards**—Sharpe, Sortino, 5-year
+        Information Ratio, Score/CVaR(1y), and Adjusted Sharpe—**regularised by an
+        L2 proximity to Black–Litterman weights**, using a CCP step plus **Armijo
+        backtracking** on the true smoothed objective.
 
-        Objective (maximised)
-        ---------------------
-        Let
+        Overview
+        --------
+        The optimiser solves:
+
+            maximise_w  F(w)
+          
+            subject to  w ∈ W
+
+        with
+
+            F(w) = γ_SH κ_SH · S(w) + γ_SO κ_SO · SO(w) + γ_IR5 κ_IR5 · IR₅(w) + γ_SC κ_SC · SC(w) + γ_ASR κ_ASR · ASR(w) − γ_P κ_P · ‖ w − w_BL ‖₂².
+
+        Here γ_• are user weights; κ_• are scales from
+        `_calibrate_scales_ir5_sc_pen_asr` (L2 mode). The quadratic proximity
+        shrinks the solution towards Black–Litterman equilibrium weights w_BL,
+        providing stability against estimation error and discouraging extreme
+        tilts that are not strongly supported by the composite rewards.
+
+        Notation and Inputs
+        -------------------
+        As in comb_port5, with the following differences:
         
-            γ = (γ_SH, γ_SO, γ_IR5, γ_SC, γ_ASR, γ_P)
+        • R₅ ∈ ℝ^{T₅×n} and b₅ ∈ ℝ^{T₅} denote 5-year horizon return and
+            benchmark series used for IR₅.
+        
+        • w_BL are the BL posterior weights entering the penalty.
+
+        Component Terms
+        ---------------
+        1) Sharpe S(w), 2) Sortino SO(w), and 5) Adjusted Sharpe ASR(w) are as
+        defined in comb_port5 (with their gradients).
+
+        3) Information Ratio over 5-year horizon IR₅(w):
+        identical structure to IR₁ but computed on (R₅, b₅). Writing
+       
+            μ_R5 = mean[R₅]
             
-        with scales κ from `_calibrate_scales_ir5_sc_pen_asr` (L2 penalty mode).
+            Σ_R5 = cov(R₅)
+            
+            c₅ = cov(R₅, b₅)
+            
+            v_b5 = var(b₅),
+           
+            μ_a5(w) = wᵀ μ_R5 − mean[b₅],
+           
+            σ_te5²(w) = wᵀ Σ_R5 w − 2 wᵀ c₅ + v_b5,
+           
+            σ_te5(w) = sqrt(σ_te5²),
         
-        Define
+        then
         
-            F(w) = γ_SH κ_SH S(w) + γ_SO κ_SO SO(w) + γ_IR5 κ_IR5 IR₅(w) + γ_SC κ_SC SC(w) + γ_ASR κ_ASR ASR(w) − γ_P κ_P ||w − w_BL||₂².
+            IR₅(w) = μ_a5(w) / σ_te5(w),
+        
+            ∇IR₅(w) = μ_R5 / σ_te5 − IR₅(w) · (Σ_R5 w − c₅) / σ_te5².
 
-        Gradients used
-        --------------
-        - ∇ S, ∇ SO, ∇ IR₅, ∇ SC as in comb_port3.
+        4) Score/CVaR(1y) SC(w):
+        as in comb_port5, using a smoothed RU gradient for optimisation and
+        recomputing an exact RU LP CVaR at final scoring for reporting.
+
+        L2 Proximity Penalty
+        --------------------
+        The quadratic proximity to BL is
        
-        - ∇ ASR from `_asr_val_grad_single`.
+            P₂(w) = ‖ w − w_BL ‖₂²,
        
-        - ∇ ||w − w_BL||₂² = 2 (w − w_BL).
-
-        CCP subproblem and line-search
-        ------------------------------
-        Subproblem:
-        
-            minimise   γ_P κ_P ||w − w_BL||₂² − ⟨lin_param, w⟩
+        with gradient
        
-        subject to feasibility, with 
-        
-            lin_param = ∇(reward) at w_t.
+            ∇P₂(w) = 2 (w − w_BL).
+       
+        This enters the **true** objective and the CCP subproblem.
 
-        Armijo backtracking on the true smoothed objective as in comb_port3.
+        Scaling
+        -------
+        Scales κ_SH, κ_SO, κ_IR5, κ_SC, κ_ASR, κ_P are produced by
+        `_calibrate_scales_ir5_sc_pen_asr` (L2 mode), equalising average gradient
+        pushes across the combined reward and penalty components so γ weights
+        express preference rather than unit magnitude.
 
-        Final scoring
-        -------------
-        Score/CVaR via exact RU LP CVaR for reporting.
+        Optimisation Method (CCP + Armijo)
+        ----------------------------------
+        Each iteration proceeds as:
+       
+        1) **Linearisation.** Compute the gradient of the reward composite
+            (excluding the quadratic penalty’s curvature) at w_t to get g_t.
+       
+        2) **Convex subproblem.** Solve
+       
+                minimise_w   γ_P κ_P ‖ w − w_BL ‖₂² − g_tᵀ w
+       
+                subject to   w ∈ W.
+       
+            This is the quadratic-plus-linear surrogate used by CCP.
+       
+        3) **Armijo backtracking.** Let ŵ be the subproblem solution and
+                d_t = ŵ − w_t. 
+            
+            Choose step size η ∈ (0,1] to satisfy
+                
+                F(w_t + η d_t) ≥ F(w_t) + c · η · ‖d_t‖²,
+           
+            with c ∈ (0,1) (here c = 1e−4). Update w_{t+1} = w_t + η d_t.
+       
+        4) Stop on small step (or after `max_iter`).
+
+        Feasibility and Constraints
+        ---------------------------
+        `build_constraints` supplies long-only/budget and any configured caps.
+
+        Returns
+        -------
+        pd.Series
+            The best portfolio among the seeds, labelled `"comb_port6"`.
+
+        Notes
+        -----
+        • Incorporating IR over a longer window encourages structural consistency
+        to the benchmark; the L2 proximity regularises towards the BL equilibrium,
+        guarding against overfitting. Sortino and Score/CVaR improve downside/tail
+        behaviour, while ASR rewards favourable higher moments.
 
         Modelling advantage
-        -------------------
-        Pairs long-horizon tracking quality (IR over 5y) with tail-risk robustness and higher-moment
-        awareness (ASR). The L2 proximity to BL regularises towards equilibrium allocations,
-        improving stability against estimation error. Backtracking improves robustness of ascent.
+        ------------------- 
+        Pairs long-horizon tracking quality (IR over 5y) with tail-risk robustness 
+        and higher-moment awareness (ASR). The L2 proximity to BL regularises towards
+        equilibrium allocations, improving stability against estimation error. 
+        Backtracking improves robustness of ascent.
         """
-
 
         self._assert_alignment()
         
@@ -7226,56 +7821,119 @@ class PortfolioOptimiser:
         max_iter: int = 1000,
     ) -> pd.Series:
         """
-        CCP optimiser that **combines IR(5y), Score/CVaR(1y), and ASR** with an **L1 proximity**
-        penalty to BL and **sector risk-contribution caps**, enforced via linearisation.
-        Includes Armijo backtracking on the true smoothed composite.
+        Maximise a **scaled composite of five rewards**—Sharpe, Sortino, 5-year
+        Information Ratio, Score/CVaR(1y), and Adjusted Sharpe—subject to
+        **linearised sector risk-contribution caps** and **L1 proximity** to
+        Black–Litterman weights, using a CCP step plus **Armijo backtracking**.
 
-        Objective (maximised)
-        ---------------------
-        With γ = (γ_SH, γ_SO, γ_IR5, γ_SC, γ_ASR, γ_P) and scales κ from
-        `_calibrate_scales_ir5_sc_pen_asr` (L1 penalty mode):
+        Overview
+        --------
+        The optimiser solves:
+
+            maximise_w  F(w)
+            
+            subject to  w ∈ W  and  sector RC caps (linearised)
+
+        with
+
+            F(w) = γ_SH κ_SH · S(w) + γ_SO κ_SO · SO(w) + γ_IR5 κ_IR5 · IR₅(w) + γ_SC κ_SC · SC(w) + γ_ASR κ_ASR · ASR(w) − γ_P κ_P · ‖ w − w_BL ‖₁.
+
+        Here γ_• are user weights; κ_• are scales from
+        `_calibrate_scales_ir5_sc_pen_asr` (L1 mode). The L1 proximity promotes
+        **sparse tilts** relative to w_BL (few concentrated deviations), offering a
+        robust regularisation in the presence of estimation noise.
+
+        Notation and Inputs
+        -------------------
+        As in comb_port6, with sector structure (masks) used for risk-contribution
+        accounting.
+
+        Component Terms
+        ---------------
         
-            F(w) = γ_SH κ_SH S(w) + γ_SO κ_SO SO(w) + γ_IR5 κ_IR5 IR₅(w) + γ_SC κ_SC SC(w) + γ_ASR κ_ASR ASR(w) − γ_P κ_P ||w − w_BL||₁.
+        1) Sharpe S(w), 2) Sortino SO(w), 4) SC(w), and 5) ASR(w) are as in
+        comb_port5/6.
 
-        Gradients used
-        --------------
-        - ∇ S, ∇ SO, ∇ IR₅, ∇ SC as in comb_port4.
-       
-        - ∇ ASR from `_asr_val_grad_single`.
-       
-        - L1 penalty subgradient: sign(w − w_BL) componentwise.
+        3) IR₅(w) is as in comb_port6 and uses (R₅, b₅) over a 5-year horizon.
 
-        Sector risk-contribution caps (linearised)
+        L1 Proximity Penalty
+        --------------------
+       
+            P₁(w) = ‖ w − w_BL ‖₁,
+        
+        with subgradient
+       
+            ∂P₁(w) = sign(w − w_BL)   (componentwise).
+        
+        The penalty is included in both the CCP subproblem and the **true**
+        objective used by Armijo backtracking.
+
+        Sector Risk-Contribution Caps (linearised)
         ------------------------------------------
-        For each sector s:  
-        
+        Let D_s be a diagonal selector for sector s, so that sector variance
+      
             V_s(w) = wᵀ D_s Σ D_s w.
-        
-        Impose 
-        
-            V_s(w) ≤ α_s · φ_t(w) 
-            
-        using first-order linearisation at w_t, yielding convex constraints of the form 
-        
-            V_s(w) ≤ α_s (off_param + grad_paramᵀ w),
-            
-        with parameters updated each iteration via `rc_update(w_t)`.
+      
+        A cap V_s(w) ≤ α_s · Φ(w) (for some portfolio-wide scale Φ) is enforced by
+        first-order linearisation at the current iterate w_t:
+      
+            V_s(w) ≈ V_s(w_t) + ∇V_s(w_t)ᵀ (w − w_t),
+      
+        where
+      
+            ∇V_s(w_t) = 2 D_s Σ D_s w_t.
+      
+        The routine `rc_update(w_t)` refreshes these affine parameters each
+        iteration, yielding convex constraints of the form
+      
+            V_s(w) ≤ α_s · (offset + gradientᵀ w).
 
-        CCP subproblem and line-search
-        ------------------------------
-        Subproblem:
-        
-            minimise   γ_P κ_P ||w − w_BL||₁ − ⟨lin_param, w⟩
-        
-        subject to feasibility + linearised sector caps, with 
-        
-            lin_param = ∇(reward) at w_t.
+        Scaling
+        -------
+        Scales κ_SH, κ_SO, κ_IR5, κ_SC, κ_ASR, κ_P are produced by
+        `_calibrate_scales_ir5_sc_pen_asr` (L1 mode), equalising the typical
+        magnitude of **γ_i κ_i ∇V_i** across reward terms and the penalty so that
+        γ encodes preference rather than unit scale.
 
-        Armijo backtracking on the true smoothed objective as in comb_port3.
+        Optimisation Method (CCP + Armijo)
+        ----------------------------------
+        Each iteration proceeds as:
+      
+        1) **Linearisation.** Compute reward gradient g_t at w_t.
+      
+        2) **Convex subproblem with L1 proximity.** Solve
+      
+                minimise_w   γ_P κ_P ‖ w − w_BL ‖₁ − g_tᵀ w
+      
+                subject to   w ∈ W and linearised sector RC caps.
+      
+        3) **Armijo backtracking.** With ŵ the subproblem solution and
+      
+            d_t = ŵ − w_t, choose η ∈ (0,1] to satisfy
+      
+                F(w_t + η d_t) ≥ F(w_t) + c · η · ‖d_t‖²,
+      
+            and update w_{t+1} = w_t + η d_t.
+      
+        4) Stop on small step (or after `max_iter`).
 
-        Final scoring
-        -------------
-        Score/CVaR evaluated with exact RU LP CVaR.
+        Feasibility and Constraints
+        ---------------------------
+        `build_constraints` supplies long-only/budget and name/sector caps; the
+        risk-contribution caps are injected via `rc_update` each iteration.
+
+        Returns
+        -------
+        pd.Series
+            The best portfolio among the seeds, labelled `"comb_port7"`.
+
+        Notes
+        -----
+        • The L1 proximity encourages sparse deviations from BL, which can be
+        desirable for interpretability and turnover control. Linearised sector
+        variance caps keep concentration risk in check, while IR₅ provides
+        benchmark-relative discipline over a longer horizon. Sortino/SC enhance
+        downside/tail robustness; ASR rewards higher-moment quality.
 
         Modelling advantage
         -------------------
@@ -7640,3 +8298,496 @@ class PortfolioOptimiser:
         self._last_diag = best_diag
        
         return pd.Series(best_w, index = self.universe, name = "comb_port7")
+
+
+    def comb_port8(
+            self,
+            gamma: tuple | None = (1.0, 1.0, 1.0, 1.0, 1.0),  
+            max_iter: int = 1000,
+        ) -> pd.Series:
+        """
+        Maximise a **scaled composite of five reward ratios**—Sharpe, Sortino,
+        Black–Litterman Sharpe, Score/CVaR, and Adjusted Sharpe—over a convex
+        feasible set using a CCP-style majorise–minimise loop with Armijo
+        backtracking. **No penalty term** is included.
+
+        Overview
+        --------
+        The optimiser solves:
+
+            maximise_w  F(w)
+            
+            subject to  w ∈ W
+
+        where W encodes portfolio constraints (e.g., long-only, budget, sector caps,
+        risk-contribution caps) and
+
+            F(w) = γ_SH κ_SH · S(w) + γ_SO κ_SO · SO(w) + γ_BL κ_BL · S_BL(w) + γ_SC κ_SC · SC(w) + γ_ASR κ_ASR · ASR(w).
+
+        The scalar weights γ_• are user-controlled importance multipliers, while
+        κ_• are **auto-calibrated scales** returned by
+        `_calibrate_scales_s_so_bl_sc_asr`, chosen to equalise average gradient
+        magnitudes of the components so that no single term dominates purely due to
+        units or natural curvature.
+
+        Notation and Inputs
+        -------------------
+        Let:
+        • μ  ∈ ℝ^n  be the vector of expected (annualised) asset returns.
+        • Σ  ∈ ℝ^{n×n} be the (annualised) asset return covariance matrix.
+        • rf_ann  be the annual risk-free rate; rf_week the per-period target for
+            Sortino (e.g., weekly risk-free).
+        • R₁ ∈ ℝ^{T×n} be the matrix of per-period (e.g., weekly) asset returns.
+        • w ∈ ℝ^n, w ≥ 0, 1ᵀ w = 1 unless otherwise configured.
+        • (μ_BL, Σ_BL) be the Black–Litterman posterior mean and covariance.
+        • s ∈ ℝ^n be the asset-level “Score” vector used by the custom ratio.
+
+        Component Ratios
+        ----------------
+        1) Sharpe ratio (annualised):
+       
+            S(w) = (μ_p − rf_ann) / σ_p,
+       
+        where μ_p = wᵀ μ and σ_p = sqrt(wᵀ Σ w). Its gradient is
+       
+            ∇S(w) = μ / σ_p − S(w) · (Σ w) / σ_p².
+       
+        This follows from ∇μ_p = μ and ∇σ_p = (Σ w) / σ_p.
+
+        2) Sortino ratio with downside deviation computed from R₁ and target τ = rf_week:
+       
+            SO(w) = (μ̄_p − τ) / σ_d(w),
+       
+        where μ̄_p = mean_t [ wᵀ R_t ] and
+       
+            σ_d(w) = sqrt( (1/T) ∑_t { min(0, wᵀ R_t − τ) }² ).
+       
+        Writing g_t(w) = min(0, r_t − τ) with r_t = wᵀ R_t, downside variance is
+       
+            DV(w) = (1/T) ∑_t g_t(w)²,   σ_d(w) = sqrt(DV(w)).
+       
+        Using a smooth approximation to the hinge at r_t = τ, the gradient is
+       
+            ∇SO(w) = [ σ_d(w)·∇μ̄_p − (μ̄_p − τ)·∇σ_d(w) ] / σ_d(w)²,
+       
+        with ∇μ̄_p = mean_t [ R_t ] and
+       
+            ∇σ_d(w) = (1 / (2 σ_d(w))) · ∇DV(w),
+       
+            ∇DV(w) = (2/T) ∑_t g_t(w) · ∇g_t(w) ≈ (2/T) ∑_t g_t(w)·π_t(w)·R_t,
+       
+        where π_t(w) is the smooth “indicator” derivative arising from the
+        chosen approximation (implemented inside `sortino_val_grad_from`).
+
+        3) Black–Litterman Sharpe (posterior Sharpe):
+       
+            S_BL(w) = (wᵀ μ_BL − rf_ann) / sqrt(wᵀ Σ_BL w),
+       
+        with gradient identical in form to Sharpe but using (μ_BL, Σ_BL).
+
+        4) Custom Score/CVaR ratio (risk-adjusted score):
+       
+            SC(w) = (sᵀ w) / CVaR_α(w),
+       
+        where CVaR_α is portfolio Conditional Value-at-Risk at tail level α for
+        the (loss) distribution induced by R₁. Using the Rockafellar–Uryasev (RU)
+        representation for sample losses ℓ_t(w) = − wᵀ R_t,
+       
+            CVaR_α(w) = min_z  z + (1 / ((1−α) T)) ∑_t max(0, ℓ_t(w) − z).
+       
+        At the optimum z*, a (sub)gradient in w is
+       
+            ∇CVaR_α(w) = (1 / ((1−α) T)) ∑_{t : ℓ_t(w) > z*} ∇ℓ_t(w)
+            
+                       = − (1 / ((1−α) T)) ∑_{t : ℓ_t(w) > z*} R_t.
+        
+        A smooth variant of the hinge (e.g., softplus) is used in code to obtain
+        differentiability everywhere. The quotient rule gives
+        
+            ∇SC(w) = [ CVaR_α(w) · s − (sᵀ w) · ∇CVaR_α(w) ] / CVaR_α(w)².
+
+        5) Adjusted Sharpe (skew/kurtosis correction):
+        A common form (Pezier–White) adjusts Sharpe by higher moments of the
+        portfolio return distribution:
+           
+            ASR(w) = S(w) · [ 1 + (γ₃(w) / 6) S(w) − ((κ(w) − 3) / 24) S(w)² − (γ₃(w)² / 36) S(w)³ ].
+            
+        Here γ₃(w) and κ(w) denote portfolio skewness and kurtosis, computed from
+        r_t(w) = wᵀ R_t. The gradient follows by the chain rule:
+          
+            ∇ASR = (∂ASR/∂S) ∇S + (∂ASR/∂γ₃) ∇γ₃ + (∂ASR/∂κ) ∇κ,
+       
+        where
+       
+            ∂ASR/∂S = 1 + 2 a S + 3 b S² + 4 c S³,
+       
+            ∂ASR/∂γ₃ = S²/6 − (γ₃ S⁴)/18,
+       
+            ∂ASR/∂κ = − S³ / 24,
+       
+        with 
+        
+            a = γ₃/6, 
+            
+            b = −(κ−3)/24, c = −γ₃²/36. 
+            
+        The exact variant used is encapsulated in `_asr_val_grad_single`.
+
+        Scaling and Composite Gradient
+        ------------------------------
+        To avoid scale-induced dominance, **component scales κ_•** are calibrated
+        once per run from random feasible portfolios (see
+        `_calibrate_scales_s_so_bl_sc_asr`). Denoting component values V_i(w) and
+        gradients g_i(w), the working composite for linearisation is
+
+            f_lin(w) = ∑_i γ_i κ_i V_i(w),
+
+        with gradient
+         
+            g(w) = ∑_i γ_i κ_i g_i(w).
+
+        Optimisation Method (CCP + Armijo)
+        ----------------------------------
+        The algorithm alternates the following steps until convergence (or
+        `max_iter`):
+
+        1) **Linearise the objective at current w_k.** Compute g_k = g(w_k).
+
+        2) **Solve the convex surrogate.** Over the convex feasible region W (with
+        any non-convex risk-contribution constraints replaced by their current
+        linearisation), solve:
+          
+            maximise_w  g_kᵀ w   subject to w ∈ W,
+        
+        which is equivalent to minimising −g_kᵀ w (as implemented). This is a
+        standard CCP (convex–concave procedure) / majorise–minimise step.
+
+        3) **Line search (Armijo backtracking).** Let ŵ be the surrogate solution
+        and d_k = ŵ − w_k. Choose a step size η ∈ (0, 1] by backtracking until
+        the sufficient increase condition holds for the **true** nonlinear
+        composite:
+        
+            F(w_k + η d_k) ≥ F(w_k) + c · η · ∥d_k∥²,
+        
+        with c ∈ (0, 1) (here c = 1e−4). Update w_{k+1} = w_k + η d_k.
+
+        4) **Stopping.** Stop when ∥d_k∥ is below a tolerance or η becomes very
+        small, indicating no productive ascent direction remains.
+
+        Feasibility and Constraints
+        ---------------------------
+        The `build_constraints` routine contributes:
+        • budget and non-negativity (long-only) constraints if configured;
+        • sector exposure or **risk-contribution caps** enforced via linear
+            approximations around w_k (and refreshed every iteration);
+        • any single-name or group caps already present in the class.
+
+        Returns
+        -------
+        pd.Series
+            The best portfolio weights among the seeds explored, labelled
+            `"comb_port8"`.
+
+        Notes and Practicalities
+        ------------------------
+        • Component gradients are computed by dedicated helpers (`gradients.py`)
+        that include smoothing of non-differentiable points (e.g., Sortino and
+        RU-CVaR). This ensures stable linearisation and monotone line-search.
+        • The BL Sharpe term injects posterior mean–variance information and acts
+        as a statistical regulariser **through reward alignment** rather than
+        via explicit proximity penalties.
+        • The auto-scaling κ_• is crucial: Sharpe and Sortino share similar units,
+        while Score/CVaR and ASR can have very different numerical ranges. The
+        calibration equalises typical gradient magnitudes so the γ_• weights
+        genuinely reflect user preference rather than scale artefacts.
+        """
+
+        self._assert_alignment()
+
+        if gamma is None:
+
+            gamma = getattr(self, "gamma", (1.0, 1.0, 1.0, 1.0, 1.0))
+
+        if len(gamma) != 5:
+
+            raise ValueError("comb_port8 expects gamma=(SH, SO, BL_Sharpe, SC, ASR).")
+
+        γ_sh, γ_so, γ_bl, γ_sc, γ_asr = gamma
+
+        _, μ_bl_arr, Σb_cal = self._bl
+
+        scale_sh, scale_so, scale_bl, scale_sc, scale_asr = self._calibrate_scales_s_so_bl_sc_asr(
+            gamma = gamma
+        )
+
+        ctx_grad = g.GradCtx(
+            mu = self.er_arr,
+            Sigma = self.Σ,
+            rf = self.rf_ann,
+            eps = 1e-12,
+            R1 = self.R1,
+            target = self.rf_week,
+        )
+        ctx_grad.scores = self.scores_arr  
+
+        sortino = g.sortino_val_grad_from(
+            R = self.R1, 
+            target = self.rf_week, 
+            eps = ctx_grad.eps
+        )
+
+        ctx_bl = g.GradCtx(
+            mu = μ_bl_arr,
+            Sigma = Σb_cal, 
+            rf = self.rf_ann, 
+            eps = 1e-12
+        )
+        
+        
+        def bl_sharpe_val_grad(
+            w, 
+            _ctx,
+            work = None
+        ):
+           
+            return g.sharpe_val_grad(
+                w = w,
+                ctx = ctx_bl, 
+                work = work
+            )
+
+
+        def asr_val_grad(
+            w, 
+            _ctx, 
+            work = None
+        ):
+            
+            return self._asr_val_grad_single(
+                w = w
+            )
+
+        obj = g.compose([
+            (γ_sh * scale_sh, g.sharpe_val_grad),
+            (γ_so * scale_so, sortino),
+            (γ_bl * scale_bl, bl_sharpe_val_grad),
+            (γ_sc * scale_sc, g.score_over_cvar_val_grad),
+            (γ_asr * scale_asr, asr_val_grad),
+        ])
+
+        w_var = cp.Variable(self.n, nonneg = True)
+        
+        lin_param = cp.Parameter(self.n)
+
+        cons, rc_update = self.build_constraints(
+            w_var = w_var,
+            sector_risk_cap = True,
+            Sigma = self.Σ,
+            sector_masks = self.sector_masks,
+            sector_alpha = self.alpha_dict,
+            single_port_cap = True,
+        )
+        
+        prob = cp.Problem(cp.Minimize(-lin_param @ w_var), cons)
+
+
+        def _from_initial(
+            w0: np.ndarray
+        ):
+        
+            w = w0.copy()
+        
+            work = g.Work()
+
+            for _ in range(max_iter):
+
+                _, grad = obj(w, ctx_grad, work)
+               
+                lin_param.value = self._np1(
+                    x = grad
+                )
+               
+                rc_update(
+                    w_t = w
+                )
+
+                if not self._solve(prob) or w_var.value is None:
+                    
+                    raise RuntimeError("comb_port8 CCP: subproblem solve failed")
+
+                direction = w_var.value - w
+                
+                if float(np.linalg.norm(direction)) < 1e-12:
+                   
+                    break 
+
+                eta = 1.0
+
+                c = 1e-4
+
+                work_eval = g.Work()
+
+                sh_v, _ = g.sharpe_val_grad(
+                    w = w, 
+                    ctx = ctx_grad, 
+                    work = work_eval
+                )
+                
+                so_v, _ = sortino(
+                    w = w, 
+                    ctx = ctx_grad,
+                    work = work_eval
+                )
+                
+                bl_v, _ = bl_sharpe_val_grad(
+                    w = w, 
+                    _ctx = None,
+                    work = work_eval
+                )
+                
+                sc_v, _ = g.score_over_cvar_val_grad(
+                    w = w, 
+                    ctx = ctx_grad,
+                    work = work_eval
+                )
+                
+                asr_v, _ = asr_val_grad(
+                    w = w, 
+                    _ctx = None, 
+                    work = work_eval
+                )
+
+                prev_true = (
+                    γ_sh  * scale_sh  * sh_v
+                + γ_so  * scale_so  * so_v
+                + γ_bl  * scale_bl  * bl_v
+                + γ_sc  * scale_sc  * sc_v
+                + γ_asr * scale_asr * asr_v
+                )
+
+                while eta > 1e-6:
+                  
+                    w_trial = w + eta * direction
+
+                    sh_t, _ = g.sharpe_val_grad(
+                        w = w_trial, 
+                        ctx = ctx_grad,
+                        work = work_eval
+                    )
+                    
+                    so_t, _ = sortino(
+                        w = w_trial,         
+                        ctx = ctx_grad,
+                        work = work_eval
+                    )
+                    
+                    bl_t, _ = bl_sharpe_val_grad(
+                        w = w_trial,
+                        _ctx = None,    
+                        work = work_eval
+                    )
+                    
+                    sc_t, _ = g.score_over_cvar_val_grad(
+                        w = w_trial, 
+                        ctx = ctx_grad, 
+                        work = work_eval
+                    )
+                    
+                    asr_t, _ = asr_val_grad(
+                        w = w_trial,
+                        _ctx = None,
+                        work = work_eval
+                    )
+
+                    s_trial = (
+                        γ_sh * scale_sh * sh_t
+                    + γ_so * scale_so * so_t
+                    + γ_bl * scale_bl * bl_t
+                    + γ_sc * scale_sc * sc_t
+                    + γ_asr * scale_asr * asr_t
+                    )
+
+                    if s_trial >= prev_true + c * eta * float(np.dot(direction, direction)):
+                    
+                        w = w_trial
+                    
+                        prev_true = s_trial
+                    
+                        break
+
+                    eta *= 0.5 
+
+                if eta <= 1e-6:
+                    
+                    break  
+
+            work = g.Work()
+
+            sh_val, sh_g = g.sharpe_val_grad(
+                w = w,
+                ctx = ctx_grad,
+                work = work
+            )
+
+            so_val, so_g = sortino(
+                w = w,         
+                ctx = ctx_grad, 
+                work = work
+            )
+
+            bl_val, bl_g = bl_sharpe_val_grad(
+                w = w,
+                _ctx = None,
+                work = work
+            )
+
+            sc_ratio, sc_g = g.score_over_cvar_val_grad(
+                w = w, 
+                ctx = ctx_grad,
+                work = work
+            )
+
+            asr_val, asr_g = asr_val_grad(
+                w = w,
+                _ctx = None,
+                work = work
+            )
+
+            score = (
+                γ_sh * scale_sh * sh_val
+            + γ_so * scale_so * so_val
+            + γ_bl * scale_bl * bl_val
+            + γ_sc * scale_sc * sc_ratio
+            + γ_asr * scale_asr * asr_val
+            )
+
+            diag = {
+                "Sharpe_push": γ_sh * scale_sh * float(np.linalg.norm(sh_g)),
+                "Sortino_push": γ_so * scale_so * float(np.linalg.norm(so_g)),
+                "BLSharpe_push": γ_bl * scale_bl * float(np.linalg.norm(bl_g)),
+                "SC_push": γ_sc * scale_sc * float(np.linalg.norm(sc_g)),
+                "ASR_push": γ_asr * scale_asr * float(np.linalg.norm(asr_g)),
+            }
+            return w, score, diag
+
+        best_w = None
+        
+        best_s = -np.inf
+        
+        best_diag = {}
+      
+        for w0 in self._initial_seeds:
+      
+            w_cand, s_cand, diag = _from_initial(
+                w0 = w0
+            )
+      
+            if s_cand > best_s:
+      
+                best_w = w_cand
+                
+                best_s = s_cand
+                
+                best_diag = diag
+
+        return pd.Series(best_w, index = self.universe, name = "comb_port8")
