@@ -6,10 +6,10 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 
-from ratio_data import RatioData
+from data_processing.ratio_data import RatioData
 import config
 
-from coe2 import (
+from coe import (
     beta_hac_ols,
     beta_dimson_hac,
     beta_kalman_random_walk,
