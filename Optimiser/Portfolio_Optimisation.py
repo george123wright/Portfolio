@@ -1,7 +1,7 @@
 """
 End-to-end portfolio optimisation and reporting pipeline.
 
-This script loads forecasts, returns, and classifications; builds risk models; 
+This script loads forecasts, returns, and classifications; builds risk models;  
 runs a suite of long-only optimisers via `PortfolioOptimiser`; and exports both 
 weights and diagnostics to an Excel workbook with conditional formatting.
 
@@ -66,6 +66,7 @@ Pipeline outline
             Advantage: long-horizon discipline around BL equilibrium.
        
        • `comb_port4`  = As in 3 with L1 to BL + **sector risk caps** (linearised).  
+           
             Advantage: limits sector risk concentration with sparse BL tilts.
        
        • `comb_port5`  = Sharpe + Sortino + BL-Sharpe + IR(1y) + Score/CVaR + ASR.  
@@ -112,6 +113,7 @@ Outputs
 Notes
 -----
 - `yfinance` download calls require network connectivity and may incur API delays.
+
 - All optimisers enforce the same long-only, budget, and box/sector/industry caps;
   some composite variants also include CCP linearised sector risk-contribution caps.
 """
@@ -132,6 +134,7 @@ from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.styles import PatternFill
 import pandas as pd
 from openpyxl.formatting.rule import ColorScaleRule 
+
 import portfolio_functions as pf
 from functions.cov_functions import shrinkage_covariance
 from portfolio_optimisers import PortfolioOptimiser
@@ -143,6 +146,11 @@ r = RatioData()
 tickers = config.tickers
 
 money_in_portfolio = config.MONEY_IN_PORTFOLIO
+
+MIN_STD = 1e-2
+
+MAX_STD = 2
+
 
 logging.basicConfig(
     level = logging.INFO,
@@ -277,6 +285,10 @@ def load_excel_data() -> Tuple[
     ticker_mcap = ticker_data['marketCap']
   
     ticker_sec = ticker_data['Sector']
+    
+    d_to_e = ticker_data['debtToEquity'] / 100
+    
+    tax = ticker_data['Tax Rate']
         
     daily_ret_5y = daily_ret.loc[daily_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
   
@@ -287,25 +299,69 @@ def load_excel_data() -> Tuple[
     factor_weekly, index_weekly, ind_weekly, sec_weekly = r.factor_index_ind_sec_weekly_rets(
         merge = False
     )
-            
+    
+    base_ccy = getattr(config, "BASE_CCY", "GBP")
+
+    daily_ret_5y_base = r.convert_returns_to_base(
+        ret_df = daily_ret_5y,
+        base_ccy = base_ccy,
+        interval = "1d"
+    )
+    
+    weekly_ret_5y_base = r.convert_returns_to_base(
+        ret_df = weekly_ret_5y,
+        base_ccy = base_ccy,
+        interval = "1wk"
+    )
+    
+    monthly_ret_5y_base = r.convert_returns_to_base(
+        ret_df = monthly_ret_5y,
+        base_ccy = base_ccy,
+        interval = "1mo"
+    )
+    
+    factor_weekly_base = r.convert_returns_to_base(
+        ret_df = factor_weekly, 
+        base_ccy = base_ccy,
+        interval = "1wk"
+    )
+    
+    index_weekly_base = r.convert_returns_to_base(
+        ret_df = index_weekly,
+        base_ccy = base_ccy,
+        interval = "1wk"
+    )
+    
+    ind_weekly_base = r.convert_returns_to_base(
+        ret_df = ind_weekly,
+        base_ccy = base_ccy, 
+        interval = "1wk"
+    )
+    
+    sec_weekly_base = r.convert_returns_to_base(
+        ret_df = sec_weekly,
+        base_ccy = base_ccy, 
+        interval = "1wk"
+    )
+     
     annCov, annCov_desc = shrinkage_covariance(
-        daily_5y = daily_ret_5y, 
-        weekly_5y = weekly_ret_5y, 
-        monthly_5y = monthly_ret_5y, 
+        daily_5y = daily_ret_5y_base, 
+        weekly_5y = weekly_ret_5y_base, 
+        monthly_5y = monthly_ret_5y_base, 
         comb_std = comb_std, 
         common_idx = comb_rets.index,
-        ff_factors_weekly = factor_weekly,
-        index_returns_weekly = index_weekly,
-        industry_returns_weekly = ind_weekly,
-        sector_returns_weekly = sec_weekly,
+        ff_factors_weekly = factor_weekly_base,
+        index_returns_weekly = index_weekly_base,
+        industry_returns_weekly = ind_weekly_base,
+        sector_returns_weekly = sec_weekly_base,
         use_excess_ff = False,
         description = True
     )
         
     sigma_prior = shrinkage_covariance(
-        daily_5y = daily_ret_5y, 
-        weekly_5y = weekly_ret_5y, 
-        monthly_5y = monthly_ret_5y, 
+        daily_5y = daily_ret_5y_base, 
+        weekly_5y = weekly_ret_5y_base, 
+        monthly_5y = monthly_ret_5y_base, 
         comb_std = comb_std, 
         common_idx = tickers, 
         w_F = 0,       
@@ -322,12 +378,10 @@ def load_excel_data() -> Tuple[
     cov_df = pd.DataFrame(annCov, index = tickers, columns = tickers)
     
     annCov_desc_df = pd.DataFrame(annCov_desc.T)
-    
-    print(annCov_desc_df)
-    
+        
     Signal = pd.read_excel(config.DATA_FILE, sheet_name = "Signal Scores", index_col = 0).iloc[-1]
     
-    beta_data = pd.read_excel(config.FORECAST_FILE, sheet_name = "Analyst Data", index_col = 0)["beta"]
+    beta_data = pd.read_excel(config.FORECAST_FILE, sheet_name = "COE", index_col = 0)["Beta_Levered_Used"]
 
     beta_data.index = beta_data.index.str.upper()
 
@@ -336,7 +390,8 @@ def load_excel_data() -> Tuple[
     return (weekly_ret_5y, tickers, weeklyCov, annCov, annCov_desc_df, cov_df,
             Signal, beta, 
             score, comb_rets, ticker_ind, ticker_sec, comb_std,
-            bear_rets, bull_rets, ticker_mcap, sigma_prior, factor_pred)
+            bear_rets, bull_rets, ticker_mcap, sigma_prior, factor_pred,
+            d_to_e, tax)
 
 
 def get_buy_sell_signals_from_scores(
@@ -659,15 +714,23 @@ def benchmark_rets(
     Download benchmark prices and compute weekly returns and trailing annual return.
 
     Supported `benchmark` strings (case-insensitive):
+       
         'SP500'  → '^GSPC'
+       
         'NASDAQ' → '^IXIC'
+       
         'FTSE'   → '^FTSE'
+       
         'FTSE ALL-WORLD' → 'VWRL.L'
+       
         'ALL'    → equal-weighted average of SP500, NASDAQ, FTSE annualised returns
 
     Computation:
+    
         - Price series resampled to weekly last; returns = pct_change().dropna().
+        
         - `last_year_rets` filters to the last calendar year window (`config.YEAR_AGO`).
+        
         - Trailing annual return = ∏(1 + weekly_ret) − 1 over `last_year_rets`.
 
     Args:
@@ -789,7 +852,7 @@ def compute_mcap_bounds(
 
     score_max = score.max()
     
-    mcap_sqrt = market_cap
+    mcap_sqrt = np.sqrt(market_cap)
     
     mcap_vol = {}
     
@@ -800,9 +863,7 @@ def compute_mcap_bounds(
         if vol.loc[t] > 0 and score.loc[t] > 0 and er.loc[t] > 0:
        
             mcap_vol[t] = fp.loc[t] * mcap_sqrt.loc[t] / vol.loc[t]
-            
-            print(f"Ticker: {t}, Factor Pred: {fp.loc[t]:.4f}")
-       
+                   
         else:
        
             mcap_vol[t] = 0.0
@@ -835,37 +896,35 @@ def compute_mcap_bounds(
     
         elif er.loc[t] > 0 and score.loc[t] > 0:
             
-            score_t = min(score.loc[t], 20)
+            score_t = score.loc[t]#min(score.loc[t], 20)
             
             norm_score = score_t / score_max
             
             cl_l = min(frac[t], max_all_l)
-            
-            lb[t] = max(min_all, norm_score * cl_l)
 
             frac_u = np.sqrt(frac[t])
             
-            cl_u = min(frac_u, max_all)
+            cl_u = min(frac_u, max_all) #frax_u
             
             if ticker_sec.loc[t] == 'Healthcare' or ticker_sec.loc[t] == 'Consumer Staples':
                         
                 ub_val = min(norm_score * cl_u, 0.025)
-                
-                lb[t] = max(norm_score * cl_l / 2, min_all)
             
-                ub[t] = max(ub_val, lb[t])
+                ub[t] = ub_val #max(ub_val, lb[t])
+                
+                lb[t] = min(max(norm_score * cl_l / 2, min_all), ub[t] / 2)
             
             else:
             
                 ub[t] = max(min(norm_score * cl_u, max_all), min_all_u)
+                
+            lb[t] = min(min(max(min_all, norm_score * cl_l), ub[t] / 2), 0.025)
     
         else:
     
             lb[t] = 0.0
        
             ub[t] = 0.0
-        
-        print(f"Ticker: {t}, Lower Bound: {lb[t]:.4f}, Upper Bound: {ub[t]:.4f}")
 
     return pd.Series(lb), pd.Series(ub), frac
 
@@ -875,6 +934,7 @@ def main() -> None:
     Run the full optimisation workflow and export results.
 
     Steps:
+       
         1) Download benchmark data and compute weekly/annual returns.
       
         2) Load Excel-based forecasts and analytics; build annual/weekly covariance
@@ -897,8 +957,11 @@ def main() -> None:
         9) Write all outputs to Excel with conditional formatting and tables.
 
     Side Effects:
+     
         - Logs progress to the root logger.
+     
         - Appends/replaces sheets in `config.PORTFOLIO_FILE`.
+     
         - Prints intermediate optimised weights and volatility figures.
 
     Raises:
@@ -917,7 +980,7 @@ def main() -> None:
 
     logging.info("Loading Excel data...")
   
-    (weekly_ret, tickers, weekly_cov, ann_cov, ann_cov_desc, cov_df, signal_score, beta, comb_score, comb_rets, ticker_ind, ticker_sec, comb_ann_std, bear_rets, bull_rets, mcap, sigma_prior, factor_pred) = load_excel_data()
+    (weekly_ret, tickers, weekly_cov, ann_cov, ann_cov_desc, cov_df, signal_score, beta, comb_score, comb_rets, ticker_ind, ticker_sec, comb_ann_std, bear_rets, bull_rets, mcap, sigma_prior, factor_pred, d_to_e, tax) = load_excel_data()
     
     assert comb_rets.index.equals(pd.Index(tickers)), "comb_rets index ≠ tickers"
     
@@ -999,39 +1062,99 @@ def main() -> None:
     )
 
     w_msr = opt.msr()
+    
+    print("MSR Weights:", w_msr)
    
     w_sortino = opt.sortino()
+
+    print("Sortino Weights:", w_sortino)
    
     w_mir = opt.MIR()
+
+    print("MIR Weights:", w_mir)
    
     w_msp = opt.msp()
-   
+
+    print("MSP Weights:", w_msp)    
+    
+    w_gmv = opt.min_variance()
+
+    print("GMV Weights:", w_gmv)
+    
+    w_mdp = opt.max_diversification()
+    
+    print("MDP Weights:", w_mdp)
+    
     w_bl, mu_bl, sigma_bl = opt.black_litterman_weights()
 
+    print('Black-Litterman Weights:', w_bl)
+
+    deflated_w_msr = opt.optimise_deflated_sharpe()
+    
+    print("Deflated MSR Weights:", deflated_w_msr)
+    
+    adjusted_w_msr = opt.optimise_adjusted_sharpe()
+
+    print("Adjusted MSR Weights:", adjusted_w_msr)
+    
+    w_upm_lpm = opt.upm_lpm_port()
+    
+    print("UPM-LPM Weights:", w_upm_lpm)
+    
+    w_up_down_cap = opt.upside_downside_capture_port()
+    
+    print("Upside/Downside Capture Weights:", w_up_down_cap)
+    
+    w_comb10 = opt.comb_port10()
+    
+    print("Combination10 Weights:", w_comb10)
+    
+    w_comb11 = opt.comb_port11()
+    
+    print("Combination11 Weights:", w_comb11)
+    
     w_comb = opt.comb_port()
+    
+    print("Combination Weights:", w_comb)
    
     w_comb1 = opt.comb_port1()
+    
+    print("Combination1 Weights:", w_comb1)
    
     w_comb2 = opt.comb_port2()
     
+    print("Combination2 Weights:", w_comb2)
+    
     w_comb3 = opt.comb_port3()
+    
+    print("Combination3 Weights:", w_comb3)
     
     w_comb4 = opt.comb_port4()
     
+    print("Combination4 Weights:", w_comb4)
+    
     w_comb5 = opt.comb_port5()
+    
+    print("Combination5 Weights:", w_comb5)
     
     w_comb6 = opt.comb_port6()
     
+    print("Combination6 Weights:", w_comb6)
+    
     w_comb7 = opt.comb_port7()
+    
+    print("Combination7 Weights:", w_comb7)
     
     w_comb8 = opt.comb_port8()
     
-    deflated_w_msr = opt.optimise_deflated_sharpe()
+    print("Combination8 Weights:", w_comb8)
     
-    adjusted_w_msr = opt.optimise_adjusted_sharpe()
+    w_comb9 = opt.comb_port9()
     
-    print("MSR Weights:", w_msr)
-        
+    print("Combination9 Weights:", w_comb9)
+    
+
+            
     vol_msr_ann = pa.portfolio_volatility(
         weights = w_msr, 
         covmat = ann_cov
@@ -1041,9 +1164,7 @@ def main() -> None:
         weights = w_msr, 
         covmat = weekly_cov
     )
-        
-    print("Sortino Weights:", w_sortino)
-    
+            
     vol_sortino_ann = pa.portfolio_volatility(
         weights = w_sortino, 
         covmat = ann_cov
@@ -1053,9 +1174,7 @@ def main() -> None:
         weights = w_sortino, 
         covmat = weekly_cov
     )
-    
-    print('Black-Litterman Weights:', w_bl)
-    
+        
     vol_bl_ann = pa.portfolio_volatility(
         weights = w_bl, 
         covmat = ann_cov
@@ -1065,9 +1184,7 @@ def main() -> None:
         weights = w_bl, 
         covmat = weekly_cov
     )
-    
-    print("MIR Weights:", w_mir)
-    
+        
     vol_mir_ann = pa.portfolio_volatility(
         weights = w_mir, 
         covmat = ann_cov
@@ -1077,8 +1194,26 @@ def main() -> None:
         weights = w_mir, 
         covmat = weekly_cov
     )
-
-    print("MSP Weights:", w_msp)    
+    
+    vol_gmv_ann = pa.portfolio_volatility(
+        weights = w_gmv, 
+        covmat = ann_cov
+    )
+    
+    vol_gmv = pa.portfolio_volatility(
+        weights = w_gmv, 
+        covmat = weekly_cov
+    )
+    
+    vol_mdp_ann = pa.portfolio_volatility(
+        weights = w_mdp, 
+        covmat = ann_cov
+    )
+    
+    vol_mdp = pa.portfolio_volatility(
+        weights = w_mdp, 
+        covmat = weekly_cov
+    )
         
     vol_msp_ann = pa.portfolio_volatility(
         weights = w_msp, 
@@ -1089,8 +1224,7 @@ def main() -> None:
         weights = w_msp, 
         covmat = weekly_cov
     )
-    print("Deflated MSR Weights:", deflated_w_msr)
-    
+        
     vol_deflated_msr_ann = pa.portfolio_volatility(
         weights = deflated_w_msr, 
         covmat = ann_cov
@@ -1100,9 +1234,7 @@ def main() -> None:
         weights = deflated_w_msr, 
         covmat = weekly_cov
     )
-    
-    print("Adjusted MSR Weights:", adjusted_w_msr)
-    
+        
     vol_adjusted_msr_ann = pa.portfolio_volatility(
         weights = adjusted_w_msr, 
         covmat = ann_cov
@@ -1110,6 +1242,26 @@ def main() -> None:
     
     vol_adjusted_msr = pa.portfolio_volatility(
         weights = adjusted_w_msr, 
+        covmat = weekly_cov
+    )
+    
+    vol_upm_lpm_ann = pa.portfolio_volatility(
+        weights = w_upm_lpm, 
+        covmat = ann_cov
+    )
+    
+    vol_upm_lpm = pa.portfolio_volatility(
+        weights = w_upm_lpm, 
+        covmat = weekly_cov
+    )
+    
+    vol_up_down_cap_ann = pa.portfolio_volatility(
+        weights = w_up_down_cap, 
+        covmat = ann_cov
+    )
+    
+    vol_up_down_cap = pa.portfolio_volatility(
+        weights = w_up_down_cap, 
         covmat = weekly_cov
     )
         
@@ -1123,10 +1275,6 @@ def main() -> None:
         covmat = weekly_cov
     )
     
-    print("Combination Weights:", w_comb)
-    
-    print("Combination1 Weights:", w_comb1)
-    
     vol_comb1_ann = pa.portfolio_volatility(
         weights = w_comb1, 
         covmat = ann_cov
@@ -1136,9 +1284,7 @@ def main() -> None:
         weights = w_comb1, 
         covmat = weekly_cov
     )
-    
-    print("Combination2 Weights:", w_comb2)
-    
+        
     vol_comb2_ann = pa.portfolio_volatility(
         weights = w_comb2, 
         covmat = ann_cov
@@ -1148,9 +1294,7 @@ def main() -> None:
         weights = w_comb2, 
         covmat = weekly_cov
     )
-    
-    print("Combination3 Weights:", w_comb3)
-    
+        
     vol_comb3_ann = pa.portfolio_volatility(
         weights = w_comb3, 
         covmat = ann_cov
@@ -1160,9 +1304,7 @@ def main() -> None:
         weights = w_comb3, 
         covmat = weekly_cov
     )
-    
-    print("Combination4 Weights:", w_comb4)
-    
+        
     vol_comb4_ann = pa.portfolio_volatility(
         weights = w_comb4, 
         covmat = ann_cov
@@ -1172,9 +1314,7 @@ def main() -> None:
         weights = w_comb4, 
         covmat = weekly_cov
     )
-    
-    print("Combination5 Weights:", w_comb5)
-    
+        
     vol_comb5_ann = pa.portfolio_volatility(
         weights = w_comb5, 
         covmat = ann_cov
@@ -1184,9 +1324,7 @@ def main() -> None:
         weights = w_comb5, 
         covmat = weekly_cov
     )
-    
-    print("Combination6 Weights:", w_comb6)
-    
+        
     vol_comb6_ann = pa.portfolio_volatility(
         weights = w_comb6, 
         covmat = ann_cov
@@ -1196,9 +1334,7 @@ def main() -> None:
         weights = w_comb6, 
         covmat = weekly_cov
     )
-    
-    print("Combination7 Weights:", w_comb7)
-    
+        
     vol_comb7_ann = pa.portfolio_volatility(
         weights = w_comb7, 
         covmat = ann_cov
@@ -1208,9 +1344,7 @@ def main() -> None:
         weights = w_comb7, 
         covmat = weekly_cov
     )
-    
-    print("Combination8 Weights:", w_comb8)
-    
+        
     vol_comb8_ann = pa.portfolio_volatility(
         weights = w_comb8, 
         covmat = ann_cov
@@ -1221,14 +1355,53 @@ def main() -> None:
         covmat = weekly_cov
     )
     
+    vol_comb9_ann = pa.portfolio_volatility(
+        weights = w_comb9, 
+        covmat = ann_cov
+    )
+    
+    vol_comb9 = pa.portfolio_volatility(
+        weights = w_comb9, 
+        covmat = weekly_cov
+    )
+    
+    vol_comb10_ann = pa.portfolio_volatility(
+        weights = w_comb10, 
+        covmat = ann_cov
+    )
+    
+    vol_comb10 = pa.portfolio_volatility(
+        weights = w_comb10, 
+        covmat = weekly_cov
+    )
+    
+    vol_comb11_ann = pa.portfolio_volatility(
+        weights = w_comb11, 
+        covmat = ann_cov
+    )
+    
+    vol_comb11 = pa.portfolio_volatility(
+        weights = w_comb11, 
+        covmat = weekly_cov
+    )
+    
+    
+    var = pd.Series(np.diag(ann_cov), index = ann_cov.index)
+    
+    std = np.sqrt(var).clip(lower = MIN_STD, upper = MAX_STD)
+    
     weights_df = pd.DataFrame({
         "MSR": w_msr,
         "Sortino": w_sortino,
         "MIR": w_mir,
+        "GMV": w_gmv,
+        "MDP": w_mdp,
         "MSP": w_msp,
         "BL": w_bl,
         "Deflated_MSR": deflated_w_msr,
         "Adjusted_MSR": adjusted_w_msr,
+        "UPM-LPM": w_upm_lpm,
+        "Upside/Downside": w_up_down_cap,
         "Combination": w_comb,
         "Combination1": w_comb1,
         "Combination2": w_comb2,
@@ -1238,9 +1411,21 @@ def main() -> None:
         "Combination6": w_comb6,
         "Combination7": w_comb7,
         "Combination8": w_comb8,
+        "Combination9": w_comb9,
+        "Combination10": w_comb10,
+        "Combination11": w_comb11,
+        "Expected Return": comb_rets,
+        "Vol": std,
+        "Score": comb_score,
     })
     
-    portfolio_weights = weights_df.reindex(tickers).multiply(money_in_portfolio).reset_index().rename(columns = {"index": "Ticker"})
+    weights = weights_df.reindex(tickers)
+    
+    cols_to_mult = [col for col in weights.columns if col not in ["Expected Return", "Vol", "Score"]]
+    
+    weights[cols_to_mult] = weights[cols_to_mult] * money_in_portfolio
+    
+    portfolio_weights = weights.reset_index().rename(columns = {"index": "Ticker"})
     
     portfolio_weights_with_ind = portfolio_weights.merge(
         ticker_ind.rename("Industry"), 
@@ -1272,6 +1457,8 @@ def main() -> None:
         w_msr = w_msr,
         w_sortino = w_sortino,
         w_mir = w_mir,
+        w_gmv = w_gmv,
+        w_mdp = w_mdp,
         w_msp = w_msp,
         w_bl = w_bl,
         w_comb = w_comb,
@@ -1283,14 +1470,21 @@ def main() -> None:
         w_comb6 = w_comb6,
         w_comb7 = w_comb7,
         w_comb8 = w_comb8,
+        w_comb9 = w_comb9,
+        w_comb10 = w_comb10,
+        w_comb11 = w_comb11,
         w_deflated_msr = deflated_w_msr,
         w_adjusted_msr = adjusted_w_msr,
+        w_upm_lpm = w_upm_lpm,
+        w_up_down_cap = w_up_down_cap,
         comb_rets = comb_rets,
         bear_rets = bear_rets,
         bull_rets = bull_rets,
         vol_msr = vol_msr,
         vol_sortino = vol_sortino,
         vol_mir = vol_mir,
+        vol_gmv = vol_gmv,
+        vol_mdp = vol_mdp,
         vol_msp = vol_msp,
         vol_bl = vol_bl,
         vol_comb = vol_comb,
@@ -1302,11 +1496,18 @@ def main() -> None:
         vol_comb6 = vol_comb6,
         vol_comb7 = vol_comb7,
         vol_comb8 = vol_comb8,
+        vol_comb9 = vol_comb9,
+        vol_comb10 = vol_comb10,
+        vol_comb11 = vol_comb11,
         vol_deflated_msr = vol_deflated_msr,
         vol_adjusted_msr = vol_adjusted_msr,
+        vol_upm_lpm = vol_upm_lpm,
+        vol_up_down_cap = vol_up_down_cap,
         vol_msr_ann = vol_msr_ann,
         vol_sortino_ann = vol_sortino_ann,
         vol_mir_ann = vol_mir_ann,
+        vol_gmv_ann = vol_gmv_ann,
+        vol_mdp_ann = vol_mdp_ann,
         vol_msp_ann = vol_msp_ann,
         vol_bl_ann = vol_bl_ann,
         vol_comb_ann = vol_comb_ann,
@@ -1318,8 +1519,13 @@ def main() -> None:
         vol_comb6_ann = vol_comb6_ann,
         vol_comb7_ann = vol_comb7_ann,
         vol_comb8_ann = vol_comb8_ann,
+        vol_comb9_ann = vol_comb9_ann,
+        vol_comb10_ann = vol_comb10_ann,
+        vol_comb11_ann = vol_comb11_ann,
         vol_deflated_msr_ann = vol_deflated_msr_ann,
         vol_adjusted_msr_ann = vol_adjusted_msr_ann,
+        vol_upm_lpm_ann = vol_upm_lpm_ann,
+        vol_up_down_cap_ann = vol_up_down_cap_ann,
         comb_score = comb_score,
         last_year_weekly_rets = last_year_weekly_rets,
         last_5y_weekly_rets = last_5_year_weekly_rets,
@@ -1329,7 +1535,9 @@ def main() -> None:
         benchmark_weekly_rets = last_year_benchmark_weekly_rets,
         benchmark_ret = benchmark_ret,
         mu_bl = mu_bl,
-        sigma_bl = sigma_bl
+        sigma_bl = sigma_bl,
+        d_to_e = d_to_e,
+        tax = tax,
     )
         
     ticker_performance = pa.report_ticker_metrics(
@@ -1349,6 +1557,8 @@ def main() -> None:
         benchmark_ann_ret = benchmark_ret,
         bl_ret = mu_bl,
         bl_cov = sigma_bl,
+        tax = tax,
+        d_to_e = d_to_e,
         forecast_file = config.FORECAST_FILE
     )
     
