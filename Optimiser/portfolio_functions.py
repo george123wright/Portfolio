@@ -104,6 +104,8 @@ from scipy.stats import norm
 from scipy.stats import qmc
 import statsmodels.api as sm
 
+from coe2 import relever_beta_from_unlevered
+
 import config
 
 
@@ -318,6 +320,46 @@ class PortfolioAnalytics:
 
 
     @staticmethod
+    def _as_scalar(
+        x, 
+        *, 
+        weights = None, 
+        take = 'last'
+    ):
+        """
+        Coerce x to a float.
+        - If scalar -> float(x).
+        - If pd.Series with index matching weights -> weighted average.
+        - If pd.Series time-series -> last valid (take='last') or mean (take='mean').
+        - If 1-length array/Series -> the single value.
+        """
+        import numpy as np
+        import pandas as pd
+
+        if np.isscalar(x):
+            return float(x)
+
+        if isinstance(x, pd.Series):
+            if weights is not None and isinstance(weights, pd.Series):
+                w = weights.reindex(x.index).fillna(0.0)
+                return float((x.fillna(0.0) * w).sum())
+            s = x.dropna()
+            if s.empty:
+                return float('nan')
+            if take == 'mean':
+                return float(s.mean())
+            return float(s.iloc[-1])  # default: last valid
+
+        # numpy array / list / tuple
+        arr = np.asarray(x, dtype=float).ravel()
+        if arr.size == 0:
+            return float('nan')
+        if arr.size == 1:
+            return float(arr[0])
+        # fall back to mean
+        return float(np.nanmean(arr))
+
+    @staticmethod
     def portfolio_return(
         weights: np.ndarray,
         returns: Any
@@ -437,7 +479,51 @@ class PortfolioAnalytics:
             
         """
         
-        return float(weights @ beta.to_numpy(copy=False, dtype=float))
+        return float(weights @ beta)
+    
+    
+    @staticmethod
+    def port_tax(
+        weights: np.ndarray,
+        tax: pd.Series
+    ) -> float:
+        """
+        Portfolio tax rate as a weighted average of asset tax rates:
+
+            tax_p = w^⊤ tax.
+            
+        """
+        
+        return float(weights @ tax)
+    
+    
+    @staticmethod
+    def port_d_to_e(
+        weights: np.ndarray,
+        d_to_e: pd.Series
+    ) -> float:
+        """
+        Portfolio debt-to-equity ratio as a weighted average of asset d/e ratios:
+
+            (d/e)_p = w^⊤ (d/e).
+            
+        """
+        
+        return float(weights @ d_to_e.to_numpy(copy = False, dtype = float))
+
+
+    @staticmethod
+    def port_d_to_e_batch(W: np.ndarray, d_to_e: pd.Series, names: list[str]) -> pd.Series:
+        # weighted average per portfolio: (d/e)^T W → length-K
+        v = d_to_e.to_numpy(dtype=float)
+        out = v @ W                      # shape (K,)
+        return pd.Series(out, index=names, name="D_to_E")
+
+    @staticmethod
+    def port_tax_batch(W: np.ndarray, tax: pd.Series, names: list[str]) -> pd.Series:
+        v = tax.to_numpy(dtype=float)
+        out = v @ W
+        return pd.Series(out, index=names, name="Tax")
 
 
     @staticmethod
@@ -800,8 +886,8 @@ class PortfolioAnalytics:
         Cached for small integers.
         """
         
-        return int(np.floor(n ** 0.25))
-
+        return max(1, int(np.floor(n ** 0.25)))
+    
 
     @staticmethod
     def jensen_alpha_r2(
@@ -811,6 +897,11 @@ class PortfolioAnalytics:
         periods_per_year: int,
         bench_ann_ret: float,
         port_ann_ret_pred: float,
+        lever_beta: bool = False,
+        d_to_e: float = 0.0,
+        tax: float = 0.2,
+        port_ann_ret_hist: float = None,
+        scale_alpha_with_leverage: bool = False
     ) -> Dict[str, float]:
         """
         Jensen’s alpha with HAC covariance, plus annualisation, t-stats, R², and
@@ -848,8 +939,14 @@ class PortfolioAnalytics:
         y = (df["p"] - rf_per_period).to_numpy(copy = False)
        
         x = (df["b"] - rf_per_period).to_numpy(copy = False)
-       
-        X = sm.add_constant(x)  
+        
+        try:
+            
+            X = sm.add_constant(x, has_constant = 'add')
+            
+        except:
+
+            X = np.column_stack([np.ones(len(x)), x])
        
         model = sm.OLS(y, X)
        
@@ -874,13 +971,35 @@ class PortfolioAnalytics:
 
         alpha_pp = float(res.params[0])
        
-        beta = float(res.params[1])
-       
+        beta_u = float(res.params[1])
+
         alpha_se_pp = float(np.sqrt(res.cov_params()[0, 0]))
        
-        beta_se = float(np.sqrt(res.cov_params()[1, 1]))
-
-        alpha_ann = (1.0 + alpha_pp) ** periods_per_year - 1.0
+        beta_se_u = float(np.sqrt(res.cov_params()[1, 1]))
+                
+        if lever_beta and d_to_e > 0.0:
+            
+            L = 1.0 + (1.0 - tax) * d_to_e
+            
+            beta = beta_u * L
+            
+            beta_se = beta_se_u * abs(L)   
+            
+            if scale_alpha_with_leverage:
+                
+                alpha_pp *= L
+                
+                alpha_se_pp *= abs(L)
+                
+            alpha_ann = port_ann_ret_hist - (config.RF + beta * (bench_ann_ret - config.RF))
+      
+        else:
+      
+            beta = beta_u
+      
+            beta_se = beta_se_u
+      
+            alpha_ann = (1.0 + alpha_pp) ** periods_per_year - 1.0
 
         jac = periods_per_year * (1.0 + alpha_pp) ** (periods_per_year - 1.0)
 
@@ -915,7 +1034,7 @@ class PortfolioAnalytics:
         """
         CAPM regression with HAC errors; reports annualised alpha and robust SE/t-stats.
 
-        Same model as `jensen_alpha_r2`. Alpha is compounded to annual:
+        Alpha is compounded to annual:
            
             α_ann = (1 + α_pp)^P − 1.
 
@@ -979,6 +1098,70 @@ class PortfolioAnalytics:
             beta_t = beta_t, 
             r2 = float(model.rsquared)
         )
+
+
+    def _align_betas_to_universe(
+        self,
+        universe: pd.Index | list[str],
+        beta_ext: pd.Series,
+        beta_fallback: float = 1.0
+    ) -> pd.Series:
+        """
+        Align an external beta Series to the optimiser's universe.
+        Any missing tickers get a sensible fallback (default 1.0, or change to np.nan and drop).
+        """
+        
+        uni = pd.Index([str(t).strip().upper() for t in universe])
+        
+        b = beta_ext.reindex(uni)
+
+        b = b.fillna(beta_fallback)
+        
+        b.name = "Beta_Levered_Used"
+        
+        return b
+    
+    
+    def estimate_alpha_with_external_beta(
+        self,
+        beta0: pd.Series,
+        exp_ret: pd.Series,                # per-ticker expected return on the SAME horizon as market_exp_ret
+        market_exp_ret: float,             # scalar expected market return on the SAME horizon
+        *,
+        risk_free: float = 0.0,            # set to 0 if exp_ret already excess
+        treat_exp_ret_as_excess: bool = True,
+        universe: pd.Index | list[str] | None = None,
+        beta_fallback: float = 1.0
+    ) -> pd.Series:
+        """
+        Compute alphas using external levered betas from coe2.py (Excel 'COE' sheet).
+        All inputs must be in the SAME return convention and horizon (e.g., annual).
+        - If treat_exp_ret_as_excess=True, exp_ret and market_exp_ret are excess returns.
+        - Otherwise they are total returns; alpha formula adjusts for Rf.
+        """
+
+        if universe is None:
+
+            universe = exp_ret.index
+
+        beta = self._align_betas_to_universe(
+            universe = universe,
+            beta0 = beta0, 
+            beta_fallback = beta_fallback
+        )
+
+        exp_ret = exp_ret.reindex(beta.index)
+
+        if treat_exp_ret_as_excess:
+
+            alpha = exp_ret - beta * market_exp_ret
+        else:
+
+            alpha = exp_ret - beta * market_exp_ret - (1.0 - beta) * risk_free
+
+        alpha.name = "Alpha"
+
+        return alpha
 
 
     @staticmethod
@@ -1223,7 +1406,7 @@ class PortfolioAnalytics:
         Returns {"Upside Capture": β_up, "Downside Capture": β_down}.
         """
         
-        df = pd.concat([port_rets, bench_rets], axis=1).dropna()
+        df = pd.concat([port_rets, bench_rets], axis = 1).dropna()
     
         df.columns = ["p", "b"]
 
@@ -1917,6 +2100,8 @@ class PortfolioAnalytics:
         benchmark_ann_ret: float,
         bl_ret: pd.Series,
         bl_cov: pd.DataFrame | np.ndarray,
+        tax: pd.Series,
+        d_to_e: pd.Series,
         sims: int = 1_000_000,
         n_trials: int = 1,
         qmc_mode: bool = False,
@@ -2000,17 +2185,6 @@ class PortfolioAnalytics:
         port_bl_vol = self.portfolio_volatility(
             weights = wts,
             covmat = np.asarray(bl_cov, float)
-        )
-        
-        b_val = self.port_beta(
-            weights = wts,
-            beta = pd.Series(beta) if isinstance(beta, np.ndarray) else beta
-        )
-        
-        treynor = self.compute_treynor_ratio(
-            port_ret = port_rets,
-            rf = rf,
-            port_beta_val = b_val
         )
         
         score_val = self.port_score(
@@ -2168,7 +2342,20 @@ class PortfolioAnalytics:
             periods_per_year = 52,
             bench_ann_ret = benchmark_ann_ret,
             port_ann_ret_pred = port_rets,
+            lever_beta = True,
+            d_to_e = d_to_e,
+            tax = tax,
+            port_ann_ret_hist = ann_hist_ret,
+            scale_alpha_with_leverage = True,
         )
+        
+        beta_i = hac['beta']
+            
+        treynor = self.compute_treynor_ratio(
+            port_ret = port_rets,
+            rf = rf,
+            port_beta_val = beta_i
+        )        
 
         caps = self.capture_slopes(
             port_rets = port_1y,
@@ -2250,7 +2437,7 @@ class PortfolioAnalytics:
             "Scenario Up/Down": stats["scenarios_up_down"],
             "Scenario Min Returns": stats["min_return"],
             "Scenario Max Returns": stats["max_return"],
-            "Portfolio Beta": b_val,
+            "Portfolio Beta": beta_i,
             "Treynor Ratio": treynor,
             "Portfolio Score": score_val,
             "Portfolio Tracking Error": te,
@@ -2317,6 +2504,8 @@ class PortfolioAnalytics:
         benchmark_ann_ret: float,
         bl_ret: pd.Series,
         bl_cov: pd.DataFrame,
+        tax: pd.Series,
+        d_to_e: pd.Series,
         forecast_file: str,
         sims: int = 10_000,
         n_trials: int = 1,
@@ -2378,7 +2567,7 @@ class PortfolioAnalytics:
         
         ann_cov = _up_df(
             df = ann_cov
-            ).reindex(index = tickers, columns = tickers)
+        ).reindex(index = tickers, columns = tickers)
         
         bl_cov = _up_df(
             df = bl_cov
@@ -2406,6 +2595,14 @@ class PortfolioAnalytics:
         
         bl_ret = _up(
             s = bl_ret
+        ).reindex(tickers)
+        
+        tax = _up(
+            s = tax
+        ).reindex(tickers)
+        
+        d_to_e = _up(
+            s = d_to_e
         ).reindex(tickers)
 
         if len(set(tickers)) != len(tickers):
@@ -2441,7 +2638,7 @@ class PortfolioAnalytics:
             "LSTM_DirectH": "LSTM_DirectH",
             "LSTM_Cross_Asset": "LSTM_Cross_Asset",
             "Prophet PCA": "ProphetPCA",
-            "HGB Returns (MC)": "HGB Returns (MC)",
+            "HGB Returns CA": "HGB Returns CA",
             "HGB Returns": "HGB Returns",
             'GRU_cal': 'GRU_cal',
             'GRU_raw': 'GRU_raw',
@@ -2477,11 +2674,15 @@ class PortfolioAnalytics:
            
             bench_sr_t = bench_sr_all.loc[common]
 
-            bl_cov_t = np.array([[float(bl_cov.loc[t, t])]], dtype=float)
+            bl_cov_t = np.array([[float(bl_cov.loc[t, t])]], dtype = float)
            
-            beta_t = np.array([float(beta.loc[t])], dtype=float)
+            beta_t = np.array([float(beta.loc[t])], dtype = float)
            
-            score_t = np.array([float(comb_score.loc[t])], dtype=float)
+            score_t = np.array([float(comb_score.loc[t])], dtype = float)
+            
+            tax_t = tax.loc[t]
+            
+            d_to_e_t = d_to_e.loc[t]
 
             metrics = self.simulate_and_report(
                 name = t,
@@ -2501,6 +2702,8 @@ class PortfolioAnalytics:
                 benchmark_ann_ret = benchmark_ann_ret,
                 bl_ret = float(bl_ret.loc[t]),
                 bl_cov = bl_cov_t,
+                tax = tax_t,
+                d_to_e = d_to_e_t,
                 sims = sims,
                 n_trials = n_trials,
                 qmc_mode = qmc_mode,
@@ -2537,7 +2740,9 @@ class PortfolioAnalytics:
         benchmark_weekly_rets: pd.Series,      
         benchmark_ret: float,            
         mu_bl: pd.Series,                     
-        sigma_bl: pd.DataFrame,           
+        sigma_bl: pd.DataFrame,    
+        d_to_e: pd.Series,
+        tax: pd.Series,       
         sims: int = 1_000_000,
         n_trials: int = 1,
         qmc_mode: bool = False,
@@ -2611,9 +2816,7 @@ class PortfolioAnalytics:
         beta_v = beta.to_numpy(copy = False, dtype = float)
        
         score_v = comb_score.to_numpy(copy = False, dtype = float)
-        
-        port_betas = beta_v @ W    
-        
+                
         port_scores = score_v @ W   
 
         port_1y_df = self.portfolio_return_robust_batch(
@@ -2638,8 +2841,20 @@ class PortfolioAnalytics:
 
         ann_hist_ret = (1.0 + port_1y_df).prod(skipna = True) ** (n_last_year_weeks / n_i) - 1.0
          
-        ann_hist_vol = port_1y_df.std(ddof = 1) * np.sqrt(n_last_year_weeks)                             
-
+        ann_hist_vol = port_1y_df.std(ddof = 1) * np.sqrt(n_last_year_weeks)      
+        
+        p_d_to_e = self.port_d_to_e_batch(                       
+            W = W,
+            d_to_e = d_to_e,
+            names = names
+        )
+        
+        p_tax = self.port_tax_batch(                       
+            W = W,
+            tax = tax,
+            names = names
+        )
+        
         records: Dict[str, Dict[str, float]] = {}
 
         for i, name in enumerate(names):
@@ -2660,15 +2875,11 @@ class PortfolioAnalytics:
 
             bl_vol_i = float(bl_vols[i])
 
-            beta_i = float(port_betas[i])
-
             score_i = float(port_scores[i])
-
-            treynor_i = self.compute_treynor_ratio(
-                port_ret = port_rets[i], 
-                rf = rf_rate,
-                port_beta_val = beta_i
-            )
+            
+            d_to_e_i = float(p_d_to_e[name])
+            
+            tax_i = float(p_tax[name])
 
             sr_pred_i = self.sharpe_ratio(
                 r = s1y, 
@@ -2819,7 +3030,20 @@ class PortfolioAnalytics:
                 periods_per_year = 52,
                 bench_ann_ret = benchmark_ret,
                 port_ann_ret_pred = port_rets[i],
+                lever_beta = True,
+                d_to_e = d_to_e_i,
+                tax = tax_i,
+                port_ann_ret_hist = ann_ret_i,
+                scale_alpha_with_leverage = True,
             )
+            
+            beta_i = hac['beta']
+            
+            treynor_i = self.compute_treynor_ratio(
+                port_ret = port_rets[i],
+                rf = rf_rate,
+                port_beta_val = beta_i
+            )        
 
             caps = self.capture_slopes(
                 port_rets = s1y, 
@@ -2956,6 +3180,8 @@ class PortfolioAnalytics:
         w_sortino: np.ndarray,
         w_bl: np.ndarray,
         w_mir: np.ndarray,
+        w_gmv: np.ndarray,
+        w_mdp: np.ndarray,
         w_msp: np.ndarray,
         w_comb: np.ndarray,
         w_comb1: np.ndarray,
@@ -2966,8 +3192,13 @@ class PortfolioAnalytics:
         w_comb6: np.ndarray,
         w_comb7: np.ndarray,
         w_comb8: np.ndarray,
+        w_comb9: np.ndarray,
+        w_comb10: np.ndarray,
+        w_comb11: np.ndarray,
         w_deflated_msr: np.ndarray,
         w_adjusted_msr: np.ndarray,
+        w_upm_lpm: np.ndarray,
+        w_up_down_cap: np.ndarray,
         comb_rets: pd.Series,
         bear_rets: pd.Series,
         bull_rets: pd.Series,
@@ -2975,6 +3206,8 @@ class PortfolioAnalytics:
         vol_sortino: float,
         vol_bl: float,
         vol_mir: float,
+        vol_gmv: float,
+        vol_mdp: float,
         vol_msp: float,
         vol_comb: float,
         vol_comb1: float,
@@ -2985,12 +3218,19 @@ class PortfolioAnalytics:
         vol_comb6: float,
         vol_comb7: float,
         vol_comb8: float,
+        vol_comb9: float,
+        vol_comb10: float,
+        vol_comb11: float,
         vol_deflated_msr: float,
         vol_adjusted_msr: float,
+        vol_upm_lpm: float,
+        vol_up_down_cap: float,
         vol_msr_ann: float,
         vol_sortino_ann: float,
         vol_bl_ann: float,
         vol_mir_ann: float,
+        vol_gmv_ann: float,
+        vol_mdp_ann: float,
         vol_msp_ann: float,
         vol_comb_ann: float,
         vol_comb1_ann: float,
@@ -3001,8 +3241,13 @@ class PortfolioAnalytics:
         vol_comb6_ann: float,
         vol_comb7_ann: float,
         vol_comb8_ann: float,
+        vol_comb9_ann: float,
+        vol_comb10_ann: float,
+        vol_comb11_ann: float,
         vol_deflated_msr_ann: float,
         vol_adjusted_msr_ann: float,
+        vol_upm_lpm_ann: float,
+        vol_up_down_cap_ann: float,
         comb_score: pd.Series,
         last_year_weekly_rets: pd.DataFrame,
         last_5y_weekly_rets: pd.DataFrame,
@@ -3013,6 +3258,8 @@ class PortfolioAnalytics:
         benchmark_ret: float,
         mu_bl: pd.Series,
         sigma_bl: pd.DataFrame,
+        d_to_e: pd.Series,
+        tax: pd.Series,
         sims: int = 1_000_000,
         n_trials: int = 1,
         qmc_mode: bool = False,
@@ -3027,9 +3274,13 @@ class PortfolioAnalytics:
             "Sortino": w_sortino,
             "Black-Litterman": w_bl, 
             "MIR": w_mir,
+            "GMV": w_gmv,
+            "MDP": w_mdp,
             "MSP": w_msp,
             "Deflated MSR": w_deflated_msr,
-            "Adjusted MSR": w_adjusted_msr,            
+            "Adjusted MSR": w_adjusted_msr,      
+            "UPM-LPM": w_upm_lpm,     
+            "Up/Down Cap": w_up_down_cap,
             "Combination": w_comb, 
             "Combination1": w_comb1, 
             "Combination2": w_comb2,
@@ -3038,7 +3289,10 @@ class PortfolioAnalytics:
             "Combination5": w_comb5,
             "Combination6": w_comb6,
             "Combination7": w_comb7,
-            "Combination8": w_comb8
+            "Combination8": w_comb8,
+            "Combination9": w_comb9,
+            "Combination10": w_comb10,
+            "Combination11": w_comb11
         }
         
         vols_weekly = {
@@ -3046,9 +3300,13 @@ class PortfolioAnalytics:
             "Sortino": vol_sortino, 
             "Black-Litterman": vol_bl, 
             "MIR": vol_mir,
+            "GMV": vol_gmv,
+            "MDP": vol_mdp,
             "MSP": vol_msp,
             "Deflated MSR": vol_deflated_msr,
-            "Adjusted MSR": vol_adjusted_msr,            
+            "Adjusted MSR": vol_adjusted_msr,      
+            "UPM-LPM": vol_upm_lpm,     
+            "Up/Down Cap": vol_up_down_cap,
             "Combination": vol_comb, 
             "Combination1": vol_comb1,
             "Combination2": vol_comb2, 
@@ -3057,7 +3315,10 @@ class PortfolioAnalytics:
             "Combination5": vol_comb5,
             "Combination6": vol_comb6,
             "Combination7": vol_comb7,
-            "Combination8": vol_comb8
+            "Combination8": vol_comb8,
+            "Combination9": vol_comb9,
+            "Combination10": vol_comb10,
+            "Combination11": vol_comb11
         }
         
         vols_annual = {
@@ -3065,9 +3326,13 @@ class PortfolioAnalytics:
             "Sortino": vol_sortino_ann, 
             "Black-Litterman": vol_bl_ann, 
             "MIR": vol_mir_ann,
+            "GMV": vol_gmv_ann,
+            "MDP": vol_mdp_ann,
             "MSP": vol_msp_ann,
             "Deflated MSR": vol_deflated_msr_ann, 
             "Adjusted MSR": vol_adjusted_msr_ann,
+            "UPM-LPM": vol_upm_lpm_ann,
+            "Up/Down Cap": vol_up_down_cap_ann,
             "Combination": vol_comb_ann,
             "Combination1": vol_comb1_ann, 
             "Combination2": vol_comb2_ann,
@@ -3076,7 +3341,10 @@ class PortfolioAnalytics:
             "Combination5": vol_comb5_ann,
             "Combination6": vol_comb6_ann,
             "Combination7": vol_comb7_ann,
-            "Combination8": vol_comb8_ann
+            "Combination8": vol_comb8_ann,
+            "Combination9": vol_comb9_ann,
+            "Combination10": vol_comb10_ann,
+            "Combination11": vol_comb11_ann
         }
 
         return self.report_portfolio_metrics_batch(
@@ -3096,6 +3364,8 @@ class PortfolioAnalytics:
             benchmark_ret = benchmark_ret,
             mu_bl = mu_bl,
             sigma_bl = sigma_bl,
+            d_to_e = d_to_e,
+            tax = tax,
             sims = sims,
             n_trials = n_trials,
             qmc_mode = qmc_mode,
