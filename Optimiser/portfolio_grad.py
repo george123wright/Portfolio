@@ -410,7 +410,8 @@ def te_std_val_grad_from(
 def sortino_val_grad_from(
     R: np.ndarray,
     target: float, 
-    eps: float
+    eps: float,
+    annualise_by: float = np.sqrt(52)
 ):
     """
     Factory for the Sortino ratio value and gradient against a fixed target.
@@ -470,36 +471,56 @@ def sortino_val_grad_from(
     """
   
     T = R.shape[0]
-   
-    R_mean = R.mean(axis=0)
 
-   
+    R_mean = R.mean(axis = 0)
+    
+
     def _val_grad(
-        w: np.ndarray, 
-        ctx: GradCtx, 
+        w: np.ndarray,
+        ctx: GradCtx,
         work: Work | None = None
     ):
-    
-        rp = R @ w
-    
-        y = rp - target
-    
-        g = (y < 0).astype(float)
-    
-        D = np.sqrt((g * y @ y) / T + eps)
-    
-        A = rp.mean() - target
-    
-        dA = R_mean
-    
-        dD = (R.T @ (g * y)) / (T * D) if D > 0 else np.zeros_like(w)
-    
-        grad = dA / D - (A / (D ** 2)) * dD
-    
-        val = A / D if D > 0 else 0.0
-    
-        return val, grad
 
+        rp = R @ w                         
+
+        y = rp - target
+        
+        g = (y < 0.0).astype(float)
+
+        Dw_sq = float(np.mean(g * (y ** 2))) + float(eps)
+        
+        Dw = float(np.sqrt(Dw_sq))      
+
+        D  = annualise_by * Dw
+
+        if getattr(ctx, "mu", None) is not None:
+
+            A  = float(ctx.mu @ w - ctx.rf)   
+
+            dA = ctx.mu
+            
+        else:
+
+            periods_per_year = annualise_by ** 2
+
+            A  = float((rp.mean() - target) * periods_per_year)
+        
+            dA = R_mean * periods_per_year
+
+        if Dw <= 0.0 or not np.isfinite(Dw):
+
+            return (A / max(D, float(eps))), np.zeros_like(w, dtype = float)
+
+        dDw = (R.T @ (g * y)) / (T * Dw)
+
+        dD = annualise_by * dDw
+
+        val  = A / D
+      
+        grad = dA / D - (A / (D ** 2)) * dD
+
+        return float(val), np.asarray(grad, dtype = float)
+    
 
     return _val_grad
 
@@ -568,7 +589,7 @@ def _softplus(
 
     Definition
     ----------
-    softplus_β(x) = (1/β) * log(1 + exp(β x)).
+    softplus_β(x) = (1 / β) * log(1 + exp(β x)).
 
     Properties
     ----------
@@ -934,3 +955,48 @@ def score_over_cvar_val_grad(
     grad = dS_dw / cvar_eps - (S_num / (cvar_eps ** 2)) * dC_dw
 
     return val, grad
+
+
+def _mdp_val_grad(
+    w, 
+    ctx,
+    work = None, 
+    eps: float = 1e-12
+):
+    """
+    Diversification Ratio (MDP proxy) value and gradient.
+
+
+    Definition
+    ----------
+    DR(w) = (σᵀ w) / sqrt(wᵀ Σ w), where σ = sqrt(diag Σ).
+
+    Gradient
+    --------
+    ∇DR = σ / D − (N / D^3) (Σ w), with N = σᵀ w, D = sqrt(wᵀ Σ w).
+
+    Notes
+    -----
+    • Reuses Σw from `g.ensure_work` to avoid recomputation.
+    
+    • Guards denominators with `self._denom_floor`.
+    """
+
+    work = ensure_work(w, ctx, work)
+    
+    denom = float(ctx.denom_floor)
+    
+    Sigma_w = work.Sigma_w
+
+
+    D = float(np.sqrt(max(float(w @ Sigma_w), denom)))
+   
+    sigma_vec = np.sqrt(np.maximum(np.diag(ctx.Sigma).astype(float), 0.0))
+   
+    N = float(sigma_vec @ w)
+
+    val = N / D
+
+    grad = sigma_vec / D - (N / (D ** 3)) * Sigma_w
+
+    return float(val), np.asarray(grad, dtype = float)
