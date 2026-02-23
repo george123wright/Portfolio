@@ -1,20 +1,20 @@
 """
 End-to-end equity valuation and risk pipeline with Black–Litterman market views,
-macro BVAR simulations, factor VARX conditioning, and Monte-Carlo pricing overlays.
+macro BVAR simulations, factor VARX conditioning, and Monte-Carlo pricing overlays. 
 
 Overview
 --------
-This module orchestrates the construction of one-year equity return forecasts and
-valuation summaries by combining:
+This module orchestrates the construction of one-year equity return forecasts and 
+valuation summaries by combining: 
 
   1) Black–Litterman (BL) quarterly index views derived from forecast index levels;
  
   2) A Minnesota-prior Bayesian VAR (BVAR) for quarterly macro variables with
-     simulation under heavy-tailed or bootstrap innovations;
+     simulation under heavy-tailed or bootstrap innovations; 
  
   3) A VARX model of Fama–French factors conditional on simulated macro paths;
  
-  4) A quarter-wise alignment of the market factor to BL beliefs (mean and variance),
+  4) A quarter-wise alignment of the market factor to BL beliefs (mean and variance), 
      using either resampling, rescaling, or covariance-mapping to preserve factor
      dependence;
  
@@ -65,6 +65,7 @@ Black–Litterman:
   The scalar τ is set to 1/(T − k − 1) by default, where T is weekly sample size.
 
 Minnesota BVAR for macro:
+
   For macro vector y_t (k×1), the VAR(p) is
 
     y_t = c + ∑_{ℓ=1}^p A_ℓ y_{t−ℓ} + u_t,
@@ -79,6 +80,7 @@ Minnesota BVAR for macro:
   or circular block bootstrap innovations.
 
 Factor VARX:
+
   For factor vector f_t and macro exogenous z_t,
    
     f_t = α + ∑_{ℓ=1}^p Φ_ℓ f_{t−ℓ} + B z_t + ε_t,
@@ -87,22 +89,27 @@ Factor VARX:
   are simulated conditional on macro simulation draws z_t.
 
 BL alignment of the market factor:
+
   The factor named "mkt_excess" is adjusted, per quarter, to match BL beliefs for
   total market return μ_BL^(q) and variance Var_BL^(q). The target excess mean is
   
     μ_target^(q) = μ_BL^(q) − r_f,  where r_f is the per-quarter risk-free rate.
 
   Three modes are supported:
+    
     • resample: replace market draws by independent samples with the target mean
       and variance (Gaussian or Student-t);
+    
     • rescale: shift/scale existing market draws to match moments (preserves ranks
       and approximate correlations);
+    
     • covmap: apply a covariance-mapping transform Y = μ* + L* L_0^{-1} (X − μ_0)
       that sets the market mean/variance to targets while preserving cross-factor
       correlations with the market and leaving the non-market covariance block
       unchanged.
 
 Per-stock factor model and Monte Carlo:
+
   For stock i, quarterly excess return r_{i,t}^ex is modelled as
 
     r_{i,t}^ex = β_i' f_t + e_{i,t},
@@ -185,7 +192,10 @@ from functions.factor_simulations import factor_sim_varx, apply_bl_market_to_fac
 from functions.factor_model_pred import ff_pred_mc
 from functions.bvar_minnesota import fit_bvar_minnesota, simulate_bvar
 from functions.factor_exponential_regression import exp_fac_reg
+from functions.pred_div import div_yield
+from intrinsic_val.ggm import gordon_growth_model
 import config
+
 
 logger = logging.getLogger(__name__)
 
@@ -197,8 +207,11 @@ def run_black_litterman_on_indexes(
     annual_ret: pd.Series,
     hist_ret: pd.DataFrame,
     future_q_rets: pd.DataFrame,
-    tau: float = None,
-    delta: float = None
+    quarterly_hist_rets: pd.DataFrame | None = None,
+    start_quarter: int | None = None,
+    tau: float | None = None,
+    delta: float | None = None,
+    ridge: float = 1e-8,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """
     Compute quarter-by-quarter Black–Litterman (BL) posterior index return
@@ -263,7 +276,9 @@ def run_black_litterman_on_indexes(
         Posterior mean returns by index for each forecast quarter, with an
         additional column 'Ann' equal to the compounded annual return across
         the provided quarters:
+  
           Ann = (∏_q (1 + μ_post^(q))) − 1.
+   
     sigma_bl_by_q : dict[str, pandas.DataFrame]
         Mapping from quarter label (e.g., "Q1") to the BL posterior covariance
         matrix Σ_post^(q) (k × k, indexed by tickers).
@@ -272,68 +287,169 @@ def run_black_litterman_on_indexes(
     -----
     • Identity P assumes mutually independent index views in Q^(q). Cross-asset
       relationships still enter via Σ_q.
+   
     • `black_litterman` is called per quarter with the same Σ_q and π_q but
       quarter-specific Q^(q), returning μ_post^(q) and Σ_post^(q).
     """
    
-    assets = annual_ret.index.intersection(future_q_rets.index)
+    assets = future_q_rets.index.intersection(annual_ret.index)
+    
+    qcols = [c for c in future_q_rets.columns if c.upper().startswith("Q")]
+    
+    future_q_rets = future_q_rets.loc[assets, qcols]
 
-    pi_ann = annual_ret.loc[assets]
-   
-    pi_q = (1 + pi_ann) ** (1 / 4) - 1  
+    P = pd.DataFrame(np.eye(len(assets)), index=assets, columns=assets)
+    
+    w_prior = pd.Series(1.0 / len(assets), index=assets)
 
-    cov_hist = hist_ret[assets].cov()
 
-    sigma_prior = cov_hist * 13
+    def _qnum_for_colpos(
+        pos: int
+    ) -> int:
+
+        if start_quarter is None:
+
+            return (pos % 4) + 1
+
+        return ((start_quarter - 1 + pos) % 4) + 1
+    
+
+    priors_by_qnum: dict[int, pd.Series] = {}
+
+    covs_by_qnum: dict[int, pd.DataFrame] = {}
+
+    T_by_qnum: dict[int, int] = {}
+
+    if quarterly_hist_rets is not None:
+
+        qhist = quarterly_hist_rets.copy()
+
+        if not isinstance(qhist.index, pd.DatetimeIndex):
+
+            qhist.index = pd.to_datetime(qhist.index)
+
+        qhist = qhist.sort_index()
+        
+        qhist = qhist.loc[:, assets].dropna(how = "all")
+
+        qnums = qhist.index.to_period("Q").quarter
+        
+        print('qnums', qnums)
+
+        for qnum in (1, 2, 3, 4):
+
+            block = qhist[qnums == qnum].dropna(how = "any")
+
+            Tq = len(block)
+
+            if Tq == 0:
+
+                block = qhist.dropna(how = "any")
+                
+                Tq = len(block)
+
+            mu_q = block.mean(axis = 0).reindex(assets).fillna(0.0)
+            
+            Sigma_q = block.cov().reindex(index = assets, columns = assets).copy()
+
+            if ridge > 0:
+
+                Sigma_q.values[np.diag_indices_from(arr = Sigma_q.values)] += ridge
+
+            priors_by_qnum[qnum] = mu_q
+          
+            covs_by_qnum[qnum] = Sigma_q
+          
+            T_by_qnum[qnum] = Tq
+
+    else:
+
+        pi_ann = annual_ret.loc[assets]
+
+        pi_quarter = (1 + pi_ann) ** (1 / 4) - 1
+
+        cov_hist_w = hist_ret[assets].cov()
+
+        Sigma_quarter = cov_hist_w * 13.0
+
+        if ridge > 0:
+
+            Sigma_quarter.values[np.diag_indices_from(Sigma_quarter.values)] += ridge
+
+        for qnum in (1, 2, 3, 4):
+
+            priors_by_qnum[qnum] = pi_quarter
+
+            covs_by_qnum[qnum] = Sigma_quarter
+
+            T_by_qnum[qnum] = len(hist_ret)
+
+    bl_post_means: dict[str, pd.Series] = {}
+
+    sigma_bl_by_q: dict[str, pd.DataFrame] = {}
 
     k = len(assets)
 
-    if delta is None:
-       
-        w_eq = pd.Series(1.0 / k, index = assets)
+    for pos, qcol in enumerate(qcols):
 
-        delta = float(pi_q.dot(w_eq) / (w_eq.T.dot(sigma_prior).dot(w_eq)))
+        qnum = _qnum_for_colpos(
+            pos = pos
+        ) 
 
-    if tau is None:
-        
-        tau = 1.0 / (len(hist_ret) - k - 1)
+        prior_mu = priors_by_qnum[qnum].loc[assets]
 
-    w_prior = pd.Series(1.0 / k, index = assets)
+        Sigma_prior = covs_by_qnum[qnum].loc[assets, assets]
 
-    bl_post_means = {}
-   
-    sigma_bl_by_q: dict[str, pd.DataFrame] = {}
+        if delta is None:
 
-    qcols = [c for c in future_q_rets.columns if c.upper().startswith("Q")]
+            w_eq = w_prior
 
-    future_q_rets = future_q_rets.loc[assets, qcols]
+            denom = float(w_eq.T.dot(Sigma_prior).dot(w_eq))
 
-    P = pd.DataFrame(np.eye(len(assets)), index = assets, columns = assets)
+            denom = denom if denom > 1e-12 else 1e-12
 
-    for q in qcols:
+            num = float(prior_mu.dot(w_eq))
 
-        Q = future_q_rets[q].loc[assets]
+            delta_q = max(num / denom, 1e-6)  
 
-        mu_q, sigma_bl_q = black_litterman(
+        else:
+
+            delta_q = float(delta)
+
+        if tau is None:
+
+            Tq = T_by_qnum[qnum]
+
+            tau_q = 1.0 / max(Tq - k - 1, 1)
+
+        else:
+
+            tau_q = float(tau)
+
+        Q = future_q_rets[qcol].loc[assets]
+
+        mu_post, Sigma_post = black_litterman(
             w_prior = w_prior,
-            sigma_prior = sigma_prior,
+            sigma_prior = Sigma_prior,
             p = P,
             q = Q,
-            omega = None,
-            delta = delta,
-            tau = tau,
-            prior = pi_q,
-            confidence = 0.1
+            omega = None,            
+            delta = delta_q,
+            tau = tau_q,
+            prior = prior_mu,
+            confidence = 0.05
         )
         
-        bl_post_means[q] = mu_q
+        bl_post_means[qcol] = mu_post
         
-        sigma_bl_by_q[q] = sigma_bl_q
+        sigma_bl_by_q[qcol] = Sigma_post
+        
+    print(qnum)
 
-    bl_df = pd.DataFrame(bl_post_means)
-   
-    bl_df['Ann'] = (1 + bl_df).prod(axis = 1) - 1
-
+    bl_df = pd.DataFrame(bl_post_means).loc[assets]
+    
+    bl_df["Ann"] = (1.0 + bl_df[qcols]).prod(axis = 1) - 1.0
+    
     return bl_df, sigma_bl_by_q
 
 
@@ -379,7 +495,7 @@ def blend_fx_returns(
     inputs are comparable annual percentage changes expressed in decimal form.
     """
       
-    hist_series.index = hist_series.index.str.replace(r'=X$', '', regex=True)
+    hist_series.index = hist_series.index.str.replace(r'=X$', '', regex = True)
   
     h, f = hist_series.align(annual_forecast, join = 'inner')
   
@@ -439,8 +555,11 @@ def make_macro_panel_for_domain(
     Data model
     ----------
     The input `macro_raw` is expected to be a flat table with columns including:
+   
       • 'ticker' identifying the security/series source,
+   
       • 'year' containing human-readable quarter labels (e.g., '2019Q4'),
+   
       • a superset of macro variables in `macro_cols`.
 
     The series `country_by_ticker` maps tickers to country names. Rows of
@@ -505,111 +624,213 @@ def make_macro_panel_for_domain(
     
     df = df.assign(qe = qe)
 
-    keep = ["qe"] + [c for c in macro_cols if c in df.columns]
+    cols_present = [c for c in macro_cols if c in df.columns]
 
-    df = df[keep].copy()
+    if not cols_present:
 
-    panel = df.groupby("qe")[macro_cols].first().sort_index()
+        raise ValueError(f"None of the requested macro_cols {macro_cols} are present in macro_raw for country '{target_country}'. Available columns: {list(df.columns)}")
+
+    df = df[["qe"] + cols_present].copy()
+
+    panel = df.groupby("qe")[cols_present].first().sort_index()
 
     panel = panel.apply(pd.to_numeric, errors = "coerce").dropna(how = "any")
 
     return panel
 
 
+def _macro_rf_quarterly_from_raw(
+    macro_raw: pd.DataFrame,
+    country_by_ticker: pd.Series,
+    target_country: str = "United States",
+    rf_col: str = "Interest",
+) -> tuple[pd.Series, pd.Series] | None:
+    """
+    Derive quarterly risk-free series from macro_raw.
+
+    Returns
+    -------
+    (rf_ann, rf_q) where:
+      • rf_ann is annualised decimal (e.g., 0.05 for 5%)
+      • rf_q   is per-quarter decimal (compounded from rf_ann)
+    """
+    
+    if rf_col not in macro_raw.columns:
+    
+        return None
+    
+    df = macro_raw.copy()
+    
+    if "ticker" not in df.columns or "year" not in df.columns:
+    
+        return None
+    
+    tick2ctry = country_by_ticker.dropna().to_dict()
+    
+    df["country"] = df["ticker"].map(tick2ctry)
+    
+    df = df[df["country"] == target_country]
+    
+    if df.empty:
+    
+        return None
+    
+    qe = _parse_quarter_col(
+        s = df["year"]
+    )
+    
+    rf = pd.to_numeric(df[rf_col], errors = "coerce")
+    
+    rf = pd.Series(rf.to_numpy(), index = qe)
+    
+    rf = rf.groupby(level = 0).first().sort_index().dropna()
+    
+    if rf.empty:
+    
+        return None
+    
+    rf_ann = (rf / 100.0).clip(lower = -0.99)
+    
+    rf_q = (1.0 + rf_ann).pow(1.0 / 4.0) - 1.0
+    
+    return rf_ann.rename("rf_ann"), rf_q.rename("rf_q")
+
+
+def convert_prices_to_base_with_pair(
+    px_local: pd.Series,
+    pair_code: str,
+    fx_price_by_pair: dict[str, pd.Series],
+) -> pd.Series:
+    """
+        Convert a local-currency price series to base currency using a prebuilt
+        local→base FX series in fx_price_by_pair[pair_code].
+    
+        Assumes fx_price_by_pair[pair_code] is already the *local→base* multiplier
+        (as returned by RatioData.get_fx_price_by_pair_local_to_base).
+        
+    """
+    
+    if pair_code not in fx_price_by_pair:
+
+        return px_local
+
+    fx = fx_price_by_pair[pair_code].sort_index()
+
+    px = px_local.sort_index()
+
+    df = pd.concat([px, fx], axis=1)
+
+    df = df.ffill().bfill()
+
+    df = df.dropna()
+    
+    out = (df.iloc[:, 0] * df.iloc[:, 1]).rename(px_local.name)
+    
+    return out
+
+
 def main():
     """
-    End-to-end pipeline to produce valuation, risk, and return forecasts by
-    combining Black–Litterman index expectations, macroeconomic simulations,
-    factor-based equity return modelling, and fundamental relative valuation.
-
-    Processing outline
-    ------------------
-    1) Data acquisition:
-      
-       • Load macroeconomic histories (`MacroData`), index return histories and
-         levels (`RatioData`), analyst fundamentals and KPI forecasts
-         (`FinancialForecastData`), and auxiliary configuration (`config`).
-
-    2) Quarterly index views:
-      
-       • Construct future quarterly index returns from predicted index levels:
-         for each quarter q, r_q = level_q / level_{q−1} − 1. Label columns
-         "Q1","Q2",….
-      
-       • Run Black–Litterman per quarter via `run_black_litterman_on_indexes`.
-         Inputs include quarterly prior means π_q derived from annual priors
-         (π_q = (1 + π_ann)^(1/4) − 1), and prior covariance Σ_q = 13 · Σ_w
-         from weekly history. The function returns posterior means μ_post^(q)
-         per index and posterior covariance Σ_post^(q).
-
-    3) Cost of equity and CAPM:
-      
-       • Compute CAPM-based annual predictions using both BL-adjusted market
-         returns and historical market returns as references (`capm_model`),
-         with market volatility estimated from weekly series. The cost of
-         equity per ticker is computed in `calculate_cost_of_equity`, blending
-         currency risk with `blend_fx_returns`.
-
-    4) Macro simulation (BVAR):
-       
-       • Fit a Minnesota-prior Bayesian VAR to the selected macro panel
-         (`fit_bvar_minnesota`), selecting hyperparameters via expanding-window
-         cross-validation on one-step RMSE. Simulate H quarters of macro
-         scenarios using Student–t or bootstrap shocks (`simulate_bvar`).
-
-    5) Factor simulation with macro conditioning:
-      
-       • Align quarterly Fama–French factor data with the macro panel and fit a
-         VARX model (`factor_sim_varx`) for 5- and 3-factor sets. Simulate
-         factor paths conditional on macro scenarios.
-
-    6) Inject BL market beliefs into factor simulations:
-       
-       • Enforce quarter-specific BL market moments on the simulated market
-         factor using `apply_bl_market_to_factor_sims` with mode "covmap".
-         This shifts the market factor’s scenario mean to μ_BL^(q) − r_f and
-         rescales its variance to Var_BL^(q) while preserving the empirical
-         correlation structure across factors within each quarter.
-
-    7) Equity return forecasting via factor model:
-      
-       • For each ticker, estimate factor loadings by OLS with Newey–West HAC
-         covariance, then simulate one-year outcomes by applying the simulated
-         factor paths and idiosyncratic innovations (`ff_pred_mc`). Annual
-         returns are formed by compounding quarterly total returns:
+        End-to-end pipeline to produce valuation, risk, and return forecasts by
+        combining Black–Litterman index expectations, macroeconomic simulations,
+        factor-based equity return modelling, and fundamental relative valuation.
+    
+        Processing outline
+        ------------------
+        1) Data acquisition:
           
-           R_path = exp( Σ_q log(1 + r_q) ) − 1.
-
-    8) Fundamental valuation overlays:
-      
-       • Produce price targets and return/volatility summaries using pricing
-         models conditioned on forecast fundamentals and comparables:
-           price-to-sales (`price_to_sales_price_pred`),
-           enterprise-value-to-sales (`ev_to_sales_price_pred`),
-           price-to-earnings (`pe_price_pred`),
-           price-to-book (`price_to_book_pred`),
-           Graham heuristic (`graham_number`),
-           relative valuation blend (`rel_val_model`).
-
-    9) Output:
-      
-       • Aggregate results into DataFrames and export to Excel workbooks via
-         `export_results`. Diagnostic prints include checks that the enforced
-         market factor moments match the BL targets per quarter.
-
-    Side effects
-    ------------
-    Prints intermediate tables and diagnostics to stdout, and writes result
-    sheets to the output Excel file specified in `config.REL_VAL_FILE` as
-    well as a default export for selected additional sheets.
-
-    Notes
-    -----
-    • Risk-free inputs appear in decimal form; quarterly risk-free r_f is
-      provided by `config.RF_PER_QUARTER`.
-    • The pipeline assumes factor simulations already reflect macro dynamics;
-      the BL overlay aligns the market factor’s marginal moments to external
-      beliefs while maintaining intra-quarter factor dependence.
+           • Load macroeconomic histories (`MacroData`), index return histories and
+             levels (`RatioData`), analyst fundamentals and KPI forecasts
+             (`FinancialForecastData`), and auxiliary configuration (`config`).
+    
+        2) Quarterly index views:
+          
+           • Construct future quarterly index returns from predicted index levels:
+             for each quarter q, r_q = level_q / level_{q−1} − 1. Label columns
+             "Q1","Q2",….
+          
+           • Run Black–Litterman per quarter via `run_black_litterman_on_indexes`.
+             Inputs include quarterly prior means π_q derived from annual priors
+             (π_q = (1 + π_ann)^(1/4) − 1), and prior covariance Σ_q = 13 · Σ_w
+             from weekly history. The function returns posterior means μ_post^(q)
+             per index and posterior covariance Σ_post^(q).
+    
+        3) Cost of equity and CAPM:
+          
+           • Compute CAPM-based annual predictions using both BL-adjusted market
+             returns and historical market returns as references (`capm_model`),
+             with market volatility estimated from weekly series. The cost of
+             equity per ticker is computed in `calculate_cost_of_equity`, blending
+             currency risk with `blend_fx_returns`.
+    
+        4) Macro simulation (BVAR):
+           
+           • Fit a Minnesota-prior Bayesian VAR to the selected macro panel
+             (`fit_bvar_minnesota`), selecting hyperparameters via expanding-window
+             cross-validation on one-step RMSE. Simulate H quarters of macro
+             scenarios using Student–t or bootstrap shocks (`simulate_bvar`).
+    
+        5) Factor simulation with macro conditioning:
+          
+           • Align quarterly Fama–French factor data with the macro panel and fit a
+             VARX model (`factor_sim_varx`) for 5- and 3-factor sets. Simulate
+             factor paths conditional on macro scenarios.
+    
+        6) Inject BL market beliefs into factor simulations:
+           
+           • Enforce quarter-specific BL market moments on the simulated market
+             factor using `apply_bl_market_to_factor_sims` with mode "covmap".
+             This shifts the market factor’s scenario mean to μ_BL^(q) − r_f and
+             rescales its variance to Var_BL^(q) while preserving the empirical
+             correlation structure across factors within each quarter.
+    
+        7) Equity return forecasting via factor model:
+          
+           • For each ticker, estimate factor loadings by OLS with Newey–West HAC
+             covariance, then simulate one-year outcomes by applying the simulated
+             factor paths and idiosyncratic innovations (`ff_pred_mc`). Annual
+             returns are formed by compounding quarterly total returns:
+              
+               R_path = exp( Σ_q log(1 + r_q) ) − 1.
+    
+        8) Fundamental valuation overlays:
+          
+           • Produce price targets and return/volatility summaries using pricing
+             models conditioned on forecast fundamentals and comparables:
+             
+               price-to-sales (`price_to_sales_price_pred`),
+             
+               enterprise-value-to-sales (`ev_to_sales_price_pred`),
+             
+               price-to-earnings (`pe_price_pred`),
+             
+               price-to-book (`price_to_book_pred`),
+             
+               Graham heuristic (`graham_number`),
+             
+               relative valuation blend (`rel_val_model`).
+    
+        9) Output:
+          
+           • Aggregate results into DataFrames and export to Excel workbooks via
+             `export_results`. Diagnostic prints include checks that the enforced
+             market factor moments match the BL targets per quarter.
+    
+        Side effects
+        ------------
+        Prints intermediate tables and diagnostics to stdout, and writes result
+        sheets to the output Excel file specified in `config.REL_VAL_FILE` as
+        well as a default export for selected additional sheets.
+    
+        Notes
+        -----
+        • Risk-free inputs appear in decimal form; quarterly risk-free r_f is
+          provided by `config.RF_PER_QUARTER`.
+          
+        • The pipeline assumes factor simulations already reflect macro dynamics;
+          the BL overlay aligns the market factor’s marginal moments to external
+          beliefs while maintaining intra-quarter factor dependence.
+        
     """
        
     s5 = np.sqrt(5)
@@ -628,23 +849,17 @@ def main():
 
     overall_ann_rets, overall_weekly_rets, overall_quarter_rets = r.index_returns()
     
+    print('overall_quarter_rets', overall_quarter_rets)
+    
     idx_levels = r.load_index_pred()
    
     for col in idx_levels.columns:
    
-        idx_levels[col] = pd.to_numeric(
-            idx_levels[col].astype(str).str.replace(',', '', regex = False),
-            errors = 'coerce'
-        )
+        idx_levels[col] = pd.to_numeric(idx_levels[col].astype(str).str.replace(',', '', regex = False), errors = 'coerce')
         
     idx_levels.index = [INDEX_MAPPING.get(i, i) for i in idx_levels.index]
 
-    future_q_rets = (
-        idx_levels
-        .div(idx_levels.shift(axis=1))
-        .sub(1)
-        .iloc[:, 1:]
-    )
+    future_q_rets = idx_levels.div(idx_levels.shift(axis = 1)).sub(1).iloc[:, 1:]
     
     future_q_rets.columns = [f"Q{i+1}" for i in range(future_q_rets.shape[1])]
 
@@ -652,9 +867,12 @@ def main():
         annual_ret = overall_ann_rets,
         hist_ret = overall_weekly_rets,
         future_q_rets = future_q_rets,
+        quarterly_hist_rets = overall_quarter_rets,
         tau = None,
         delta = None
     )
+    
+    print('bl_df', bl_df)
     
     tickers = config.tickers
     
@@ -668,7 +886,11 @@ def main():
     
     enterprise_val = temp_analyst['enterpriseValue']
     
+    d_to_e = temp_analyst['debtToEquity'] / 100
+    
     market_cap = temp_analyst['marketCap']
+    
+    mv_debt = d_to_e * market_cap
     
     country = temp_analyst['country']
     
@@ -681,6 +903,8 @@ def main():
     capm_hist_list = []
     
     beta = temp_analyst['beta']
+    
+    per_ticker_mkt_w = {}
 
     for ticker in tickers:
         
@@ -694,13 +918,15 @@ def main():
             bl_market_returns = bl_market_dict,
             freq = "annual"
         )
-
+        
         ann_hist, weekly_hist = r.match_index_rets(
             exchange = exch,
             index_rets = overall_ann_rets,
             index_weekly_rets = overall_weekly_rets,
             index_quarter_rets = overall_quarter_rets
         )
+        
+        per_ticker_mkt_w[ticker] = weekly_hist
 
         vol_market = np.sqrt(weekly_bl.var())
        
@@ -749,14 +975,14 @@ def main():
     print("CAPM (BL-adjusted) Predictions:\n", capm_bl_pred_df)
    
     capm_hist_df = pd.DataFrame(capm_hist_list).set_index("Ticker")
-
-    hist_ann_fx, fx_rets = r.get_currency_annual_returns(
+    
+    hist_ann_fx, _ = r.get_currency_annual_returns(
         country_to_pair = country_to_pair
     )
    
     fx_fc = macro.convert_to_gbp_rates(
         current_col = 'Last', 
-        future_col = 'Q1/26'
+        future_col = 'Q2/26'
     )
    
     pred_fx_growth = fx_fc['Pred Change (%)']
@@ -765,6 +991,8 @@ def main():
         hist_series = hist_ann_fx, 
         annual_forecast = pred_fx_growth
     )
+    
+    print(blended_fx)
     
     mkt_ticker = '^GSPC'  
     
@@ -780,25 +1008,117 @@ def main():
 
     index_close = r.index_close[mkt_ticker].sort_index()
     
-    coe_df = calculate_cost_of_equity(
-        tickers = tickers,
-        rf = config.RF,
-        returns = weekly_ret,
-        index_close = index_close,
-        spx_expected_return = spx_ret['Ann'],
-        crp_df = crp,
-        currency_bl_df = blended_fx,
-        country_to_pair = country_to_pair,
-        ticker_country_map = country
-    )
+    index_country_map = {
+        "^GSPC": "United States",
+        "^NDX": "United States",
+        "^DJI": "United States",
+        "^FTSE": "United Kingdom",
+        "^GDAXI": "Germany",
+        "^FCHI": "France",
+        "^AEX": "Netherlands",
+        "^IBEX": "Spain",
+        "^GSPTSE": "Canada",
+        "^HSI": "Hong Kong",
+        "^SSMI": "Switzerland",
+    }
+
+    idx_country = index_country_map.get(mkt_ticker, "United States")
+
+    idx_pair = country_to_pair.get(idx_country, "GBPUSD")
     
+    tax = r.tax_rate
+    
+    mv_debt = enterprise_val - market_cap
+    
+    fx_price_by_pair = r.get_fx_price_by_pair_local_to_base(
+        country_to_pair = country_to_pair,
+        base_ccy = "GBP",                
+        start = r.five_year_ago,
+        end = r.today,
+        interval = "1d",
+    )
+
+    if idx_country == "United Kingdom":
+
+        index_close_base = index_close
+
+    else:
+
+        index_close_base = convert_prices_to_base_with_pair(
+            px_local = index_close,
+            pair_code = idx_pair,
+            fx_price_by_pair = fx_price_by_pair,
+        )
+        
+    kp = fdata.kpis
+        
+    d_to_e_5yr_avg = {t: float(kp[t].iloc[0]['d_to_e_mean']) for t in tickers if t in kp}
+    
+    tax_rate_5yr_avg = {t: float(kp[t].iloc[0]['tax_rate_avg']) for t in tickers if t in kp}
+
     macro_raw = macro.assign_macro_history_large_non_pct().reset_index()
+    
+    print('macro_raw', macro_raw)
     
     macro_q = make_macro_panel_for_domain(
         macro_raw = macro_raw,
         country_by_ticker = country,
         target_country = "United States",   
     )
+    
+    print('macro_q', macro_q)
+    
+    rf_ann_used = float(config.RF)
+    
+    rf_q_used = float(config.RF_PER_QUARTER)
+    
+    macro_rf_ann = None
+    
+    macro_rf_q = None
+    
+    macro_rf = _macro_rf_quarterly_from_raw(
+        macro_raw = macro_raw,
+        country_by_ticker = country,
+        target_country = "United States",
+        rf_col = "Interest",
+    )
+    
+    if macro_rf is not None:
+        
+        macro_rf_ann, macro_rf_q = macro_rf
+        
+        if macro_rf_ann is not None and not macro_rf_ann.empty:
+        
+            rf_ann_used = float(macro_rf_ann.dropna().iloc[-1])
+        
+        if macro_rf_q is not None and not macro_rf_q.empty:
+        
+            rf_q_used = float(macro_rf_q.dropna().iloc[-1])
+                    
+    coe_df = calculate_cost_of_equity(
+        tickers = tickers,
+        rf = rf_ann_used,
+        returns = weekly_ret, 
+        per_ticker_market_weekly = per_ticker_mkt_w,
+        index_close = index_close_base,
+        spx_expected_return = spx_ret['Ann'],
+        crp_df = crp,
+        currency_bl_df = blended_fx,
+        country_to_pair = country_to_pair,
+        ticker_country_map = country,
+        tax_rate = tax,
+        tax_rate_5yr_avg = tax_rate_5yr_avg,
+        d_to_e = d_to_e_5yr_avg,
+        debt = mv_debt,
+        equity = market_cap,
+        r = r,
+        fx_price_by_pair = fx_price_by_pair, 
+        target_d_to_e = d_to_e,
+        macro_rf_raw = macro_raw,
+        macro_rf_col = "Interest",        
+    )
+    
+    print("Cost of Equity:\n", coe_df)
 
     bvar = fit_bvar_minnesota(
         macro_df = macro_q,
@@ -812,7 +1132,7 @@ def main():
         innovation = 'bootstrap'
     )
     
-    ff5_m, ff3_m, ff5_q, ff3_q = load_factor_data()
+    _, _, ff5_q, ff3_q = load_factor_data()
 
     factor_q_5 = ff5_q[["mkt_excess", "smb", "hml", "rmw", "cma", "rf"]].dropna()
     
@@ -822,11 +1142,17 @@ def main():
     
     factor_q_3 = ff3_q[["mkt_excess", "smb", "hml", "rf"]].dropna()
     
+    if macro_rf_q is not None and not macro_rf_q.empty:
+    
+        factor_q_5["rf"] = macro_rf_q.reindex(factor_q_5.index).ffill().bfill()
+    
+        factor_q_3["rf"] = macro_rf_q.reindex(factor_q_3.index).ffill().bfill()
+    
     macro_hist = macro_q.reindex(factor_q_3.index).dropna()
     
     factor_q_3 = factor_q_3.loc[macro_hist.index]
     
-    cov5, E5_q, sims_5 = factor_sim_varx(
+    _, _, sims_5 = factor_sim_varx(
         factor_data = factor_q_5,
         num_factors = 5,
         macro_hist = macro_hist,
@@ -837,11 +1163,11 @@ def main():
         df_t = 7.0,
     )
 
-    sims_5, cov5_adj, E5_q_adj = apply_bl_market_to_factor_sims(
+    sims_5, _, _ = apply_bl_market_to_factor_sims(
         sims_q = sims_5,
         bl_mu_market_by_q = bl_mu_market_by_q,
         bl_var_market_by_q = bl_var_market_by_q,
-        rf_per_quarter = config.RF_PER_QUARTER,
+        rf_per_quarter = rf_q_used,
         market_factor_name = "mkt_excess",
         mode = "covmap",          
         dist = "gaussian",          
@@ -860,14 +1186,14 @@ def main():
         factor_data = factor_q_5,
         returns_quarterly = r.quarterly_rets,
         sims = sims_5,                 
-        rf_per_quarter = config.RF_PER_QUARTER,
+        rf_per_quarter = rf_q_used,
         idio_df = 7.0,
         sample_betas = True,
         beta_lags_hac = 4,
         idio_innovation = "bootstrap"
     )
 
-    cov3, E3_q, sims_3 = factor_sim_varx(
+    _, _, sims_3 = factor_sim_varx(
         factor_data = factor_q_3,
         num_factors = 3,
         macro_hist = macro_hist,
@@ -878,11 +1204,11 @@ def main():
         df_t = 7.0,
     )
 
-    sims_3, cov3_adj, E3_q_adj = apply_bl_market_to_factor_sims(
+    sims_3, _, _ = apply_bl_market_to_factor_sims(
         sims_q = sims_3,
         bl_mu_market_by_q = bl_mu_market_by_q,
         bl_var_market_by_q = bl_var_market_by_q,
-        rf_per_quarter = config.RF_PER_QUARTER,
+        rf_per_quarter = rf_q_used,
         market_factor_name = "mkt_excess",
         mode = "covmap",
         dist = "gaussian",
@@ -895,7 +1221,7 @@ def main():
         factor_data = factor_q_3,
         returns_quarterly = r.quarterly_rets,
         sims = sims_3,                
-        rf_per_quarter = config.RF_PER_QUARTER,
+        rf_per_quarter = rf_q_used,
         idio_df = 7.0,
         sample_betas = True,
         beta_lags_hac = 4,
@@ -903,19 +1229,11 @@ def main():
     )
     
     exp_factor_results = exp_fac_reg()
-
-    low_rev_y = temp_analyst['Low Revenue Estimate']
-   
-    avg_rev_y = temp_analyst['Avg Revenue Estimate']
-   
-    high_rev_y = temp_analyst['High Revenue Estimate']
-
-    low_eps_y = temp_analyst['Low EPS Estimate']
-   
-    avg_eps_y = temp_analyst['Avg EPS Estimate']
-   
-    high_eps_y = temp_analyst['High EPS Estimate']
-
+    
+    print(exp_factor_results)
+    
+    n_y = temp_analyst['numberOfAnalystOpinions']
+    
     ps = temp_analyst['priceToSalesTrailing12Months']
    
     cpe = temp_analyst['priceEpsCurrentYear']
@@ -931,42 +1249,155 @@ def main():
     ptb_y = temp_analyst['priceToBook']
 
     results = r.dicts()
-
-    pe_pred_list, evs_pred_list, ps_pred_list, pbv_pred_list, graham_pred_list, rel_val_list = ([] for _ in range(6))
+    
+    payout = fdata.payout_hist()
+    
+    roe = fdata.roe_hist()
+            
+    next_fc = fdata.next_period_forecast()
+    
+    low_rev_y = next_fc['low_rev_y']
+    
+    avg_rev_y = next_fc['avg_rev_y']
+    
+    high_rev_y = next_fc['high_rev_y']
+    
+    low_eps_y = next_fc['low_eps_y']
+    
+    avg_eps_y = next_fc['avg_eps_y']
+    
+    high_eps_y = next_fc['high_eps_y']
+    
+    low_rev_s = next_fc['low_rev']
+    
+    avg_rev_s = next_fc['avg_rev']
+    
+    high_rev_s = next_fc['high_rev']
+    
+    low_eps_s = next_fc['low_eps']
+    
+    avg_eps_s = next_fc['avg_eps']
+    
+    high_eps_s = next_fc['high_eps']
+    
+    n_y = next_fc['num_analysts_y']
+    
+    n_s = next_fc['num_analysts']
+    
+    mc_ev = {t: float(kp[t].iloc[0]['mc_ev']) for t in tickers if t in kp}
+    
+    pe_pred_list, evs_pred_list, ps_pred_list, pbv_pred_list, graham_pred_list, rel_val_list, div_yield_pred, gordon = ([] for _ in range(8))
 
     for ticker in tickers:
         
         if ticker not in config.TICKER_EXEMPTIONS:
-        
-            forecast_df = (
-                fdata.forecast[ticker]
-                [['low_eps', 'avg_eps', 'high_eps', 'low_rev', 'avg_rev', 'high_rev']]
-                .iloc[0]
+
+            kpis = kp[ticker][["exp_pe", "exp_ps", "exp_ptb", "exp_evs", "bvps_0"]].iloc[0]
+            
+            lp_t = latest_prices.get(ticker, np.nan)
+            
+            low_eps_y_t = low_eps_y.get(ticker, np.nan)
+            
+            avg_eps_y_t = avg_eps_y.get(ticker, np.nan)
+            
+            high_eps_y_t = high_eps_y.get(ticker, np.nan)
+            
+            low_rev_y_t = low_rev_y.get(ticker, np.nan)
+            
+            avg_rev_y_t = avg_rev_y.get(ticker, np.nan)
+            
+            high_rev_y_t = high_rev_y.get(ticker, np.nan)
+            
+            low_eps_s_t = low_eps_s.get(ticker, np.nan)
+            
+            avg_eps_s_t = avg_eps_s.get(ticker, np.nan)
+            
+            high_eps_s_t = high_eps_s.get(ticker, np.nan)
+            
+            low_rev_s_t = low_rev_s.get(ticker, np.nan)
+            
+            avg_rev_s_t = avg_rev_s.get(ticker, np.nan)
+            
+            high_rev_s_t = high_rev_s.get(ticker, np.nan)
+            
+            exp_div = div_yield(
+                payout_hist = payout.get(ticker, pd.Series(dtype = float)),
+                price = lp_t,
+                eps_y_high = high_eps_y_t,
+                eps_y_avg = avg_eps_y_t,
+                eps_y_low = low_eps_y_t,
+                eps_s_high = high_eps_s_t,
+                eps_s_avg = avg_eps_s_t,
+                eps_s_low = low_eps_s_t,
+                n_y = n_y.get(ticker, 0),
+                n_s = n_s.get(ticker, 0),
+                n_sims = 10000,
+                roe_hist = roe.get(ticker, pd.Series(dtype = float)),
             )
             
-            kpis = (
-                fdata.kpis[ticker]
-                [["exp_pe", "exp_ps", "exp_ptb", "exp_evs", "bvps_0"]]
-                .iloc[0]
-            )
+            div_summary = exp_div.summary
             
+            div_yield_pred.append({
+                "Ticker": ticker,
+                "DPS Mean": div_summary["dps_mean"], 
+                "DPS Median": div_summary["dps_median"],
+                "DPS 10%": div_summary["dps_p10"],
+                "DPS 90%": div_summary["dps_p90"],
+                "DPS Std": div_summary["dps_std"],
+                "Yield Mean": div_summary["yield_mean"],
+                "Yield Median": div_summary["yield_median"],
+                "Yield 10%": div_summary["yield_p10"],
+                "Yield 90%": div_summary["yield_p90"],
+                "Yield Std": div_summary["yield_std"],
+                "EPS Mean": div_summary["eps_mean"],
+                "EPS Std": div_summary["eps_std"],
+                "Payout Mean": div_summary["payout_mean"],
+                "Payout 10%": div_summary["payout_p10"],
+                "Payout 90%": div_summary["payout_p90"],
+                "Payout Std": div_summary["payout_std"],
+            })
+            
+            dps_sim = exp_div.dps
+            
+            g_term = exp_div.g_term
+            
+            ggm = gordon_growth_model(
+                ticker = ticker,
+                dps = dps_sim,
+                coe = coe_df.loc[ticker, 'COE'],
+                g = g_term,
+                cp = lp_t
+            )
+                        
+            gordon.append({ 
+                "Ticker": ticker,
+                "Current Price": lp_t,
+                "GGM Price": ggm[0],
+                "Low Returns": ggm[1],
+                "Returns": ggm[2],
+                "High Returns": ggm[3],
+                "SE": ggm[4],
+            })
+            
+            sh_i = float(shares_out.get(ticker, np.nan))
+  
             r_pe = pe_price_pred(
-                eps_low = forecast_df['low_eps'],
-                eps_avg = forecast_df['avg_eps'],
-                eps_high = forecast_df['high_eps'],
-                eps_low_y = low_eps_y.get(ticker, np.nan),
-                eps_avg_y = avg_eps_y.get(ticker, np.nan),
-                eps_high_y = high_eps_y.get(ticker, np.nan),
+                eps_low = low_eps_s_t,
+                eps_avg = avg_eps_s_t,
+                eps_high = high_eps_s_t,
+                eps_low_y = low_eps_y_t,
+                eps_avg_y = avg_eps_y_t,
+                eps_high_y = high_eps_y_t,
                 pe_c = cpe.get(ticker, np.nan),
                 pe_t = tpe.get(ticker, np.nan),
                 pe_ind = results['PE'][ticker],
                 avg_pe_fs = kpis['exp_pe'],
-                price = latest_prices.get(ticker, 0)
+                price = lp_t
             )
         
             pe_pred_list.append({
                 "Ticker": ticker,
-                "Current Price": latest_prices.get(ticker, 0),
+                "Current Price": lp_t,
                 "Low Price": r_pe[0],
                 "Avg Price": r_pe[1],
                 "High Price": r_pe[2],
@@ -976,14 +1407,14 @@ def main():
             })
         
             r_evs = ev_to_sales_price_pred(
-                price = latest_prices.get(ticker, 0),
-                low_rev = forecast_df['low_rev'],
-                avg_rev = forecast_df['avg_rev'],
-                high_rev = forecast_df['high_rev'],
-                low_rev_y = low_rev_y.get(ticker, np.nan),
-                avg_rev_y = avg_rev_y.get(ticker, np.nan),
-                high_rev_y = high_rev_y.get(ticker, np.nan),
-                shares_outstanding = shares_out.get(ticker, 0),
+                price = lp_t,
+                low_rev = low_rev_s_t,
+                avg_rev = avg_rev_s_t,
+                high_rev = high_rev_s_t,
+                low_rev_y = low_rev_y_t,
+                avg_rev_y = avg_rev_y_t,
+                high_rev_y = high_rev_y_t,
+                shares_outstanding = sh_i,
                 evs = evts[ticker],
                 avg_fs_ev = kpis['exp_evs'], 
                 ind_evs = results['EVS'][ticker],
@@ -992,7 +1423,7 @@ def main():
         
             evs_pred_list.append({
                 "Ticker": ticker,
-                "Current Price": latest_prices.get(ticker, 0),
+                "Current Price": lp_t,
                 "Low Price": r_evs[0],
                 "Avg Price": r_evs[1],
                 "High Price": r_evs[2],
@@ -1002,14 +1433,14 @@ def main():
             })
         
             r_ps = price_to_sales_price_pred(
-                price = latest_prices.get(ticker, 0),
-                low_rev_y = low_rev_y.get(ticker, np.nan),
-                avg_rev_y = avg_rev_y.get(ticker, np.nan),
-                high_rev_y = high_rev_y.get(ticker, np.nan),
-                low_rev = forecast_df['low_rev'],
-                avg_rev = forecast_df['avg_rev'],
-                high_rev = forecast_df['high_rev'],
-                shares_outstanding = shares_out.get(ticker, 0),
+                price = lp_t,
+                low_rev_y = low_rev_y_t,
+                avg_rev_y = avg_rev_y_t,
+                high_rev_y = high_rev_y_t,
+                low_rev = low_rev_s_t,
+                avg_rev = avg_rev_s_t,
+                high_rev = high_rev_s_t,
+                shares_outstanding = sh_i,
                 ps = ps[ticker],
                 avg_ps_fs = kpis['exp_ps'],
                 ind_ps = results['PS'][ticker],
@@ -1017,7 +1448,7 @@ def main():
         
             ps_pred_list.append({
                 "Ticker": ticker,
-                "Current Price": latest_prices.get(ticker, 0),
+                "Current Price": lp_t,
                 "Low Price": r_ps[0],
                 "Avg Price": r_ps[1],
                 "High Price": r_ps[2],
@@ -1027,23 +1458,23 @@ def main():
             })
 
             r_pbv = price_to_book_pred(
-                low_eps = forecast_df['low_eps'],
-                avg_eps = forecast_df['avg_eps'],
-                high_eps = forecast_df['high_eps'],
-                low_eps_y = low_eps_y.get(ticker, np.nan),
-                avg_eps_y = avg_eps_y.get(ticker, np.nan),
-                high_eps_y = high_eps_y.get(ticker, np.nan),
+                low_eps = low_eps_s_t,
+                avg_eps = avg_eps_s_t,
+                high_eps = high_eps_s_t,
+                low_eps_y = low_eps_y_t,
+                avg_eps_y = avg_eps_y_t,
+                high_eps_y = high_eps_y_t,
                 ptb = ptb_y[ticker],
                 avg_ptb_fs = kpis['exp_ptb'],
                 ptb_ind = results['PB'][ticker],
                 book_fs = kpis['bvps_0'],
                 dps = dps.get(ticker, 0),
-                price = latest_prices.get(ticker, 0)
+                price = lp_t
             )
         
             pbv_pred_list.append({
                 "Ticker": ticker,
-                "Current Price": latest_prices.get(ticker, 0),
+                "Current Price": lp_t,
                 "Low Price": r_pbv[0],
                 "Avg Price": r_pbv[1],
                 "High Price": r_pbv[2],
@@ -1054,16 +1485,16 @@ def main():
             
             r_graham = graham_number(
                 pe_ind = results['PE'][ticker],
-                eps_low = forecast_df['low_eps'],
-                eps_avg = forecast_df['avg_eps'],
-                eps_high = forecast_df['high_eps'],
-                price = latest_prices.get(ticker, 0),
+                eps_low = low_eps_s_t,
+                eps_avg = avg_eps_s_t,
+                eps_high = high_eps_s_t,
+                price = lp_t,
                 pb_ind = results['PB'][ticker],
                 bvps_0 = kpis['bvps_0'],
                 dps = dps.get(ticker, 0),
-                low_eps_y = low_eps_y.get(ticker, np.nan),
-                avg_eps_y = avg_eps_y.get(ticker, np.nan),
-                high_eps_y = high_eps_y.get(ticker, np.nan)
+                low_eps_y = low_eps_y_t,
+                avg_eps_y = avg_eps_y_t,
+                high_eps_y = high_eps_y_t
             )
             
             graham_pred_list.append({
@@ -1077,18 +1508,18 @@ def main():
             })
             
             r_rel_val = rel_val_model(
-                low_eps = forecast_df['low_eps'],
-                avg_eps = forecast_df['avg_eps'],
-                high_eps = forecast_df['high_eps'],
-                low_eps_y = low_eps_y.get(ticker, np.nan),
-                avg_eps_y = avg_eps_y.get(ticker, np.nan),
-                high_eps_y = high_eps_y.get(ticker, np.nan),
-                low_rev = forecast_df['low_rev'],
-                avg_rev = forecast_df['avg_rev'],
-                high_rev = forecast_df['high_rev'],
-                low_rev_y = low_rev_y.get(ticker, np.nan),
-                avg_rev_y = avg_rev_y.get(ticker, np.nan),
-                high_rev_y = high_rev_y.get(ticker, np.nan),
+                low_eps = low_eps_s_t,
+                avg_eps = avg_eps_s_t,
+                high_eps = high_eps_s_t,
+                low_eps_y = low_eps_y_t,
+                avg_eps_y = avg_eps_y_t,
+                high_eps_y = high_eps_y_t,
+                low_rev = low_rev_s_t,
+                avg_rev = avg_rev_s_t,
+                high_rev = high_rev_s_t,
+                low_rev_y = low_rev_y_t,
+                avg_rev_y = avg_rev_y_t,
+                high_rev_y = high_rev_y_t,
                 pe_c = cpe.get(ticker, np.nan),
                 pe_t = tpe.get(ticker, np.nan),
                 pe_ind = results['PE'][ticker],
@@ -1105,13 +1536,14 @@ def main():
                 mc_ev = mc_ev.get(ticker, 1),
                 bvps_0 = kpis['bvps_0'],
                 dps = dps.get(ticker, 0),
-                shares_outstanding = shares_out.get(ticker, 0),
-                price = latest_prices.get(ticker, 0)
+                shares_outstanding = sh_i,
+                price = lp_t,
+                discount_rate = coe_df.loc[ticker, 'COE']
             )
             
             rel_val_list.append({
                 "Ticker": ticker,
-                "Current Price": latest_prices.get(ticker, 0),
+                "Current Price": lp_t,
                 "Low Price": r_rel_val[0],
                 "Avg Price": r_rel_val[1],
                 "High Price": r_rel_val[2],
@@ -1121,9 +1553,19 @@ def main():
         
         else:
             
+            gordon.append({ 
+                "Ticker": ticker,
+                "Current Price": lp_t,
+                "GGM Price": 0,
+                "Low Returns": 0,
+                "Returns": 0,
+                "High Returns": 0,
+                "SE": 0,
+            })
+            
             pe_pred_list.append({
                 "Ticker": ticker,
-                "Current Price": latest_prices.get(ticker, 0),
+                "Current Price": lp_t,
                 "Low Price": 0,
                 "Avg Price": 0,
                 "High Price": 0,
@@ -1134,7 +1576,7 @@ def main():
             
             evs_pred_list.append({
                 "Ticker": ticker,
-                "Current Price": latest_prices.get(ticker, 0),
+                "Current Price": lp_t,
                 "Low Price": 0,
                 "Avg Price": 0,
                 "High Price": 0,
@@ -1145,7 +1587,7 @@ def main():
             
             ps_pred_list.append({
                 "Ticker": ticker,
-                "Current Price": latest_prices.get(ticker, 0),
+                "Current Price": lp_t,
                 "Low Price": 0,
                 "Avg Price": 0,
                 "High Price": 0,
@@ -1156,7 +1598,7 @@ def main():
             
             pbv_pred_list.append({
                 "Ticker": ticker,
-                "Current Price": latest_prices.get(ticker, 0),
+                "Current Price": lp_t,
                 "Low Price": 0,
                 "Avg Price": 0,
                 "High Price": 0,
@@ -1167,7 +1609,7 @@ def main():
             
             graham_pred_list.append({
                 "Ticker": ticker,
-                "Current Price": latest_prices.get(ticker, 0),
+                "Current Price": lp_t,
                 "Low Price": 0,
                 "Avg Price": 0,
                 "High Price": 0,
@@ -1177,7 +1619,7 @@ def main():
             
             rel_val_list.append({
                 "Ticker": ticker,
-                "Current Price": latest_prices.get(ticker, 0),
+                "Current Price": lp_t,
                 "Low Price": 0,
                 "Avg Price": 0,
                 "High Price": 0,
@@ -1197,6 +1639,10 @@ def main():
     graham_pred_df = pd.DataFrame(graham_pred_list).set_index("Ticker")
 
     rel_val_pred_df = pd.DataFrame(rel_val_list).set_index("Ticker")
+    
+    div_yield_pred_df = pd.DataFrame(div_yield_pred).set_index("Ticker")
+    
+    gordon_df = pd.DataFrame(gordon).set_index("Ticker")
         
     rel_val_sheets = {
         'BL Index Preds': bl_df,
@@ -1220,6 +1666,8 @@ def main():
         'FF3 Pred': ff3_results,
         'FF5 Pred': ff5_results,
         'Factor Exponential Regression': exp_factor_results,
+        "Div Yield Pred": div_yield_pred_df,
+        "Gordon Growth Model": gordon_df
     }
     
     export_results(
