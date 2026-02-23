@@ -66,8 +66,6 @@ by price) is combined in quadrature:
    SE_final = sqrt( scenario_se^2 + rmse_cv^2 ).
 
 If rmse_cv is missing, substitute the sample maximum across tickers as a conservative proxy.
-
-All equations are in plain text, with UK spelling (e.g., normalise).
 """
 
 
