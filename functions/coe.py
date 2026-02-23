@@ -5,7 +5,7 @@ from typing import Dict, Tuple, Optional
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-
+import re
 import config
 
 
@@ -339,8 +339,42 @@ def _infer_base_ccy_from_default_pair(
     conv: str = "local_to_base"
 ) -> str:
     """
-    Infer the base currency from a 6-letter pair like 'GBPUSD'.
-    If conv='local_to_base' → base is last 3 chars; 'base_to_local' → first 3.
+    Infer the model base currency implied by a six-character FX pair code.
+
+    Definition
+    ----------
+    Let `default_pair = LHS + RHS`, where each leg is a three-letter ISO currency
+    code (for example `GBPUSD`). This helper determines which leg should be treated
+    as the valuation base currency under the configured conversion convention.
+
+    Conversion conventions used in this module
+    ------------------------------------------
+    - `conv == "local_to_base"`:
+      base-currency prices are obtained as
+      `P_base,t = P_local,t * FX_t`, so the base leg is `RHS`.
+
+    - `conv == "base_to_local"`:
+      base-currency prices are obtained as
+      `P_base,t = P_local,t / FX_t`, so the base leg is `LHS`.
+
+    Parameters
+    ----------
+    default_pair : str
+        Pair code expected to be of the form `AAABBB`.
+    conv : {"local_to_base", "base_to_local"}, default "local_to_base"
+        Direction convention for FX conversion.
+
+    Returns
+    -------
+    str
+        Inferred base-currency ISO code. Returns `"USD"` as a conservative
+        fallback when the pair string is unavailable or malformed.
+
+    Rationale and advantage
+    -----------------------
+    A deterministic mapping from pair code to base currency ensures that return,
+    risk-free-rate, and discount-rate quantities are expressed in one coherent
+    currency domain, which materially reduces sign and inversion errors.
     """
     
     if isinstance(default_pair, str) and len(default_pair) >= 6:
@@ -386,7 +420,109 @@ def _convert_returns_to_base_ccy(
     else:
     
         raise ValueError("conv must be 'local_to_base' or 'base_to_local'")
+
+
+_Q_RE = re.compile(r"^\d{4}Q[1-4]$")
+
+
+def _parse_quarter_labels_to_qe(labels: pd.Series) -> pd.DatetimeIndex:
+    """
+    Parse quarter identifiers into canonical quarter-end timestamps.
+
+    Accepted format
+    ---------------
+    Labels are normalised by stripping whitespace, upper-casing, and removing
+    non-alphanumeric separators. The cleaned token must satisfy:
+
+    `YYYYQn`, with `n in {1, 2, 3, 4}`.
+
+    Mathematical mapping
+    --------------------
+    For each valid token `YYYYQn`, a period object is created with quarterly
+    frequency and mapped to its quarter end `t_qe`:
+
+    `t_qe = end_of_quarter(YYYY, n)`.
+
+    Parameters
+    ----------
+    labels : pandas.Series
+        Raw quarter labels.
+
+    Returns
+    -------
+    pandas.DatetimeIndex
+        Quarter-end timestamps suitable for chronological joins and as-of
+        alignment.
+
+    Raises
+    ------
+    ValueError
+        Raised when any cleaned label violates the `YYYYQn` pattern.
+
+    Rationale and advantage
+    -----------------------
+    Canonical quarter-end dating enforces temporal consistency across macro,
+    factor, and valuation data sets, reducing silent misalignment caused by mixed
+    label conventions.
+    """
     
+    s = labels.astype(str).str.strip().str.upper()
+    
+    s = s.str.replace(r"[^0-9Q]", "", regex=True)
+
+    bad = ~s.str.match(_Q_RE)
+    
+    if bad.any():
+    
+        bad_vals = labels[bad].astype(str).unique()[:5]
+    
+        raise ValueError(f"Bad quarter labels (expected 'YYYYQn'), e.g.: {bad_vals}")
+
+    return pd.PeriodIndex(s, freq="Q").to_timestamp(how="E")
+
+
+def _align_quarterly_interest_to_weekly_rf(
+    interest_pct_qe: pd.Series,
+    weekly_index: pd.DatetimeIndex,
+) -> pd.Series:
+    """
+    Convert quarterly annualised interest rate (% per annum) to weekly rf (decimal),
+    and align to weekly dates via last-observation-carried-forward.
+
+    Note: quarterly macro data from `fetch_macro_data2.py` is sampled at quarter-end
+    (resample('Q').last()). We therefore anchor the rates at quarter-end timestamps
+    to avoid look-ahead in weekly regressions.
+    """
+    if interest_pct_qe is None or len(interest_pct_qe) == 0:
+        return pd.Series(index=weekly_index, dtype=float)
+
+    s = pd.to_numeric(interest_pct_qe, errors="coerce").dropna()
+    if s.empty:
+        return pd.Series(index=weekly_index, dtype=float)
+
+    rf_ann = (s / 100.0).clip(lower=-0.99)
+
+    rf_week = (1.0 + rf_ann).pow(1.0 / 52.0) - 1.0
+
+    rf_week = rf_week.sort_index()
+
+    idx_dt = pd.to_datetime(rf_week.index)
+
+    rf_week.index = pd.PeriodIndex(idx_dt, freq="Q").to_timestamp(how="E")
+
+    rf_week = rf_week.sort_index()
+
+    w_idx = pd.DatetimeIndex(weekly_index).sort_values()
+    w_df = pd.DataFrame({"date": w_idx})
+
+    rf_week.index.name = "date"
+    m_df = rf_week.rename("rf_week").reset_index().sort_values("date")
+
+    aligned = pd.merge_asof(w_df, m_df, on="date", direction="backward")["rf_week"]
+    out = pd.Series(aligned.to_numpy(), index=w_idx, name="rf_week").ffill().bfill()
+
+    return out.reindex(weekly_index)
+
 
 def _extract_param(
     res, 
@@ -456,7 +592,7 @@ def _extract_param(
 def beta_hac_ols(
     stock_weekly: pd.Series,
     mkt_weekly: pd.Series,
-    rf_per_week: float,
+    rf_per_week: float | pd.Series,
     winsor: float = 0.01,
     hac_lags: Optional[int] = None,
 ) -> Tuple[float, float, int]:
@@ -531,9 +667,17 @@ def beta_hac_ols(
         r2 = mkt_weekly
     )
     
-    sp = df["p"] - rf_per_week
-    
-    sb = df["b"] - rf_per_week
+    if isinstance(rf_per_week, pd.Series):
+ 
+        rf_s = rf_per_week.reindex(df.index).ffill().bfill()
+ 
+    else:
+ 
+        rf_s = float(rf_per_week)
+
+    sp = df["p"] - rf_s
+ 
+    sb = df["b"] - rf_s
     
     y = _winsorize(
         s = sp, 
@@ -571,7 +715,7 @@ def beta_hac_ols(
 def beta_dimson_hac(
     stock_weekly: pd.Series,
     mkt_weekly: pd.Series,
-    rf_per_week: float,
+    rf_per_week: float | pd.Series,
     L: int = 1,
     winsor: float = 0.01,
     hac_lags: Optional[int] = None,
@@ -648,102 +792,111 @@ def beta_dimson_hac(
         r1 = stock_weekly, 
         r2 = mkt_weekly
     )
+
+    if isinstance(rf_per_week, pd.Series):
     
-    sp = df["p"] - rf_per_week
+        rf_s = rf_per_week.reindex(df.index).ffill().bfill()
     
+    else:
+    
+        rf_s = float(rf_per_week)
+
+    y_raw = df["p"] - rf_s
+
     y = _winsorize(
-        s = sp, 
+        s = y_raw,
         p = winsor
     ).rename("y")
 
-    X_parts = []
+    m_excess = (df["b"] - rf_s)
+
+    X_parts: list[pd.Series] = []
     
-    names = []
-    
+    names: list[str] = []
+
     for k in range(-L, L + 1):
-   
+       
         name = f"b_{k}"
-        
-        sb = df["b"].shift(k) - rf_per_week
-   
+
+        xk_raw = m_excess.shift(k)
+
         xk = _winsorize(
-            s = sb, 
+            s = xk_raw, 
             p = winsor
         ).rename(name)
-   
+
         X_parts.append(xk)
-   
+
         names.append(name)
-   
+
     X = pd.concat(X_parts, axis = 1).dropna()
-   
+    
     y = y.loc[X.index]
 
-    X = sm.add_constant(X)  
+    X = sm.add_constant(X)
 
-    ols = sm.OLS(y, X, missing  ="drop").fit()
+    ols = sm.OLS(y, X, missing = "drop").fit()
     
     T = int(ols.nobs)
-    
+
     if hac_lags is None:
-    
+        
         hac_lags = max(int(np.floor(4.0 * (T / 100.0) ** (2.0 / 9.0))), 1)
 
     hac = ols.get_robustcov_results(cov_type = "HAC", maxlags = hac_lags)
 
     coeffs: Dict[str, float] = {}
-
+    
     for i, nm in enumerate(["const"] + names):
-
+    
         if nm == "const":
-
+    
             continue
-
+    
         coef_i, _ = _extract_param(
             res = hac, 
             name = nm, 
             fallback_pos = i
         )
-
+    
         coeffs[nm] = coef_i
 
     beta = float(sum(coeffs.values()))
 
     cov = hac.cov_params()
-    
+  
     if isinstance(cov, pd.DataFrame):
-        
+  
         cols = [nm for nm in names if nm in cov.columns]
-       
+  
         if cols:
-       
+  
             cov_sub = cov.loc[cols, cols]
-       
+  
             ones = np.ones((len(cols), 1))
-          
+  
             var_sum = float(ones.T @ cov_sub.values @ ones)
-       
+  
             se = np.sqrt(max(var_sum, 0.0))
-       
+  
         else:
-       
+  
             se = np.nan
-    
+  
     else:
-
-        
+  
         p = len(names)
-
-        start = 1  
-        
+  
+        start = 1
+  
         stop = start + p
-        
-        cov_sub = np.asarray(cov)[start: stop, start: stop]
-        
+  
+        cov_sub = np.asarray(cov)[start:stop, start:stop]
+  
         ones = np.ones((p, 1))
-        
+  
         var_sum = float(ones.T @ cov_sub @ ones)
-        
+  
         se = np.sqrt(max(var_sum, 0.0))
 
     return beta, se, T, coeffs
@@ -752,9 +905,9 @@ def beta_dimson_hac(
 def beta_kalman_random_walk(
     stock_weekly: pd.Series,
     mkt_weekly: pd.Series,
-    rf_per_week: float,
-    q: float = 5e-5,     
-    r: Optional[float] = None,  
+    rf_per_week: float | pd.Series,
+    q: float = 5e-5,
+    r: Optional[float] = None,
     winsor: float = 0.01,
 ) -> Tuple[pd.Series, pd.Series, float]:
     """
@@ -858,10 +1011,18 @@ def beta_kalman_random_walk(
         r1 = stock_weekly, 
         r2 = mkt_weekly
     )
+
+    if isinstance(rf_per_week, pd.Series):
+   
+        rf_s = rf_per_week.reindex(df.index).ffill().bfill()
+   
+    else:
+   
+        rf_s = float(rf_per_week)
+ 
+    sp = df["p"] - rf_s
     
-    sp = df["p"] - rf_per_week
-    
-    sb = df["b"] - rf_per_week
+    sb = df["b"] - rf_s
     
     y = _winsorize(
         s = sp, 
@@ -982,7 +1143,7 @@ def combine_betas_inverse_variance(
     beta_ols, beta_dim, beta_kal : float
         Input beta estimates.
     var_ols, var_dim, var_kal : float
-        Corresponding variance estimates.
+        Corresponding variance estimates. 
     pref_weights : tuple of three floats, default (1,1,1)
         Relative user preferences for the three estimators.
 
@@ -1037,16 +1198,16 @@ def vasicek_shrinkage(
     Model
     -----
     Suppose beta_i | μ ~ N(μ, τ^2) across names, and the observed estimate
-    \hat{beta}_i has sampling variance s_i^2. The posterior mean (shrunken beta)
+    hat{beta}_i has sampling variance s_i^2. The posterior mean (shrunken beta)
     is:
      
-      beta_i* = w_i * \hat{beta}_i + (1 − w_i) * μ,
+      beta_i* = w_i * hat{beta}_i + (1 − w_i) * μ,
      
       w_i = τ^2 / (τ^2 + s_i^2).
 
     Estimation of τ^2
     -----------------
-    Let Var_hat = sample variance of {\hat{beta}_i}, and let s_i^2 be the
+    Let Var_hat = sample variance of {hat{beta}_i}, and let s_i^2 be the
     squared standard errors. A method-of-moments estimator is:
     
       τ^2_hat = max( Var_hat − mean(s_i^2), min_tau2 ),
@@ -1056,7 +1217,7 @@ def vasicek_shrinkage(
     Mean Target
     -----------
     μ is set to the provided `mean_target` if not None; otherwise μ is the
-    cross-sectional mean of \hat{beta}_i.
+    cross-sectional mean of hat{beta}_i.
 
     Parameters
     ----------
@@ -1184,6 +1345,7 @@ def calculate_cost_of_equity(
     country_to_pair: Dict[str, str],
     ticker_country_map: dict[str, str],
     tax_rate: pd.Series,
+    tax_rate_5yr_avg: pd.Series,
     d_to_e: pd.Series,
     debt: pd.Series,
     equity: pd.Series,
@@ -1194,185 +1356,188 @@ def calculate_cost_of_equity(
     use_dimson_L: int = 1,
     kalman_q: float = 5e-5,
     winsor: float = 0.01,
-    method_prefs: Tuple[float, float, float] = (1.0, 1.0, 1.0),  
-    target_d_to_e: Optional[pd.Series] = None,                 
+    method_prefs: Tuple[float, float, float] = (1.0, 1.0, 1.0),
+    target_d_to_e: Optional[pd.Series] = None,
+    macro_rf_raw: Optional[pd.DataFrame] = None,
+    macro_rf_col: str = "Interest",
 ) -> pd.DataFrame:
     """
-    Estimate the cost of equity (COE) for each ticker by:
-     
-      (i) constructing weekly excess returns,
-     
-      (ii) estimating multiple betas (OLS, Dimson, Kalman),
-     
-      (iii) combining betas by inverse-variance weighting,
-     
-      (iv) optionally re-levering to target capital structure, and
-     
-      (v) applying a CAPM-style premium augmented by country risk premium (CRP)
-          and a currency premium.
-
-    Return Construction
-    -------------------
-    For each ticker i:
-     
-      • If the provided `returns[i]` resembles prices (heuristic), first convert
-        to the base currency using the tickers traded currency inferred from it's
-        suffix to select the FX pair (fallback to country-based pair; then compute 
-        weekly returns on a fixed weekday.
-     
-      • Otherwise treat the series as returns and align/sort.
-
-    The market weekly return series is taken from `per_ticker_market_weekly[i]`
-    when available; otherwise from `index_close` resampled to weekly.
-
-    Weekly excess returns are defined as:
-     
-      y_t = R_i,t − RF_week,
-     
-      x_t = R_m,t − RF_week,
+        Estimate the cost of equity (COE) for each ticker by:
+         
+          (i) constructing weekly excess returns,
+         
+          (ii) estimating multiple betas (OLS, Dimson, Kalman),
+         
+          (iii) combining betas by inverse-variance weighting,
+         
+          (iv) optionally re-levering to target capital structure, and
+         
+          (v) applying a CAPM-style premium augmented by country risk premium (CRP)
+              and a currency premium.
     
-    where RF_week = config.RF_PER_WEEK.
-
-    Beta Estimation
-    ---------------
-    1) OLS beta with HAC/Newey–West standard error:
-   
-         y_t = alpha + beta_OLS x_t + epsilon_t.
-   
-    2) Dimson beta with leads / lags k = −L, ...,+L:
-   
-         y_t = alpha + Σ_{k=−L}^{L} beta_k x_{t+k} + epsilon_t,
-   
-         beta_Dimson = Σ beta_k,
-   
-         se_Dimson from 1' V 1, with V the HAC covariance of {beta_k}.
-   
-    3) Kalman random-walk beta:
-   
-         y_t = alpha + beta_t x_t + epsilon_t,
-   
-         beta_t = beta_{t − 1} + eta_t,
-   
-         epsilon_t ~ N(0, r), eta_t ~ N(0, q),
-   
-       returning the smoothed beta at T (last date).
-
-    Combining Betas
-    ---------------
-    The three betas are combined using inverse-variance weights scaled by
-    user preferences p_i:
-
-      w_i = p_i / Var_i,
-
-      beta_combined = sum_i w_i * beta_i / sum_i w_i,
-
-      Var(beta_combined) = 1 / sum_i w_i.
-
-    Capital Structure Adjustment
-    ----------------------------
-    The combined beta is interpreted as a levered equity beta. If
-    `target_d_to_e` is supplied, a re-levering is applied to align with the
-    target debt-to-equity:
-   
-      beta_levered_used = beta_unlevered * ( 1 + (1 − τ) * D/E_target ).
-   
-    In this implementation the combined beta is treated as already levered,
-    so the function directly uses a re-levered adjustment relative to the
-    provided target.
-
-    Premium Components and COE
-    --------------------------
-    Define the equity risk premium (ERP) as:
+        Return Construction
+        -------------------
+        For each ticker i:
+         
+          • If the provided `returns[i]` resembles prices (heuristic), first convert
+            to the base currency using the tickers traded currency inferred from it's
+            suffix to select the FX pair (fallback to country-based pair; then compute 
+            weekly returns on a fixed weekday.
+         
+          • Otherwise treat the series as returns and align/sort.
     
-      ERP = max( spx_expected_return − rf, 0 ).
+        The market weekly return series is taken from `per_ticker_market_weekly[i]`
+        when available; otherwise from `index_close` resampled to weekly.
     
-    For country c, define:
+        Weekly excess returns are defined as:
+         
+          y_t = R_i,t − RF_week,
+         
+          x_t = R_m,t − RF_week,
+        
+        where RF_week = config.RF_PER_WEEK.
     
-      CRP_c = country risk premium from `crp_df` (fallback to mean across countries),
+        Beta Estimation
+        ---------------
+        1) OLS beta with HAC/Newey–West standard error:
+       
+             y_t = alpha + beta_OLS x_t + epsilon_t.
+       
+        2) Dimson beta with leads / lags k = −L, ...,+L:
+       
+             y_t = alpha + Σ_{k=−L}^{L} beta_k x_{t+k} + epsilon_t,
+       
+             beta_Dimson = Σ beta_k,
+       
+             se_Dimson from 1' V 1, with V the HAC covariance of {beta_k}.
+       
+        3) Kalman random-walk beta:
+       
+             y_t = alpha + beta_t x_t + epsilon_t,
+       
+             beta_t = beta_{t − 1} + eta_t,
+       
+             epsilon_t ~ N(0, r), eta_t ~ N(0, q),
+       
+           returning the smoothed beta at T (last date).
     
-      CP_c = currency premium for the FX pair mapped by `country_to_pair`
-             and provided in `currency_bl_df` (0 for the United Kingdom by convention).
-
-    The total additive premium for ticker i is:
+        Combining Betas
+        ---------------
+        The three betas are combined using inverse-variance weights scaled by
+        user preferences p_i:
     
-      Premium_i = max( beta_levered_used_i * ERP + CRP_{c_i} + CP_{c_i}, 0 ),
+          w_i = p_i / Var_i,
     
-    and the cost of equity is:
+          beta_combined = sum_i w_i * beta_i / sum_i w_i,
     
-      COE_i = rf + Premium_i.
-
-    Inputs
-    ------
-    tickers : list[str]
-        Universe of tickers to process.
-    rf : float
-        Annual risk-free rate used in the final COE construction.
-    returns : pandas.DataFrame
-        Either price levels or returns by column; detection is heuristic.
-    index_close : pandas.Series
-        Benchmark price series for the market.
-    per_ticker_market_weekly : dict[str, pandas.Series] or None
-        Optional per-ticker market weekly returns (overrides `index_close`).
-    spx_expected_return : float
-        Expected annual return for the S&P 500 (or chosen market proxy),
-        used to form ERP = max(spx_expected_return − rf, 0).
-    crp_df : pandas.DataFrame
-        Table with a 'CRP' column indexed by country names.
-    currency_bl_df : pandas.Series or pandas.DataFrame
-        Currency premium per FX pair (e.g., 'GBPUSD'); if a DataFrame, pairs
-        are looked up in the index and reduced to scalars.
-    country_to_pair : dict[str, str]
-        Map from country name to FX pair code (e.g., 'United States' → 'GBPUSD').
-    ticker_country_map : dict[str, str]
-        Map from ticker to country.
-    tax_rate : pandas.Series
-        Corporate tax rate per ticker τ in [0, 1].
-    d_to_e : pandas.Series
-        Current debt-to-equity ratio D/E per ticker.
-    debt, equity : pandas.Series
-        Debt and equity levels; carried to the output for reference.
-    fx_price_by_pair : dict[str, pandas.Series] or None
-        FX price converters used for price-level currency conversion.
-    base_ccy_conv : {"local_to_base","base_to_local"}, default "local_to_base"
-        FX directionality in price conversion.
-    weekly_day : str, default "W-FRI"
-        Weekly anchor weekday for resampling.
-    use_dimson_L : int, default 1
-        Number of lead/lag weeks in the Dimson regression.
-    kalman_q : float, default 5e-5
-        State innovation variance for the random-walk beta.
-    winsor : float, default 0.01
-        Two-sided winsorisation percentile applied to inputs in regressions.
-    method_prefs : tuple[float, float, float], default (1,1,1)
-        Preference multipliers for (OLS, Dimson, Kalman) in the combination step.
-    target_d_to_e : pandas.Series or None
-        Optional target D/E used to re-lever the combined beta.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Index by ticker with columns:
-          • Country
-          • Beta_OLS, SE_OLS
-          • Beta_Dimson, SE_Dimson
-          • Beta_Kalman, SE_Kalman
-          • Beta_Combined, SE_Combined
-          • Beta_Levered_Used
-          • TaxRate, D_to_E_Current, D_to_E_Target
-          • CRP, Currency Premium
-          • COE
-          • Debt, Equity
-
-    Implementation Notes
-    --------------------
-    - Observations with fewer than 30 aligned weeks are skipped.
+          Var(beta_combined) = 1 / sum_i w_i.
     
-    - ERP and the total premium are floored at zero to avoid negative
-      premia entering COE.
+        Capital Structure Adjustment
+        ----------------------------
+        The combined beta is interpreted as a levered equity beta. If
+        `target_d_to_e` is supplied, a re-levering is applied to align with the
+        target debt-to-equity:
+       
+          beta_levered_used = beta_unlevered * ( 1 + (1 − τ) * D/E_target ).
+       
+        In this implementation the combined beta is treated as already levered,
+        so the function directly uses a re-levered adjustment relative to the
+        provided target.
     
-    - Currency conversion is performed at the price level (multiplicative)
-      before computing returns, which correctly introduces FX effects into
-      returns; if `returns` are already currency-aligned, no conversion is applied.
+        Premium Components and COE
+        --------------------------
+        Define the equity risk premium (ERP) as:
+        
+          ERP = max( spx_expected_return − rf, 0 ).
+        
+        For country c, define:
+        
+          CRP_c = country risk premium from `crp_df` (fallback to mean across countries),
+        
+          CP_c = currency premium for the FX pair mapped by `country_to_pair`
+                 and provided in `currency_bl_df` (0 for the United Kingdom by convention).
+    
+        The total additive premium for ticker i is:
+        
+          Premium_i = max( beta_levered_used_i * ERP + CRP_{c_i} + CP_{c_i}, 0 ),
+        
+        and the cost of equity is:
+        
+          COE_i = rf + Premium_i.
+    
+        Inputs
+        ------
+        tickers : list[str]
+            Universe of tickers to process.
+        rf : float
+            Annual risk-free rate used in the final COE construction.
+        returns : pandas.DataFrame
+            Either price levels or returns by column; detection is heuristic.
+        index_close : pandas.Series
+            Benchmark price series for the market.
+        per_ticker_market_weekly : dict[str, pandas.Series] or None
+            Optional per-ticker market weekly returns (overrides `index_close`).
+        spx_expected_return : float
+            Expected annual return for the S&P 500 (or chosen market proxy),
+            used to form ERP = max(spx_expected_return − rf, 0).
+        crp_df : pandas.DataFrame
+            Table with a 'CRP' column indexed by country names.
+        currency_bl_df : pandas.Series or pandas.DataFrame
+            Currency premium per FX pair (e.g., 'GBPUSD'); if a DataFrame, pairs
+            are looked up in the index and reduced to scalars.
+        country_to_pair : dict[str, str]
+            Map from country name to FX pair code (e.g., 'United States' → 'GBPUSD').
+        ticker_country_map : dict[str, str]
+            Map from ticker to country.
+        tax_rate : pandas.Series
+            Corporate tax rate per ticker τ in [0, 1].
+        d_to_e : pandas.Series
+            Current debt-to-equity ratio D/E per ticker.
+        debt, equity : pandas.Series
+            Debt and equity levels; carried to the output for reference.
+        fx_price_by_pair : dict[str, pandas.Series] or None
+            FX price converters used for price-level currency conversion.
+        base_ccy_conv : {"local_to_base","base_to_local"}, default "local_to_base"
+            FX directionality in price conversion.
+        weekly_day : str, default "W-FRI"
+            Weekly anchor weekday for resampling.
+        use_dimson_L : int, default 1
+            Number of lead/lag weeks in the Dimson regression.
+        kalman_q : float, default 5e-5
+            State innovation variance for the random-walk beta.
+        winsor : float, default 0.01
+            Two-sided winsorisation percentile applied to inputs in regressions.
+        method_prefs : tuple[float, float, float], default (1,1,1)
+            Preference multipliers for (OLS, Dimson, Kalman) in the combination step.
+        target_d_to_e : pandas.Series or None
+            Optional target D/E used to re-lever the combined beta.
+    
+        Returns
+        -------
+        pandas.DataFrame
+            Index by ticker with columns:
+              • Country
+              • Beta_OLS, SE_OLS
+              • Beta_Dimson, SE_Dimson
+              • Beta_Kalman, SE_Kalman
+              • Beta_Combined, SE_Combined
+              • Beta_Levered_Used
+              • TaxRate, D_to_E_Current, D_to_E_Target
+              • CRP, Currency Premium
+              • COE
+              • Debt, Equity
+    
+        Implementation Notes
+        --------------------
+        - Observations with fewer than 30 aligned weeks are skipped.
+        
+        - ERP and the total premium are floored at zero to avoid negative
+          premia entering COE.
+        
+        - Currency conversion is performed at the price level (multiplicative)
+          before computing returns, which correctly introduces FX effects into
+          returns; if `returns` are already currency-aligned, no conversion is applied.
+        
     """
 
     index_weekly = _weekly_returns_from_prices(
@@ -1398,8 +1563,31 @@ def calculate_cost_of_equity(
 
     raw_ols_map: dict[str, float] = {}
 
-    rf_w = float(config.RF_PER_WEEK)
-    
+    rf_w_default = float(config.RF_PER_WEEK)
+
+    rf_q_by_ticker: dict[str, pd.Series] = {}
+
+    if macro_rf_raw is not None:
+        req = {"ticker", "year", macro_rf_col}
+        if req.issubset(macro_rf_raw.columns):
+            tmp = macro_rf_raw[["ticker", "year", macro_rf_col]].copy()
+            tmp[macro_rf_col] = pd.to_numeric(tmp[macro_rf_col], errors="coerce")
+            tmp = tmp.dropna(subset=[macro_rf_col])
+
+            if not tmp.empty:
+                qs = _parse_quarter_labels_to_qe(tmp["year"])
+                tmp = tmp.assign(qs=qs)
+
+                g = (
+                    tmp.groupby(["ticker", "qs"])[macro_rf_col]
+                    .first()
+                    .sort_index()
+                )
+
+                for tic, ser in g.groupby(level=0):
+                    rf_q_by_ticker[str(tic)] = ser.droplevel(0)
+
+        
     default_pair = "GBPUSD"
 
     for t in tickers:
@@ -1519,14 +1707,25 @@ def calculate_cost_of_equity(
 
             continue
 
+        rf_for_reg: float | pd.Series = rf_w_default
+
+        rf_q = rf_q_by_ticker.get(t)
+        if rf_q is not None and len(rf_q) > 0:
+            rf_weekly_series = _align_quarterly_interest_to_weekly_rf(
+                interest_pct_qe=rf_q,
+                weekly_index=df.index,
+            )
+            if rf_weekly_series.notna().any():
+                rf_for_reg = rf_weekly_series
+
         stock_w = df.iloc[:, 0]
        
         mkt_w = df.iloc[:, 1]
-
+        
         b_ols, se_ols, _ = beta_hac_ols(
             stock_weekly = stock_w,
-            mkt_weekly = mkt_w, 
-            rf_per_week = rf_w, 
+            mkt_weekly = mkt_w,
+            rf_per_week = rf_for_reg,
             winsor = winsor
         )
        
@@ -1537,18 +1736,18 @@ def calculate_cost_of_equity(
         b_dim, se_dim, _, _ = beta_dimson_hac(
             stock_weekly = stock_w,
             mkt_weekly = mkt_w,
-            rf_per_week = rf_w,
-            L = use_dimson_L, 
+            rf_per_week = rf_for_reg,
+            L = use_dimson_L,
             winsor = winsor
         )
-        
+
         v_dim = se_dim ** 2 if np.isfinite(se_dim) else np.nan
 
         beta_path, var_path, _ = beta_kalman_random_walk(
-            stock_weekly = stock_w, 
-            mkt_weekly = mkt_w, 
-            rf_per_week = rf_w, 
-            q = kalman_q, 
+            stock_weekly = stock_w,
+            mkt_weekly = mkt_w,
+            rf_per_week = rf_for_reg,
+            q = kalman_q,
             winsor = winsor
         )
         
@@ -1600,13 +1799,31 @@ def calculate_cost_of_equity(
         beta_levered_combined = float(beta_df.loc[t, "Beta_Combined"])
        
         tau_t = float(tax_rate.get(t, 0.20))
+        
+        tau_5yr_t = float(tax_rate_5yr_avg.get(t, 0.20))
        
-        dte_cur = float(d_to_e.get(t, 0.0))
+        dte_5yr_avg = float(d_to_e.get(t, 0.0))
+        
+        dte_tgt = float(target_d_to_e.get(t, dte_5yr_avg)) if target_d_to_e is not None else dte_5yr_avg
+        
+        if dte_5yr_avg < 0 or pd.isna(dte_5yr_avg):
+            
+            dte_5yr_avg = 0
+            
+            dte_tgt = 0
+            
+        if tau_5yr_t < 0 or pd.isna(tau_5yr_t):
+            
+            tau_5yr_t = tau_t
        
-        dte_tgt = float(target_d_to_e.get(t, dte_cur)) if target_d_to_e is not None else dte_cur
+        beta_asset = unlever_beta_from_levered(
+            beta_levered = beta_levered_combined,
+            tax_rate = tau_5yr_t,
+            d_to_e = dte_5yr_avg
+        )
 
         beta_relev = relever_beta_from_unlevered(
-            beta_unlevered = beta_levered_combined,
+            beta_unlevered = beta_asset,
             tax_rate = tau_t, 
             d_to_e = dte_tgt
         )
@@ -1619,9 +1836,9 @@ def calculate_cost_of_equity(
 
     beta_df["TaxRate"] = pd.Series({t: float(tax_rate.get(t, 0.20)) for t in beta_df.index})
 
-    beta_df["D_to_E_Current"] = pd.Series({t: float(d_to_e.get(t, 0.0)) for t in beta_df.index})
+    beta_df["D_to_E_5yr_avg"] = pd.Series({t: float(d_to_e.get(t, 0.0)) for t in beta_df.index})
 
-    beta_df["D_to_E_Target"] = pd.Series(dte_target_out)
+    beta_df["D_to_E_Curr"] = pd.Series(dte_target_out)
 
     crp_mean = float(crp_df["CRP"].mean()) if "CRP" in crp_df.columns else 0.0
 
@@ -1657,11 +1874,13 @@ def calculate_cost_of_equity(
 
         beta_used = float(beta_df.loc[t, "Beta_Levered_Used"])
 
-        erp = max(spx_expected_return - rf, 0.0)
+        erp = max(spx_expected_return - rf, 0.04)
+        
+        curr_prem = max(curr_prem, 0.0)
 
-        prem = max(beta_used * erp + crp_val + curr_prem, 0.0)
+        prem = max(beta_used * erp, 0.0)
 
-        coe = rf + prem
+        coe = max(rf + prem + crp_val, 0.06)
 
         coe_rows.append({
             "Ticker": t,
@@ -1679,7 +1898,7 @@ def calculate_cost_of_equity(
 
     out = beta_df.join(coe_df, how = "left")
 
-    out["Debt"] = pd.Series({t: float(debt.get(t, np.nan)) for t in out.index})
+    out["Debt"] = pd.Series({t: float(abs(debt.get(t, np.nan))) for t in out.index})
 
     out["Equity"] = pd.Series({t: float(equity.get(t, np.nan)) for t in out.index})
 
@@ -1692,13 +1911,13 @@ def calculate_cost_of_equity(
         "SE_Combined",
         "Beta_Levered_Used",
         "TaxRate", 
-        "D_to_E_Current", 
-        "D_to_E_Target",
+        "D_to_E_5yr_avg", 
+        "D_to_E_Curr",
         "CRP",
         "Currency Premium", 
         "COE",
         "Debt", 
-        "Equity",
+        "Equity", 
     ]
     
     cols_first = [c for c in cols_first if c in out.columns]
