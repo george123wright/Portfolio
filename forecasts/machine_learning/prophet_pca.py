@@ -6,7 +6,7 @@ How this version differs from the other Prophet model
 --------------------------------------------------------
 1) Return-space residual modelling and price reconstruction:
   
-   - The other pipeline adjusted Prophet **level** predictions (price space) with ARIMA
+   - The other pipeline adjusted Prophet **level** predictions (price space) with ARIMA 
      mean and GARCH volatility applied to Prophet residuals, then clipped price bands.
   
    - This version fits residual models on **log-return** residuals. Let L_t = log P_t,
@@ -84,7 +84,6 @@ import pandas as pd
 from itertools import product
 
 from prophet import Prophet
-from prophet.diagnostics import cross_validation, performance_metrics
 
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from arch import arch_model
@@ -230,15 +229,23 @@ def _qoq_yoy(
     """
     
     qdf = qdf.sort_values('ds').reset_index(drop = True)
-
+   
     out = qdf[['ds']].copy()
-   
+
     for c in cols:
-   
-        out[f'{c}_qoq'] = qdf[c].pct_change(1)
-   
-        out[f'{c}_yoy'] = qdf[c].pct_change(4)
-   
+       
+        qoq = qdf[c].pct_change(1)
+       
+        yoy = qdf[c].pct_change(4)
+
+        qoq = qoq.replace([np.inf, -np.inf], np.nan)
+
+        yoy = yoy.replace([np.inf, -np.inf], np.nan)
+
+        out[f'{c}_qoq'] = qoq
+
+        out[f'{c}_yoy'] = yoy
+
     return out
 
 
@@ -418,35 +425,49 @@ def fit_macro_pca(
     """
 
     if not macro_cols:
-     
+        
         return None, None, [], df_train
 
     X = df_train[macro_cols].astype(float)
-  
-    mask = X.notna().all(axis=1)
-  
+
+    X = X.replace([np.inf, -np.inf], np.nan)
+
+    mask = X.notna().all(axis = 1)
+
     X_fit = X.loc[mask]
 
     if X_fit.shape[1] == 0 or X_fit.shape[0] < 10:
-  
+       
         return None, None, [], df_train
 
-    scaler = StandardScaler().fit(X_fit)
-  
-    k = min(n_components, X_fit.shape[1])
-  
-    pca = PCA(n_components = k, random_state = 0).fit(scaler.transform(X_fit))
+    clip_lo = X_fit.quantile(0.001)  
+    
+    clip_hi = X_fit.quantile(0.999)  
+    
+    X_fit_clip = X_fit.clip(lower = clip_lo, upper = clip_hi, axis = 1)
 
-    X_full = X.fillna(pd.Series(scaler.mean_, index = macro_cols))
-   
+    scaler = StandardScaler().fit(X_fit_clip)
+
+    k = min(n_components, X_fit_clip.shape[1])
+
+    pca = PCA(n_components = k, random_state = 0).fit(scaler.transform(X_fit_clip))
+
+    X_full = X.replace([np.inf, -np.inf], np.nan).fillna(pd.Series(scaler.mean_, index = macro_cols))
+
+    X_full = X_full.clip(lower = clip_lo, upper = clip_hi, axis = 1)
+
     Z = pca.transform(scaler.transform(X_full))
    
     pc_cols = [f'Macro_PC{i+1}' for i in range(pca.n_components_)]
    
-    pcs_df = pd.DataFrame(Z, columns=pc_cols, index = df_train.index)
+    pcs_df = pd.DataFrame(Z, columns = pc_cols, index = df_train.index)
 
     df_out = pd.concat([df_train.drop(columns = macro_cols), pcs_df], axis = 1)
-   
+
+    scaler.clip_min_ = clip_lo
+
+    scaler.clip_max_ = clip_hi
+
     return scaler, pca, pc_cols, df_out
 
 
@@ -478,21 +499,27 @@ def transform_macro_with_pca(
     """
     
     if scaler is None or pca is None or not macro_cols:
-     
+        
         return df_macro_features[['ds']].copy()
 
     X = df_macro_features[macro_cols].astype(float)
-   
+
+    X = X.replace([np.inf, -np.inf], np.nan)
+
     X_full = X.fillna(pd.Series(scaler.mean_, index = macro_cols))
-   
+
+    if hasattr(scaler, "clip_min_") and hasattr(scaler, "clip_max_"):
+
+        X_full = X_full.clip(lower = scaler.clip_min_, upper = scaler.clip_max_, axis = 1)
+
     Z = pca.transform(scaler.transform(X_full))
-   
+    
     pc_cols = [f'Macro_PC{i+1}' for i in range(pca.n_components_)]
-   
-    pcs = pd.DataFrame(Z, columns=pc_cols)
-   
+    
+    pcs = pd.DataFrame(Z, columns = pc_cols)
+    
     pcs.insert(0, 'ds', df_macro_features['ds'].values)
-   
+    
     return pcs
 
 
@@ -1502,9 +1529,9 @@ def pipeline_cv_rmse(
 
     for co in cutoffs:
       
-        train_y = df_full[df_full['ds'] <= co][['ds','y']].copy()
+        train_y = df_full[df_full['ds'] <= co][['ds', 'y']].copy()
       
-        test = df_full[(df_full['ds'] > co) & (df_full['ds'] <= co + pd.to_timedelta(horizon))][['ds','y']].copy()
+        test = df_full[(df_full['ds'] > co) & (df_full['ds'] <= co + pd.to_timedelta(horizon))][['ds', 'y']].copy()
       
         if train_y.empty or test.empty:
       
@@ -2173,7 +2200,7 @@ def main() -> None:
             avg_ret.get(tk, np.nan), se.get(tk, np.nan)
         )
 
-    prophet_results = pd.DataFrame({
+    prophet_results = pd.DataFrame({ 
         'Ticker': tickers,
         'Current Price': [latest_prices.get(tk, np.nan) for tk in tickers],
         'Avg Price': [avg_price.get(tk, np.nan) for tk in tickers],
