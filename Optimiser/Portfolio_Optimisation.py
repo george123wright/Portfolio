@@ -1,21 +1,21 @@
 """
 End-to-end portfolio optimisation and reporting pipeline.
-
+ 
 This script loads forecasts, returns, and classifications; builds risk models;  
 runs a suite of long-only optimisers via `PortfolioOptimiser`; and exports both 
 weights and diagnostics to an Excel workbook with conditional formatting.
 
 Pipeline outline
-----------------
-1) **Data ingestion and alignment**
+----------------  
+1) **Data ingestion and alignment** 
   
    - Loads recent daily/weekly/monthly returns, score/return forecasts, per-ticker 
      sector/industry and market caps, and factor/benchmark series.
-  
+   
    - Builds annual and weekly covariance estimates using a shrinkage routine that 
      can blend idiosyncratic and factor components.
   
-   - Resamples, aligns, and prunes histories to a common ticker universe.
+   - Resamples, aligns, and prunes histories to a common ticker universe. 
 
 2) **Risk model construction**
 
@@ -87,6 +87,10 @@ Pipeline outline
             and higher moments; BL posterior alignment **without** proximity penalties; 
             auto-scaling equalises gradient pushes across terms.
 
+       • `comb_port12` = Sortino + MDP + BL-Sharpe + Deflated Sharpe + Adjusted Sharpe
+            + Up/Down + UPM-LPM.
+            Advantage: broad multi-objective reward composite without direct Sharpe term.
+
 
 5) **Reporting**
   
@@ -113,7 +117,6 @@ Outputs
 Notes
 -----
 - `yfinance` download calls require network connectivity and may incur API delays.
-
 - All optimisers enforce the same long-only, budget, and box/sector/industry caps;
   some composite variants also include CCP linearised sector risk-contribution caps.
 """
@@ -121,7 +124,8 @@ Notes
 
 import datetime as dt
 import logging
-from typing import Tuple, List
+import re
+from typing import Tuple, List, Dict, Callable
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -139,7 +143,102 @@ import portfolio_functions as pf
 from functions.cov_functions import shrinkage_covariance
 from portfolio_optimisers import PortfolioOptimiser
 from data_processing.ratio_data import RatioData
+from financial_forecast_data5 import FinancialForecastData
 import config
+
+
+def build_fx_factor_returns(
+    ratio_data,
+    tickers,
+    weekly_index,
+    base_ccy: str,
+):
+    """
+    Construct weekly foreign-exchange factor returns relative to a base currency.
+
+    Purpose
+    -------
+    Portfolio and factor risk are evaluated in a single base currency. Where
+    holdings trade in mixed local currencies, this function creates explicit FX
+    return factors so covariance estimation can model translation risk directly.
+
+    Construction
+    ------------
+    1) Determine each ticker's local trading currency.
+   
+    2) Obtain converter price series for each local currency into ``base_ccy``.
+   
+    3) For each non-base currency ``c``, compute:
+   
+       ``r_fx_c,t = P_fx_c,t / P_fx_c,t-1 - 1``.
+   
+    4) Align all series to ``weekly_index`` and return columns named ``FX_<ccy>``.
+
+    Advantages of this modelling approach
+    -------------------------------------
+    - Improves covariance decomposition by separating equity and currency shocks.
+   
+    - Reduces the risk of conflating FX translation effects with idiosyncratic noise.
+   
+    - Preserves a coherent base-currency framework across global universes.
+
+    Parameters
+    ----------
+    ratio_data : object
+        Data adaptor exposing ticker-currency and FX converter retrieval helpers.
+    tickers : sequence[str]
+        Universe tickers.
+    weekly_index : pd.Index
+        Weekly timestamps used for alignment.
+    base_ccy : str
+        Base reporting currency.
+
+    Returns
+    -------
+    pd.DataFrame | None
+        FX factor return matrix aligned to ``weekly_index``, or ``None`` if data
+        are unavailable or no non-base currencies are present.
+    """
+    
+    try:
+    
+        col_ccy = ratio_data._ticker_ccy(pd.Index(tickers)).fillna(base_ccy)
+    
+    except Exception:
+    
+        return None
+
+    try:
+    
+        fx_by_ccy = ratio_data._fx_converters_by_ccy(
+            ccys = col_ccy,
+            base_ccy = base_ccy,
+            interval = "1wk",
+            index = weekly_index,
+        )
+    
+    except Exception:
+    
+        return None
+
+    fx_rets = {}
+
+    for ccy, fx_price in fx_by_ccy.items():
+    
+        if ccy == base_ccy:
+    
+            continue
+    
+        s = fx_price.pct_change().reindex(weekly_index).fillna(0.0)
+    
+        fx_rets[f"FX_{ccy}"] = s
+
+    if not fx_rets:
+    
+        return None
+
+    return pd.DataFrame(fx_rets, index = weekly_index)
+
 
 r = RatioData()
 
@@ -185,6 +284,180 @@ def ensure_headers_are_strings(
         df.index.name = str(df.index.name)
     
     return df
+
+
+def _load_cached_cov_matrix(
+    *,
+    base_dir,
+    tickers: list[str],
+) -> tuple[pd.DataFrame | None, str | None]:
+    """
+    Try to load a cached covariance matrix (prefer today's file, else latest).
+    Returns (cov_df, path_str).
+    """
+   
+    tickers = [str(t).upper() for t in tickers]
+   
+    base_dir = config.BASE_DIR if base_dir is None else base_dir
+   
+    today_path = base_dir / f"cov_matrix_{config.TODAY}.pkl"
+
+    candidates = []
+   
+    if today_path.exists():
+   
+        candidates.append(today_path)
+
+    pattern = re.compile(r"cov_matrix_(\d{4}-\d{2}-\d{2})\.pkl$")
+   
+    dated = []
+   
+    for p in base_dir.glob("cov_matrix_*.pkl"):
+   
+        if p == today_path:
+   
+            continue
+   
+        m = pattern.search(p.name)
+   
+        if m:
+   
+            try:
+   
+                d = dt.date.fromisoformat(m.group(1))
+   
+                dated.append((d, p))
+   
+            except Exception:
+   
+                continue
+   
+    dated.sort(key=lambda x: x[0], reverse=True)
+   
+    for _, p in dated:
+   
+        candidates.append(p)
+
+    for path in candidates:
+   
+        try:
+   
+            cov_loaded = pd.read_pickle(path)
+   
+        except Exception:
+   
+            continue
+   
+        if not isinstance(cov_loaded, pd.DataFrame):
+   
+            continue
+   
+        cov_loaded.index = cov_loaded.index.astype(str).str.upper()
+   
+        cov_loaded.columns = cov_loaded.columns.astype(str).str.upper()
+   
+        cov_loaded = cov_loaded.reindex(index = tickers, columns = tickers)
+   
+        if cov_loaded.shape[0] != len(tickers) or cov_loaded.shape[1] != len(tickers):
+   
+            continue
+   
+        diag = np.diag(cov_loaded.values)
+   
+        if not np.isfinite(diag).all():
+   
+            continue
+   
+        return cov_loaded, str(path)
+
+    return None, None
+
+
+def _load_cached_sigma_prior(
+    *,
+    base_dir,
+    tickers: list[str],
+) -> tuple[pd.DataFrame | None, str | None]:
+    """
+    Try to load a cached BL prior covariance (prefer today's file, else latest).
+    Returns (sigma_prior_df, path_str).
+    """
+  
+    tickers = [str(t).upper() for t in tickers]
+  
+    base_dir = config.BASE_DIR if base_dir is None else base_dir
+  
+    today_path = base_dir / f"sigma_prior_{config.TODAY}.pkl"
+
+    candidates = []
+  
+    if today_path.exists():
+  
+        candidates.append(today_path)
+
+    pattern = re.compile(r"sigma_prior_(\d{4}-\d{2}-\d{2})\.pkl$")
+  
+    dated = []
+  
+    for p in base_dir.glob("sigma_prior_*.pkl"):
+  
+        if p == today_path:
+  
+            continue
+  
+        m = pattern.search(p.name)
+  
+        if m:
+  
+            try:
+  
+                d = dt.date.fromisoformat(m.group(1))
+  
+                dated.append((d, p))
+  
+            except Exception:
+  
+                continue
+  
+    dated.sort(key = lambda x: x[0], reverse = True)
+  
+    for _, p in dated:
+  
+        candidates.append(p)
+
+    for path in candidates:
+  
+        try:
+  
+            sigma_loaded = pd.read_pickle(path)
+  
+        except Exception:
+  
+            continue
+  
+        if not isinstance(sigma_loaded, pd.DataFrame):
+  
+            continue
+  
+        sigma_loaded.index = sigma_loaded.index.astype(str).str.upper()
+  
+        sigma_loaded.columns = sigma_loaded.columns.astype(str).str.upper()
+  
+        sigma_loaded = sigma_loaded.reindex(index = tickers, columns = tickers)
+  
+        if sigma_loaded.shape[0] != len(tickers) or sigma_loaded.shape[1] != len(tickers):
+  
+            continue
+  
+        diag = np.diag(sigma_loaded.values)
+  
+        if not np.isfinite(diag).all():
+  
+            continue
+  
+        return sigma_loaded, str(path)
+
+    return None, None
 
 
 def load_excel_data() -> Tuple[
@@ -251,8 +524,14 @@ def load_excel_data() -> Tuple[
     weekly_ret = r.weekly_rets
    
     daily_ret = r.daily_rets
+    
+    daily_open = r.open
+    
+    daily_close = r.close
+
+    macro_weekly = r.macro_data
   
-    monthly_ret = r.close.resample('M').last().pct_change().dropna()
+    monthly_ret = daily_close.resample('ME').last().pct_change().dropna()
     
     weekly_ret.index = pd.to_datetime(weekly_ret.index)
   
@@ -266,17 +545,65 @@ def load_excel_data() -> Tuple[
     
     comb_data = comb_data.reindex(tickers)
     
-    factor_pred = pd.read_excel(config.FORECAST_FILE, sheet_name = "Factor Exponential Regression", index_col = 0)['Returns']
+    factor_data = pd.read_excel(config.FORECAST_FILE, sheet_name = "Factor Exponential Regression", index_col = 0)
+    
+    factor_pred = factor_data['Returns']
+    
+    factor_r2 = factor_data['r2']
     
     comb_std = comb_data['SE']
     
     score = comb_data["Score"]
     
     comb_rets = comb_data["Returns"]
+    
+    safe_rets = comb_data["Safe Returns"]
   
     bear_rets = comb_data["Low Returns"]
   
     bull_rets = comb_data["High Returns"]
+
+    cov_path = config.BASE_DIR / f"cov_matrix_{config.TODAY}.pkl"
+   
+    sigma_prior_path = config.BASE_DIR / f"sigma_prior_{config.TODAY}.pkl"
+   
+    annCov = None
+   
+    annCov_desc = None
+   
+    extras = None
+   
+    annCov, cov_used_path = _load_cached_cov_matrix(
+        base_dir = config.BASE_DIR,
+        tickers = list(tickers),
+    )
+   
+    print('annCov:', annCov)
+   
+    if annCov is not None:
+   
+        annCov_desc = annCov.describe()
+   
+        eigvals = np.linalg.eigvalsh(annCov.values)
+   
+        diag_vol = np.sqrt(np.clip(np.diag(annCov.values), 0, None))
+   
+        corr_vol = np.corrcoef(diag_vol, comb_std.reindex(tickers).to_numpy())[0, 1]
+   
+        extras = {
+            "weights": {},
+            "eig_min": float(eigvals[0]),
+            "eig_max": float(eigvals[-1]),
+            "eig_trace": float(eigvals.sum()),
+            "vol_forecast_corr": float(corr_vol),
+        }
+   
+        logging.info("Loaded cached covariance from %s", cov_used_path)
+   
+    sigma_prior, sigma_prior_used_path = _load_cached_sigma_prior(
+        base_dir = config.BASE_DIR,
+        tickers = list(tickers),
+    )
     
     ticker_data = pd.read_excel(config.FORECAST_FILE, sheet_name = "Analyst Data", index_col = 0)
     
@@ -285,91 +612,217 @@ def load_excel_data() -> Tuple[
     ticker_mcap = ticker_data['marketCap']
   
     ticker_sec = ticker_data['Sector']
+
+    sector_map = ticker_sec
+
+    industry_map = ticker_ind
     
     d_to_e = ticker_data['debtToEquity'] / 100
     
     tax = ticker_data['Tax Rate']
-        
-    daily_ret_5y = daily_ret.loc[daily_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
-  
+    
     weekly_ret_5y = weekly_ret.loc[weekly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
-  
-    monthly_ret_5y = monthly_ret.loc[monthly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
-    
-    factor_weekly, index_weekly, ind_weekly, sec_weekly = r.factor_index_ind_sec_weekly_rets(
-        merge = False
-    )
-    
-    base_ccy = getattr(config, "BASE_CCY", "GBP")
-
-    daily_ret_5y_base = r.convert_returns_to_base(
-        ret_df = daily_ret_5y,
-        base_ccy = base_ccy,
-        interval = "1d"
-    )
-    
+   
+    base_ccy = getattr(config, "BASE_CCY", "USD")
+   
     weekly_ret_5y_base = r.convert_returns_to_base(
         ret_df = weekly_ret_5y,
         base_ccy = base_ccy,
         interval = "1wk"
     )
     
-    monthly_ret_5y_base = r.convert_returns_to_base(
-        ret_df = monthly_ret_5y,
-        base_ccy = base_ccy,
-        interval = "1mo"
-    )
-    
-    factor_weekly_base = r.convert_returns_to_base(
-        ret_df = factor_weekly, 
-        base_ccy = base_ccy,
-        interval = "1wk"
-    )
-    
-    index_weekly_base = r.convert_returns_to_base(
-        ret_df = index_weekly,
-        base_ccy = base_ccy,
-        interval = "1wk"
-    )
-    
-    ind_weekly_base = r.convert_returns_to_base(
-        ret_df = ind_weekly,
-        base_ccy = base_ccy, 
-        interval = "1wk"
-    )
-    
-    sec_weekly_base = r.convert_returns_to_base(
-        ret_df = sec_weekly,
-        base_ccy = base_ccy, 
-        interval = "1wk"
-    )
-     
-    annCov, annCov_desc = shrinkage_covariance(
-        daily_5y = daily_ret_5y_base, 
-        weekly_5y = weekly_ret_5y_base, 
-        monthly_5y = monthly_ret_5y_base, 
-        comb_std = comb_std, 
-        common_idx = comb_rets.index,
-        ff_factors_weekly = factor_weekly_base,
-        index_returns_weekly = index_weekly_base,
-        industry_returns_weekly = ind_weekly_base,
-        sector_returns_weekly = sec_weekly_base,
-        use_excess_ff = False,
-        description = True
-    )
+    if annCov is None or sigma_prior is None:
         
-    sigma_prior = shrinkage_covariance(
-        daily_5y = daily_ret_5y_base, 
-        weekly_5y = weekly_ret_5y_base, 
-        monthly_5y = monthly_ret_5y_base, 
-        comb_std = comb_std, 
-        common_idx = tickers, 
-        w_F = 0,       
-        w_FF = 0,     
-        w_IDX = 0,  
-        w_IND = 0,     
-        w_SEC = 0,   
-    )
+        daily_ret_5y = daily_ret.loc[daily_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
+        
+        daily_close_5y = daily_close.loc[daily_close.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
+        
+        daily_open_5y = daily_open.loc[daily_open.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
+        
+        macro_weekly_5y = macro_weekly.loc[macro_weekly.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
+    
+        monthly_ret_5y = monthly_ret.loc[monthly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
+        
+        factor_weekly, index_weekly, ind_weekly, sec_weekly = r.factor_index_ind_sec_weekly_rets(
+            merge = False
+        )
+
+        daily_ret_5y_base = r.convert_returns_to_base(
+            ret_df = daily_ret_5y,
+            base_ccy = base_ccy,
+            interval = "1d"
+        )
+
+        daily_close_5y_base = r.convert_returns_to_base(
+            ret_df = daily_close_5y,
+            base_ccy = base_ccy,
+            interval = "1d"
+        )
+        
+        daily_open_5y_base = r.convert_returns_to_base(
+            ret_df = daily_open_5y,
+            base_ccy = base_ccy,
+            interval = "1d"
+        )
+
+        fund_exposures_weekly = None
+       
+        if getattr(config, "COV_USE_FUND_FACTORS", True):
+       
+            try:
+       
+                fdata = FinancialForecastData(tickers = list(tickers), quiet = True)
+       
+                weekly_prices = r.weekly_close.reindex(
+                    index = weekly_ret_5y_base.index
+                ).reindex(columns = tickers)
+                
+                shares_out = r.shares_outstanding
+                
+                fund_exposures_weekly = fdata.build_pit_fundamental_exposures_weekly(
+                    tickers = list(tickers),
+                    weekly_index = weekly_ret_5y_base.index,
+                    weekly_prices = weekly_prices,
+                    shares_outstanding = shares_out,
+                    report_lag_days = getattr(config, "FUND_REPORT_LAG_DAYS", 90),
+                    price_lag_weeks = getattr(config, "FUND_PRICE_LAG_WEEKS", 1),
+                    winsor_p = getattr(config, "FUND_WINSOR_P", (0.05, 0.95)),
+                    robust_scale = getattr(config, "FUND_ROBUST_SCALE", "mad"),
+                    min_coverage = getattr(config, "FUND_MIN_COVERAGE", 0.6),
+                )
+                
+            except Exception as exc:
+              
+                logging.warning("Failed to build PIT fundamental exposures: %s", exc)
+            
+            
+        fx_factors_weekly = build_fx_factor_returns(
+            ratio_data = r,
+            tickers = tickers,
+            weekly_index = weekly_ret_5y_base.index,
+            base_ccy = base_ccy,
+        )
+            
+        monthly_ret_5y_base = r.convert_returns_to_base(
+            ret_df = monthly_ret_5y,
+            base_ccy = base_ccy,
+            interval = "1mo"
+        )
+            
+        factor_weekly_base = r.convert_returns_to_base(
+            ret_df = factor_weekly, 
+            base_ccy = base_ccy,
+            interval = "1wk"
+        )
+            
+        index_weekly_base = r.convert_returns_to_base(
+            ret_df = index_weekly,
+            base_ccy = base_ccy,
+            interval = "1wk"
+        )
+            
+        ind_weekly_base = r.convert_returns_to_base(
+            ret_df = ind_weekly,
+            base_ccy = base_ccy, 
+            interval = "1wk"
+        )
+            
+        sec_weekly_base = r.convert_returns_to_base(
+            ret_df = sec_weekly,
+            base_ccy = base_ccy, 
+            interval = "1wk"
+        )
+    
+    if annCov is None:
+    
+        annCov, annCov_desc, extras = shrinkage_covariance(
+            daily_5y = daily_ret_5y_base, 
+            weekly_5y = weekly_ret_5y_base, 
+            monthly_5y = monthly_ret_5y_base, 
+            comb_std = comb_std, 
+            common_idx = comb_rets.index,
+            ff_factors_weekly = factor_weekly_base,
+            index_returns_weekly = index_weekly_base,
+            industry_returns_weekly = ind_weekly_base,
+            sector_returns_weekly = sec_weekly_base,
+            macro_factors_weekly = macro_weekly_5y,
+            fx_factors_weekly = fx_factors_weekly,
+            fund_exposures_weekly = fund_exposures_weekly,
+            sector_map = sector_map,
+            industry_map = industry_map,
+            daily_open_5y = daily_open_5y_base,
+            daily_close_5y = daily_close_5y_base,
+            use_excess_ff = False,
+            use_log_returns = getattr(config, "COV_USE_LOG_RETURNS", True),
+            use_oas = getattr(config, "COV_USE_OAS", True),
+            use_block_prior = getattr(config, "COV_USE_BLOCK_PRIOR", True),
+            use_regime_ewma = getattr(config, "COV_USE_REGIME_EWMA", True),
+            use_glasso = getattr(config, "COV_USE_GLOSSO", True),
+            use_fund_factors = getattr(config, "COV_USE_FUND_FACTORS", True),
+            use_fx_factors = getattr(config, "COV_USE_FX_FACTORS", True),
+            use_factor_term_structure = getattr(config, "COV_USE_TERM_STRUCTURE", False),
+            description = True,
+        )
+     
+        try:
+     
+            annCov.to_pickle(cov_path)
+     
+        except Exception as exc:
+     
+            logging.warning("Failed to cache covariance to %s: %s", cov_path, exc)
+    
+    print('------------------------------------------------------------')
+    
+    print('\nextras\n', extras) 
+        
+    if sigma_prior is None:
+        
+        sigma_prior = shrinkage_covariance(
+            daily_5y = daily_ret_5y_base, 
+            weekly_5y = weekly_ret_5y_base, 
+            monthly_5y = monthly_ret_5y_base, 
+            comb_std = comb_std, 
+            common_idx = tickers, 
+            w_F = 0,       
+            ff_factors_weekly = factor_weekly_base,
+            index_returns_weekly = index_weekly_base,
+            industry_returns_weekly = ind_weekly_base,
+            sector_returns_weekly = sec_weekly_base,
+            macro_factors_weekly = macro_weekly_5y,
+            fx_factors_weekly = fx_factors_weekly,
+            fund_exposures_weekly = fund_exposures_weekly,
+            sector_map = sector_map,
+            industry_map = industry_map,
+            use_log_returns = getattr(config, "COV_USE_LOG_RETURNS", True),
+            use_oas = getattr(config, "COV_USE_OAS", True),
+            use_block_prior = getattr(config, "COV_USE_BLOCK_PRIOR", True),
+            use_regime_ewma = getattr(config, "COV_USE_REGIME_EWMA", True),
+            use_glasso = getattr(config, "COV_USE_GLOSSO", True),
+            use_fund_factors = getattr(config, "COV_USE_FUND_FACTORS", True),
+            use_fx_factors = getattr(config, "COV_USE_FX_FACTORS", True),
+            use_factor_term_structure = getattr(config, "COV_USE_TERM_STRUCTURE", False),
+        )
+     
+        try:
+     
+            sigma_prior.to_pickle(sigma_prior_path)
+     
+        except Exception as exc:
+     
+            logging.warning("Failed to cache sigma_prior to %s: %s", sigma_prior_path, exc)
+   
+    else:
+   
+        logging.info("Loaded cached sigma_prior from %s", sigma_prior_used_path)
+    
+    print('sigma_prior', np.isfinite(sigma_prior).all())
+        
+    for t in sigma_prior.columns:
+        
+        if not np.isfinite(sigma_prior[t]).all():
+        
+            print(t)
     
     annCov = annCov.reindex(index = tickers, columns = tickers)
         
@@ -387,10 +840,12 @@ def load_excel_data() -> Tuple[
 
     beta = beta_data.reindex(tickers)
     
-    return (weekly_ret_5y, tickers, weeklyCov, annCov, annCov_desc_df, cov_df,
+    print('end of load_excel_data')
+    
+    return (weekly_ret_5y, weekly_ret_5y_base, tickers, weeklyCov, annCov, annCov_desc_df, cov_df,
             Signal, beta, 
-            score, comb_rets, ticker_ind, ticker_sec, comb_std,
-            bear_rets, bull_rets, ticker_mcap, sigma_prior, factor_pred,
+            score, comb_rets, safe_rets, ticker_ind, ticker_sec, comb_std,
+            bear_rets, bull_rets, ticker_mcap, sigma_prior, factor_pred, factor_r2,
             d_to_e, tax)
 
 
@@ -451,7 +906,7 @@ def _add_table(
 
     last_col = get_column_letter(ws.max_column)
     
-    table = Table(displayName=table_name, ref=f"A1:{last_col}{ws.max_row}")
+    table = Table(displayName = table_name, ref = f"A1:{last_col}{ws.max_row}")
     
     table.tableStyleInfo = TableStyleInfo(
         name = "TableStyleMedium9",
@@ -471,9 +926,13 @@ def add_weight_cf(
     Apply “traffic-light” conditional formatting to numeric weight columns.
 
     Rules applied to each numeric column (rows 2…max_row):
+      
         - Red fill if value < 0.01 (tiny / effectively zero).
+      
         - Yellow fill if 1.95 ≤ value ≤ 2.05 (aggregated check; e.g., sum validation).
+      
         - Green fill if cell is neither 0 nor 2 (treated as a “valid” entry).
+   
     Also sets number format "0.00" for all numeric cells in data rows.
 
     Args:
@@ -541,9 +1000,13 @@ def write_excel_results(
         - "Portfolio Performance"
 
     Formatting:
+   
         - Converts each written range to an Excel table with a consistent style.
+   
         - Applies green/red fills to Buy/Sell booleans.
+   
         - Applies 3-colour scale to the covariance numeric area.
+   
         - Applies traffic-light rules to weight sheets.
 
     Args:
@@ -661,6 +1124,28 @@ def write_excel_results(
             sheet_name: str, 
             tablename: str
         ) -> None:
+            """
+            Write one weights-style worksheet and apply standard formatting controls.
+
+            Workflow:
+           
+            1) sanitise headers to strings;
+           
+            2) write the selected DataFrame to ``sheet_name``;
+           
+            3) apply weight-focused conditional formatting rules;
+           
+            4) convert the used range into a styled Excel table.
+
+            Parameters
+            ----------
+            df_key : str
+                Key identifying the source DataFrame in ``sheets``.
+            sheet_name : str
+                Destination worksheet name.
+            tablename : str
+                Excel table display name to assign.
+            """
        
             df = ensure_headers_are_strings(
                 df = sheets[df_key].copy()
@@ -751,27 +1236,27 @@ def benchmark_rets(
     
     if benchmark.upper() == 'SP500':
         
-        close = yf.download('^GSPC', start = start, end = end)['Close'].squeeze()
+        close = yf.download('^GSPC', start = start, end = end, auto_adjust = True)['Close'].squeeze()
     
     elif benchmark.upper() == 'NASDAQ':
         
-        close = yf.download('^IXIC', start = start, end = end)['Close'].squeeze()
+        close = yf.download('^IXIC', start = start, end = end, auto_adjust = True)['Close'].squeeze()
     
     elif benchmark.upper() == 'FTSE':
         
-        close = yf.download('^FTSE', start = start, end = end)['Close'].squeeze()
+        close = yf.download('^FTSE', start = start, end = end, auto_adjust = True)['Close'].squeeze()
         
     elif benchmark.upper() == 'FTSE ALL-WORLD':
         
-        close = yf.download('VWRL.L', start = start, end = end)['Close'].squeeze()
+        close = yf.download('VWRL.L', start = start, end = end, auto_adjust = True)['Close'].squeeze()
     
     elif benchmark.upper() == 'ALL':
     
-        close_sp = yf.download('^GSPC', start = start, end = end)['Close'].squeeze()
+        close_sp = yf.download('^GSPC', start = start, end = end, auto_adjust = True)['Close'].squeeze()
      
-        close_nd = yf.download('^IXIC', start = start, end = end)['Close'].squeeze()
+        close_nd = yf.download('^IXIC', start = start, end = end, auto_adjust = True)['Close'].squeeze()
      
-        close_ft = yf.download('^FTSE', start = start, end = end)['Close'].squeeze()
+        close_ft = yf.download('^FTSE', start = start, end = end, auto_adjust = True)['Close'].squeeze()
     
         rets_sp = close_sp.resample('W').last().pct_change().dropna()
      
@@ -796,6 +1281,74 @@ def benchmark_rets(
     return benchmark_ann_ret, rets, last_year_rets 
 
 
+def compute_adv_dollar(
+    close: pd.DataFrame,
+    volume: pd.DataFrame,
+    window: int = 20,
+    fx_to_usd: pd.DataFrame | None = None,
+    min_valid_ratio: float = 0.6,
+) -> pd.Series:
+    """
+    Trailing average daily *dollar* volume over `window` trading days.
+
+    close, volume: DataFrames aligned by index and columns (tickers).
+    fx_to_usd: optional DataFrame (same shape) to convert local prices to USD.
+               If None, assumes `close` already in USD/base currency.
+
+    Returns a pd.Series (index=tickers) with ADV$.
+    """
+    
+    close = close.copy()
+    
+    volume = volume.copy()
+
+    if fx_to_usd is not None:
+    
+        close = close * fx_to_usd
+
+    dollar_vol = (close * volume).astype(float)
+
+    roll = dollar_vol.rolling(window = window, min_periods = int(window * min_valid_ratio)).mean()
+    
+    adv = roll.iloc[-1].fillna(0.0)
+
+    return adv
+
+
+def compute_amihud(
+    close: pd.DataFrame,
+    volume: pd.DataFrame,
+    window: int = 60,
+    fx_to_usd: pd.DataFrame | None = None,
+    min_valid_ratio: float = 0.6,
+    eps: float = 1e-12,
+) -> pd.Series:
+    """
+    Amihud (2002) illiquidity: mean_t ( |r_t| / $Vol_t ) over a trailing `window`.
+
+    `close`, `volume` as DataFrames (index dates, columns tickers).
+    `r_t` is close-to-close pct return. `$Vol_t` is price*volume in USD/base.
+
+    Returns a pd.Series (index=tickers) with the Amihud measure (higher=worse liquidity).
+    """
+    
+    close_ = close.copy()
+    
+    if fx_to_usd is not None:
+    
+        close_ = close_ * fx_to_usd
+
+    dollar_vol = (close_ * volume).astype(float).clip(lower=eps)
+    
+    ret = close.pct_change().abs()
+
+    ratio = (ret / dollar_vol).replace([np.inf, -np.inf], np.nan)
+
+    ami = ratio.rolling(window = window, min_periods = int(window * min_valid_ratio)).mean().iloc[-1]
+    
+    return ami.fillna(ami.median() if np.isfinite(ami.median()) else 0.0)
+
+
 def compute_mcap_bounds(
     market_cap: pd.Series,
     er: pd.Series,
@@ -807,126 +1360,369 @@ def compute_mcap_bounds(
     max_all: float,
     max_all_l: float,
     min_all_u: float,
-    factor_pred: pd.Series
+    factor_pred: pd.Series,
+    factor_r2: pd.Series,
+    *,
+    adv_dollar: pd.Series | None = None,        
+    amihud: pd.Series | None = None,              
+    sector_limits: dict | None = None,            
+    restricted: pd.Series | None = None,         
+    a_mcap: float = 0.5,      
+    d_vol: float = 1.0,   
+    b_adv: float = 0.5,       
+    h_amihud: float = 0.25,  
+    fp_exp: float = 1.0,
+    r2_exp: float = 1.0,
+    winsor_q: float = 0.99,  
+    ub_pow_cap: float = 0.5,  
+    lb_pow_cap: float = 1.0, 
+    lb_max_as_frac_of_ub: float = 0.5,
+    sector_multipliers: dict | None = None,  
+    return_diag: bool = False,
+    small_cap_threshold: float = 0.1,
 ):
     """
-    Compute per-ticker lower/upper weight bounds informed by capacity and quality.
+    Derive per-asset lower and upper bounds from capacity, liquidity, and sector structure.
 
-    Bound logic (long-only):
-        
-        - Base capacity proxy: mcap / vol, modulated by a factor predictor (>=0.1 floored).
-        
-        - Eligibility: assets with er>0 and score>0 receive positive bounds; others get 0.
-        
-        - Lower bound: increases with normalised score and relative capacity share,
-        but never below `min_all`. Healthcare/Staples receive a conservative tweak.
-        
-        - Upper bound: sqrt(capacity share) scaled by normalised score, clipped to `max_all`
-        (and optionally to 2.5% for Healthcare/Staples), and no lower than `min_all_u`.
-        
-        - Exempt tickers in `config.TICKER_EXEMPTIONS`: fixed [0.01, 0.075].
+    Economic rationale
+    ------------------
+    The routine builds practical long-only box bounds ``lb_i <= w_i <= ub_i`` that
+    combine market-cap scale, forecast quality, score quality, and optional trading
+    liquidity. The objective is to preserve deployability while preventing fragile
+    allocations in low-capacity names.
 
-    Args:
-        market_cap: pd.Series of market caps (index = tickers).
-        er: pd.Series of forecast expected returns (index = tickers).
-        vol: pd.Series of annualised vol/SE (index = tickers).
-        score: pd.Series of model scores (index = tickers).
-        tickers: pd.Index universe order.
-        ticker_sec: pd.Series mapping ticker → sector.
-        min_all: global minimum lower bound.
-        max_all: global cap for upper bound.
-        max_all_l: cap applied to the computed lower bound share.
-        min_all_u: minimum upper bound floor (ensures ub ≥ min_all_u when eligible).
-        factor_pred: pd.Series factor-tilt predictor; used multiplicatively in capacity.
+    Core capacity score
+    -------------------
+    For each asset ``i``:
 
-    Returns:
-        (lb, ub, frac):
-            lb:   pd.Series of lower bounds in [0,1] aligned to `tickers`.
-            ub:   pd.Series of upper bounds in [0,1] aligned to `tickers`.
-            frac: pd.Series of normalised capacity shares (sums to 1 over eligible).
+    ``eligible_i = 1{mu_i > 0 and score_i > 0 and not restricted_i}``
 
-    Notes:
-        - Prints intermediate per-ticker diagnostics (factor predictor, bounds).
-        - Non-eligible tickers receive (lb, ub) = (0, 0).
+    ``fp_mult_i = 1 + max(factor_pred_i, 0)^fp_exp * r2_i^r2_exp``
+
+    ``cap_i = market_cap_i^a_mcap * fp_mult_i / vol_i^d_vol``.
+
+    Optional liquidity corrections:
+
+    ``cap_i <- cap_i * adv_i^b_adv``  (ADV-based scaling),
+
+    ``cap_i <- cap_i / (1 + h_amihud * amihud_i)``  (illiquidity penalty).
+
+    After winsorisation, the normalised capacity share is:
+
+    ``frac_i = cap_i / sum_j cap_j``.
+
+    Upper envelope construction
+    ---------------------------
+    - Sector-aware allocation (if caps are provided) uses score-weighted intra-sector
+      shares.
+ 
+    - Base upper envelope:
+      ``ub_base_i = (sector_alloc_i ^ ub_pow_cap) * score01_i``.
+ 
+    - Apply sector multipliers, global clips, and hard overrides for selected
+      sector/size regimes.
+
+    Lower envelope construction
+    ---------------------------
+    - Base lower envelope:
+      ``lb_base_i = (frac_i ^ lb_pow_cap) * score01_i``.
+  
+    - Clip globally and enforce a relative constraint:
+      ``lb_i <= lb_max_as_frac_of_ub * ub_i``.
+ 
+    - Blend with legacy references based on square-root and full market-cap shares
+      to avoid unstable minima.
+
+    Feasibility repair layer
+    ------------------------
+    - If ``sum(lb) > 1``, lower bounds are proportionally scaled.
+ 
+    - If ``sum(ub) < 1``, residual mass is distributed through available headroom
+      while respecting sector caps and hard per-name ceilings.
+ 
+    - Enforce ``ub_i >= lb_i`` after each repair stage.
+
+    Advantages
+    ----------
+    - Integrates deployability constraints before optimisation, reducing solver stress.
+ 
+    - Incorporates both conviction (returns/scores) and trading realism (ADV/Amihud).
+ 
+    - Preserves sector-budget consistency while maintaining cross-sectional flexibility.
+ 
+    - Adds deterministic feasibility fixes, reducing downstream infeasible runs.
+
+    Parameters
+    ----------
+    market_cap, er, vol, score : pd.Series
+        Per-ticker capacity and signal inputs.
+    tickers : pd.Index
+        Ordered optimisation universe.
+    ticker_sec : pd.Series
+        Sector label per ticker.
+    min_all, max_all, max_all_l, min_all_u : float
+        Global floor/ceiling controls for bounds.
+    factor_pred, factor_r2 : pd.Series
+        Factor tilt and explanatory strength inputs for capacity scaling.
+    adv_dollar, amihud : pd.Series | None
+        Optional liquidity controls.
+    sector_limits : dict | None
+        Optional sector cap dictionary.
+    restricted : pd.Series | None
+        Optional boolean hard-exclusion flags.
+    a_mcap, d_vol, b_adv, h_amihud, fp_exp, r2_exp : float
+        Exponents/sensitivity parameters.
+    winsor_q, ub_pow_cap, lb_pow_cap, lb_max_as_frac_of_ub : float
+        Envelope shape and clipping parameters.
+    sector_multipliers : dict | None
+        Optional sector tilt multipliers.
+    return_diag : bool
+        If ``True``, include intermediate diagnostics in the return.
+    small_cap_threshold : float
+        Threshold for additional small-cap upper-bound tightening.
+
+    Returns
+    -------
+    tuple
+        ``(lb, ub, frac)`` or ``(lb, ub, frac, diag)`` when diagnostics are requested.
     """
+    
+    idx = pd.Index(tickers)
+    
+    S = lambda x, fill = 0.0: pd.Series(x, index = getattr(x, "index", idx)).reindex(idx).astype(float).fillna(fill)
 
-    score_max = score.max()
+    mc = S(market_cap, 0.0).clip(lower = 0.0)
     
-    mcap_sqrt = np.sqrt(market_cap)
+    mu = S(er, 0.0)
     
-    mcap_vol = {}
+    sc = S(score, 0.0)
     
-    fp = (factor_pred.reindex(tickers).fillna(0.0) + 1).clip(lower = 0.1)
+    sec = pd.Series(ticker_sec, index = getattr(ticker_sec, "index", idx)).reindex(idx)
     
-    for t in tickers:
-       
-        if vol.loc[t] > 0 and score.loc[t] > 0 and er.loc[t] > 0:
-       
-            mcap_vol[t] = fp.loc[t] * mcap_sqrt.loc[t] / vol.loc[t]
-                   
-        else:
-       
-            mcap_vol[t] = 0.0
+    fp = S(factor_pred, 0.0)
     
-    mcap_vol_beta = pd.Series(mcap_vol)
+    r2 = S(factor_r2, 0.0).clip(lower = 0.0, upper = 1.0)
+    
+    sig = S(vol, np.nan)
+    
+    eps = 1e-12
 
-    mcap_vol_beta = mcap_vol_beta.fillna(0)
-    
-    mask = (er > 0) & (score > 0)
-    
-    tot = float(mcap_vol_beta[mask].sum())
-    
-    frac = mcap_vol_beta / tot
-    
-    if tot == 0:
+    sig = sig.fillna(sig.median()).clip(lower = eps)
+
+    if (sc > 0).any():
+
+        sc_max = sc.max()
         
-        tot = 1e-12  
+        sc01 = sc / sc_max
 
-    lb = {}
+    else:
+
+        sc01 = pd.Series(0.0, index = idx)
+
+    elig = (mu > 0) & (sc > 0)
+
+    if restricted is not None:
+
+        restr = pd.Series(restricted, index = idx).fillna(False).astype(bool)
+
+        elig &= (~restr)
+
+    fp_mult = 1.0 + ((fp.clip(lower = 0.0) ** fp_exp) * (r2 ** r2_exp))
+
+    cap = (mc.clip(lower = eps) ** a_mcap) * fp_mult / (sig ** d_vol)
+
+    if adv_dollar is not None:
+
+        adv = S(adv_dollar, 0.0).clip(lower = eps)
+
+        cap *= adv ** b_adv
+
+    if amihud is not None:
+
+        ami = S(amihud, 0.0).clip(lower = 0.0)
+
+        cap *= 1.0 / (1.0 + h_amihud * ami)
+
+    cap = cap.clip(upper = float(cap.quantile(winsor_q)))
+
+    cap = cap.where(elig, 0.0)
+
+    tot = float(cap.sum())
     
-    ub = {}
+    if tot <= eps:
     
-    for t in tickers:
+        lb = pd.Series(0.0, index = idx)
         
-        if t in config.TICKER_EXEMPTIONS:
-            
-            lb[t] = 0.01
-          
-            ub[t] = 0.075
-    
-        elif er.loc[t] > 0 and score.loc[t] > 0:
-            
-            score_t = score.loc[t]#min(score.loc[t], 20)
-            
-            norm_score = score_t / score_max
-            
-            cl_l = min(frac[t], max_all_l)
-
-            frac_u = np.sqrt(frac[t])
-            
-            cl_u = min(frac_u, max_all) #frax_u
-            
-            if ticker_sec.loc[t] == 'Healthcare' or ticker_sec.loc[t] == 'Consumer Staples':
-                        
-                ub_val = min(norm_score * cl_u, 0.025)
-            
-                ub[t] = ub_val #max(ub_val, lb[t])
-                
-                lb[t] = min(max(norm_score * cl_l / 2, min_all), ub[t] / 2)
-            
-            else:
-            
-                ub[t] = max(min(norm_score * cl_u, max_all), min_all_u)
-                
-            lb[t] = min(min(max(min_all, norm_score * cl_l), ub[t] / 2), 0.025)
-    
+        ub = lb.copy()
+        
+        frac = lb.copy()
+        
+        if return_diag:
+        
+            return (lb, ub, frac, {"note": "no eligible capacity"}) 
+        
         else:
-    
-            lb[t] = 0.0
-       
-            ub[t] = 0.0
+            
+            return (lb, ub, frac)
 
-    return pd.Series(lb), pd.Series(ub), frac
+    frac = cap / tot 
+
+    mcap_sqrt = np.sqrt(mc.clip(lower=0.0))
+
+    mcap_sqrt_sum = float(mcap_sqrt[elig].sum())
+
+    if mcap_sqrt_sum <= eps:
+
+        mcap_sqrt_sum = 1.0
+
+    frac_sqrt = mcap_sqrt / mcap_sqrt_sum
+
+    mcap_full_sum = float(mc[elig].sum())
+
+    if mcap_full_sum <= eps:
+
+        mcap_full_sum = 1.0
+
+    frac_full = mc / mcap_full_sum 
+    
+    if sector_limits:
+
+        sec_caps = pd.Series({k: float(v) for k, v in sector_limits.items()})
+
+        sec_key = sec.fillna("UNKNOWN").astype(str)
+
+        by_sec = (frac * sc01).groupby(sec_key)
+
+        share_in_sec = by_sec.transform(lambda s: s / max(s.sum(), eps))
+
+        ub_sec_alloc = share_in_sec * sec_key.map(sec_caps).fillna(0.0)
+
+    else:
+
+        ub_sec_alloc = frac  
+
+    ub_base = (ub_sec_alloc.pow(ub_pow_cap) * sc01).fillna(0.0)
+
+    if sector_multipliers:
+
+        mult = sec.map(lambda x: sector_multipliers.get(x, 1.0)).astype(float).fillna(1.0)
+
+        ub_base *= mult
+
+    ub = ub_base.clip(lower = min_all_u, upper = max_all).where(elig, 0.0)
+
+    hard_cap = 0.025
+    
+    TRILLION_THRESHOLD = 1e12
+    
+    hcc_mask = sec.isin(["Consumer Staples", "Consumer Discretionary"]) & (mc < TRILLION_THRESHOLD)
+
+    ub.loc[hcc_mask] = np.minimum(ub.loc[hcc_mask], hard_cap)
+
+    lb_base = (frac.pow(lb_pow_cap) * sc01).fillna(0.0)
+
+    lb = lb_base.where(elig, 0.0).clip(lower = min_all, upper = max_all_l)
+
+    lb = np.minimum(lb, lb_max_as_frac_of_ub * np.maximum(ub, 0.0))
+    
+    if elig.any():
+        
+        lb_candidates = pd.concat(
+            [
+                lb.rename("low"),     
+                frac_sqrt.rename("mcap_sqrt"),
+                frac_full.rename("full_weight"),
+            ],
+            axis = 1,
+        )
+
+        lb_legacy = lb_candidates.min(axis=1).clip(lower=min_all)
+
+        lb = lb.where(~elig, lb_legacy)
+        
+    small_mask = elig & (frac_sqrt < small_cap_threshold)
+    
+    if small_mask.any():
+        
+        ub_small = np.minimum(4.0 * frac_sqrt, ub) 
+        
+        ub = ub.where(~small_mask, ub_small)
+
+    if hasattr(config, "TICKER_EXEMPTIONS") and config.TICKER_EXEMPTIONS:
+
+        for t in config.TICKER_EXEMPTIONS:
+
+            if t in idx:
+
+                lb.loc[t] = 0.01
+                
+                ub.loc[t] = min(0.075, max_all) 
+
+    ub = np.maximum(ub, lb)
+
+    sum_lb = float(lb.sum())
+
+    if sum_lb > 1.0 - 1e-12:
+
+        lb *= (1.0 / max(sum_lb, eps))
+
+    sum_ub = float(ub.sum())
+
+    if sum_ub < 1.0 - 1e-12:
+
+        headroom = (max_all - ub).clip(lower = 0.0)
+
+        headroom.loc[hcc_mask] = np.minimum(headroom.loc[hcc_mask], hard_cap - ub.loc[hcc_mask]).clip(lower = 0.0)
+
+        if sector_limits:
+           
+            sec_caps_abs = sec.map(lambda x: sector_limits.get(x, 0.0)).fillna(0.0)
+           
+            sec_used = ub.groupby(sec).transform('sum')
+           
+            sec_room = (sec_caps_abs - sec_used).clip(lower = 0.0)
+           
+            headroom = np.minimum(headroom, sec_room)
+
+        room = float(headroom.sum())
+        
+        if room > eps:
+        
+            incr = headroom * ((1.0 - sum_ub) / room)
+        
+            ub = (ub + incr).clip(upper = max_all)
+
+            ub.loc[hcc_mask] = np.minimum(ub.loc[hcc_mask], hard_cap)
+    
+    ub = np.maximum(ub, lb)
+
+    is_trillion_plus = (mc >= TRILLION_THRESHOLD) | (mc.index.isin(config.TICKER_EXEMPTIONS))
+
+    ub = ub.where(is_trillion_plus, ub.clip(upper=0.025))
+
+    ub = np.maximum(ub, lb)
+
+    lb = lb / 2
+    
+    lb = np.minimum(lb, 0.025)
+    
+    lb = np.maximum(lb, min_all)
+
+    if return_diag:
+     
+        diag = dict(
+            eligible = elig, 
+            frac = frac,
+            ub_base = ub_base,
+            lb_base = lb_base,
+            sum_lb = float(lb.sum()), 
+            sum_ub = float(ub.sum())
+        )
+        
+        return lb, ub, frac, diag
+
+    return lb, ub, frac
+
 
 
 def main() -> None:
@@ -980,7 +1776,7 @@ def main() -> None:
 
     logging.info("Loading Excel data...")
   
-    (weekly_ret, tickers, weekly_cov, ann_cov, ann_cov_desc, cov_df, signal_score, beta, comb_score, comb_rets, ticker_ind, ticker_sec, comb_ann_std, bear_rets, bull_rets, mcap, sigma_prior, factor_pred, d_to_e, tax) = load_excel_data()
+    (weekly_ret, weekly_ret_5y_base, tickers, weekly_cov, ann_cov, ann_cov_desc, cov_df, signal_score, beta, comb_score, comb_rets, safe_rets, ticker_ind, ticker_sec, comb_ann_std, bear_rets, bull_rets, mcap, sigma_prior, factor_pred, factor_r2, d_to_e, tax) = load_excel_data()
     
     assert comb_rets.index.equals(pd.Index(tickers)), "comb_rets index ≠ tickers"
     
@@ -1009,9 +1805,9 @@ def main() -> None:
     
     tickers_index = pd.Index(tickers)
     
-    mcap_bnd_l, mcap_bnd_h, mcap_vol_beta = compute_mcap_bounds(
+    mcap_bnd_l, mcap_bnd_h, mcap_vol_beta, diag = compute_mcap_bounds(
         market_cap = mcap, 
-        er = comb_rets, 
+        er = safe_rets, 
         vol = comb_ann_std, 
         score = comb_score,
         tickers = tickers_index, 
@@ -1020,8 +1816,16 @@ def main() -> None:
         max_all = w_max, 
         max_all_l = max_all_l, 
         min_all_u = min_all_u,
-        factor_pred = factor_pred
+        factor_pred = factor_pred,
+        factor_r2 = factor_r2,
+        return_diag = True
     )
+    
+    print("Capacity Diagnostics:\n", diag)
+    
+    print("Market Cap Bounds Low:\n", mcap_bnd_l)
+    
+    print("Market Cap Bounds High:\n", mcap_bnd_h)
     
     mcap["SGLP.L"] = mcap.max()
     
@@ -1031,18 +1835,18 @@ def main() -> None:
         'High': mcap_bnd_h
     })
     
-    last_year_weekly_rets = weekly_ret.loc[weekly_ret.index >= pd.to_datetime(config.YEAR_AGO)]   
+    last_year_weekly_rets = weekly_ret_5y_base.loc[weekly_ret_5y_base.index >= pd.to_datetime(config.YEAR_AGO)]   
+        
+    n_last_year_weeks = len(weekly_ret_5y_base)
     
-    n_last_year_weeks = len(last_year_weekly_rets)
-    
-    last_5_year_weekly_rets = weekly_ret.loc[weekly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]    
+    last_5_year_weekly_rets = weekly_ret_5y_base.loc[weekly_ret_5y_base.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]    
     
     pa = pf.PortfolioAnalytics(cache = False)     
     
     logging.info("Optimising Portfolios...")
    
     opt = PortfolioOptimiser(
-        er = comb_rets, 
+        er = safe_rets, 
         cov = ann_cov, 
         scores = comb_score,
         weekly_ret_1y = last_year_weekly_rets,
@@ -1061,359 +1865,157 @@ def main() -> None:
         gamma = config.GAMMA,
     )
 
-    w_msr = opt.msr()
+    base_bundle = opt.get_base_portfolios_cached()
     
-    print("MSR Weights:", w_msr)
-   
-    w_sortino = opt.sortino()
-
-    print("Sortino Weights:", w_sortino)
-   
-    w_mir = opt.MIR()
-
-    print("MIR Weights:", w_mir)
-   
-    w_msp = opt.msp()
-
-    print("MSP Weights:", w_msp)    
+    w_bl, mu_bl, sigma_bl = base_bundle["BL"]
     
-    w_gmv = opt.min_variance()
-
-    print("GMV Weights:", w_gmv)
+    weights_by_label: Dict[str, pd.Series] = {
+        "MSR": base_bundle["MSR"],
+        "Sortino": base_bundle["Sortino"],
+        "MIR": base_bundle["MIR"],
+        "MSP": base_bundle["MSP"],
+        "MDP": base_bundle["MDP"],
+        "BL": w_bl,
+        "Deflated_MSR": base_bundle["DSR"],
+        "Adjusted_MSR": base_bundle["ASR"],
+        "UPM-LPM": base_bundle["ULPM"],
+        "Upside/Downside": base_bundle["UDRP"],
+    }
     
-    w_mdp = opt.max_diversification()
+    optimiser_registry: Dict[str, Callable[[], pd.Series]] = {
+        "GMV": opt.min_variance,
+        "Combination": opt.comb_port,
+        "Combination1": opt.comb_port1,
+        "Combination2": opt.comb_port2,
+        "Combination3": opt.comb_port3,
+        "Combination4": opt.comb_port4,
+        "Combination5": opt.comb_port5,
+        "Combination6": opt.comb_port6,
+        "Combination7": opt.comb_port7,
+        "Combination8": opt.comb_port8,
+        "Combination9": opt.comb_port9,
+        "Combination10": opt.comb_port10,
+        "Combination11": opt.comb_port11,
+        "Combination12": opt.comb_port12,
+        "Combination13": opt.comb_port13,
+    }
     
-    print("MDP Weights:", w_mdp)
+    default_optimisers = [
+        "MSR",
+        "Sortino",
+        "MIR",
+        "GMV",
+        "MDP",
+        "MSP",
+        "BL",
+        "Deflated_MSR",
+        "Adjusted_MSR",
+        "UPM-LPM",
+        "Upside/Downside",
+        "Combination",
+        "Combination1",
+        "Combination2",
+        "Combination3",
+        "Combination4",
+        "Combination5",
+        "Combination6",
+        "Combination7",
+        "Combination8",
+        "Combination9",
+        "Combination10",
+        "Combination11",
+        "Combination12",
+        "Combination13",
+    ]
     
-    w_bl, mu_bl, sigma_bl = opt.black_litterman_weights()
-
-    print('Black-Litterman Weights:', w_bl)
-
-    deflated_w_msr = opt.optimise_deflated_sharpe()
+    selected_raw = getattr(config, "OPTIMISERS_TO_RUN", default_optimisers)
     
-    print("Deflated MSR Weights:", deflated_w_msr)
+    if selected_raw is None:
+        
+        selected_labels = list(default_optimisers)
     
-    adjusted_w_msr = opt.optimise_adjusted_sharpe()
-
-    print("Adjusted MSR Weights:", adjusted_w_msr)
+    elif isinstance(selected_raw, str):
+        
+        selected_labels = [s.strip() for s in selected_raw.split(",") if s.strip()]
     
-    w_upm_lpm = opt.upm_lpm_port()
+    else:
+        
+        selected_labels = [str(s).strip() for s in selected_raw if str(s).strip()]
     
-    print("UPM-LPM Weights:", w_upm_lpm)
+    if not selected_labels:
+        
+        selected_labels = list(default_optimisers)
     
-    w_up_down_cap = opt.upside_downside_capture_port()
+    unknown_labels = [label for label in selected_labels if label not in default_optimisers]
     
-    print("Upside/Downside Capture Weights:", w_up_down_cap)
+    if unknown_labels:
+        
+        logging.warning("Ignoring unknown OPTIMISERS_TO_RUN entries: %s", unknown_labels)
     
-    w_comb10 = opt.comb_port10()
+    selected_labels = [label for label in selected_labels if label in default_optimisers]
     
-    print("Combination10 Weights:", w_comb10)
+    selected_labels = list(dict.fromkeys(selected_labels))
     
-    w_comb11 = opt.comb_port11()
+    if not selected_labels:
+        
+        selected_labels = list(default_optimisers)
     
-    print("Combination11 Weights:", w_comb11)
+    logging.info("Optimiser profile: %s", getattr(config, "OPT_PROFILE", "exact"))
     
-    w_comb = opt.comb_port()
+    logging.info("Optimisers selected: %s", ", ".join(selected_labels))
     
-    print("Combination Weights:", w_comb)
-   
-    w_comb1 = opt.comb_port1()
-    
-    print("Combination1 Weights:", w_comb1)
-   
-    w_comb2 = opt.comb_port2()
-    
-    print("Combination2 Weights:", w_comb2)
-    
-    w_comb3 = opt.comb_port3()
-    
-    print("Combination3 Weights:", w_comb3)
-    
-    w_comb4 = opt.comb_port4()
-    
-    print("Combination4 Weights:", w_comb4)
-    
-    w_comb5 = opt.comb_port5()
-    
-    print("Combination5 Weights:", w_comb5)
-    
-    w_comb6 = opt.comb_port6()
-    
-    print("Combination6 Weights:", w_comb6)
-    
-    w_comb7 = opt.comb_port7()
-    
-    print("Combination7 Weights:", w_comb7)
-    
-    w_comb8 = opt.comb_port8()
-    
-    print("Combination8 Weights:", w_comb8)
-    
-    w_comb9 = opt.comb_port9()
-    
-    print("Combination9 Weights:", w_comb9)
-    
-
+    for label in selected_labels:
+        
+        if label not in weights_by_label:
             
-    vol_msr_ann = pa.portfolio_volatility(
-        weights = w_msr, 
-        covmat = ann_cov
-    )
-    
-    vol_msr = pa.portfolio_volatility(
-        weights = w_msr, 
-        covmat = weekly_cov
-    )
+            w_val = optimiser_registry[label]()
             
-    vol_sortino_ann = pa.portfolio_volatility(
-        weights = w_sortino, 
-        covmat = ann_cov
-    )
-    
-    vol_sortino = pa.portfolio_volatility(
-        weights = w_sortino, 
-        covmat = weekly_cov
-    )
+            if not isinstance(w_val, pd.Series):
+                
+                w_val = pd.Series(np.asarray(w_val, float).ravel(), index = ann_cov.index, name = label)
+            
+            weights_by_label[label] = w_val
         
-    vol_bl_ann = pa.portfolio_volatility(
-        weights = w_bl, 
-        covmat = ann_cov
-    )
-    
-    vol_bl = pa.portfolio_volatility(
-        weights = w_bl, 
-        covmat = weekly_cov
-    )
+        weights_by_label[label] = (
+            weights_by_label[label]
+            .reindex(ann_cov.index)
+            .astype(float)
+            .fillna(0.0)
+        )
         
-    vol_mir_ann = pa.portfolio_volatility(
-        weights = w_mir, 
-        covmat = ann_cov
-    )
+        logging.info("\n%s Weights:\n%s", label, weights_by_label[label])
     
-    vol_mir = pa.portfolio_volatility(
-        weights = w_mir, 
-        covmat = weekly_cov
-    )
+    selected_weights = {label: weights_by_label[label] for label in selected_labels}
     
-    vol_gmv_ann = pa.portfolio_volatility(
-        weights = w_gmv, 
-        covmat = ann_cov
-    )
+    W = np.vstack([selected_weights[label].to_numpy(dtype = float) for label in selected_labels])
     
-    vol_gmv = pa.portfolio_volatility(
-        weights = w_gmv, 
-        covmat = weekly_cov
-    )
+    cov_ann_np = ann_cov.to_numpy(dtype = float)
+  
+    cov_week_np = weekly_cov.to_numpy(dtype = float)
     
-    vol_mdp_ann = pa.portfolio_volatility(
-        weights = w_mdp, 
-        covmat = ann_cov
-    )
+    var_ann = np.einsum("ki,ij,kj->k", W, cov_ann_np, W, optimize = True)
+  
+    var_week = np.einsum("ki,ij,kj->k", W, cov_week_np, W, optimize = True)
     
-    vol_mdp = pa.portfolio_volatility(
-        weights = w_mdp, 
-        covmat = weekly_cov
-    )
-        
-    vol_msp_ann = pa.portfolio_volatility(
-        weights = w_msp, 
-        covmat = ann_cov
-    )
+    vols_ann = {
+        label: float(np.sqrt(max(var_ann[i], 0.0)))
+        for i, label in enumerate(selected_labels)
+    }
     
-    vol_msp = pa.portfolio_volatility(
-        weights = w_msp, 
-        covmat = weekly_cov
-    )
-        
-    vol_deflated_msr_ann = pa.portfolio_volatility(
-        weights = deflated_w_msr, 
-        covmat = ann_cov
-    )
-    
-    vol_deflated_msr = pa.portfolio_volatility(
-        weights = deflated_w_msr, 
-        covmat = weekly_cov
-    )
-        
-    vol_adjusted_msr_ann = pa.portfolio_volatility(
-        weights = adjusted_w_msr, 
-        covmat = ann_cov
-    )
-    
-    vol_adjusted_msr = pa.portfolio_volatility(
-        weights = adjusted_w_msr, 
-        covmat = weekly_cov
-    )
-    
-    vol_upm_lpm_ann = pa.portfolio_volatility(
-        weights = w_upm_lpm, 
-        covmat = ann_cov
-    )
-    
-    vol_upm_lpm = pa.portfolio_volatility(
-        weights = w_upm_lpm, 
-        covmat = weekly_cov
-    )
-    
-    vol_up_down_cap_ann = pa.portfolio_volatility(
-        weights = w_up_down_cap, 
-        covmat = ann_cov
-    )
-    
-    vol_up_down_cap = pa.portfolio_volatility(
-        weights = w_up_down_cap, 
-        covmat = weekly_cov
-    )
-        
-    vol_comb_ann = pa.portfolio_volatility(
-        weights = w_comb, 
-        covmat = ann_cov
-    )
-    
-    vol_comb = pa.portfolio_volatility(
-        weights = w_comb, 
-        covmat = weekly_cov
-    )
-    
-    vol_comb1_ann = pa.portfolio_volatility(
-        weights = w_comb1, 
-        covmat = ann_cov
-    )
-    
-    vol_comb1 = pa.portfolio_volatility(
-        weights = w_comb1, 
-        covmat = weekly_cov
-    )
-        
-    vol_comb2_ann = pa.portfolio_volatility(
-        weights = w_comb2, 
-        covmat = ann_cov
-    )
-    
-    vol_comb2 = pa.portfolio_volatility(
-        weights = w_comb2, 
-        covmat = weekly_cov
-    )
-        
-    vol_comb3_ann = pa.portfolio_volatility(
-        weights = w_comb3, 
-        covmat = ann_cov
-    )
-    
-    vol_comb3 = pa.portfolio_volatility(
-        weights = w_comb3, 
-        covmat = weekly_cov
-    )
-        
-    vol_comb4_ann = pa.portfolio_volatility(
-        weights = w_comb4, 
-        covmat = ann_cov
-    )
-    
-    vol_comb4 = pa.portfolio_volatility(
-        weights = w_comb4, 
-        covmat = weekly_cov
-    )
-        
-    vol_comb5_ann = pa.portfolio_volatility(
-        weights = w_comb5, 
-        covmat = ann_cov
-    )
-    
-    vol_comb5 = pa.portfolio_volatility(
-        weights = w_comb5, 
-        covmat = weekly_cov
-    )
-        
-    vol_comb6_ann = pa.portfolio_volatility(
-        weights = w_comb6, 
-        covmat = ann_cov
-    )
-    
-    vol_comb6 = pa.portfolio_volatility(
-        weights = w_comb6, 
-        covmat = weekly_cov
-    )
-        
-    vol_comb7_ann = pa.portfolio_volatility(
-        weights = w_comb7, 
-        covmat = ann_cov
-    )
-    
-    vol_comb7 = pa.portfolio_volatility(
-        weights = w_comb7, 
-        covmat = weekly_cov
-    )
-        
-    vol_comb8_ann = pa.portfolio_volatility(
-        weights = w_comb8, 
-        covmat = ann_cov
-    )
-    
-    vol_comb8 = pa.portfolio_volatility(
-        weights = w_comb8, 
-        covmat = weekly_cov
-    )
-    
-    vol_comb9_ann = pa.portfolio_volatility(
-        weights = w_comb9, 
-        covmat = ann_cov
-    )
-    
-    vol_comb9 = pa.portfolio_volatility(
-        weights = w_comb9, 
-        covmat = weekly_cov
-    )
-    
-    vol_comb10_ann = pa.portfolio_volatility(
-        weights = w_comb10, 
-        covmat = ann_cov
-    )
-    
-    vol_comb10 = pa.portfolio_volatility(
-        weights = w_comb10, 
-        covmat = weekly_cov
-    )
-    
-    vol_comb11_ann = pa.portfolio_volatility(
-        weights = w_comb11, 
-        covmat = ann_cov
-    )
-    
-    vol_comb11 = pa.portfolio_volatility(
-        weights = w_comb11, 
-        covmat = weekly_cov
-    )
+    vols_weekly = {
+        label: float(np.sqrt(max(var_week[i], 0.0)))
+        for i, label in enumerate(selected_labels)
+    }
     
     
     var = pd.Series(np.diag(ann_cov), index = ann_cov.index)
     
     std = np.sqrt(var).clip(lower = MIN_STD, upper = MAX_STD)
     
+    weights_cols = {label: selected_weights[label] for label in selected_labels}
+    
     weights_df = pd.DataFrame({
-        "MSR": w_msr,
-        "Sortino": w_sortino,
-        "MIR": w_mir,
-        "GMV": w_gmv,
-        "MDP": w_mdp,
-        "MSP": w_msp,
-        "BL": w_bl,
-        "Deflated_MSR": deflated_w_msr,
-        "Adjusted_MSR": adjusted_w_msr,
-        "UPM-LPM": w_upm_lpm,
-        "Upside/Downside": w_up_down_cap,
-        "Combination": w_comb,
-        "Combination1": w_comb1,
-        "Combination2": w_comb2,
-        "Combination3": w_comb3,
-        "Combination4": w_comb4,
-        "Combination5": w_comb5,
-        "Combination6": w_comb6,
-        "Combination7": w_comb7,
-        "Combination8": w_comb8,
-        "Combination9": w_comb9,
-        "Combination10": w_comb10,
-        "Combination11": w_comb11,
+        **weights_cols,
         "Expected Return": comb_rets,
         "Vol": std,
         "Score": comb_score,
@@ -1421,111 +2023,139 @@ def main() -> None:
     
     weights = weights_df.reindex(tickers)
     
-    cols_to_mult = [col for col in weights.columns if col not in ["Expected Return", "Vol", "Score"]]
+    cols_to_mult = [
+        col for col in weights.columns
+        if col not in ["Expected Return", "Vol", "Score", "Sector", "Industry"]
+    ]
     
     weights[cols_to_mult] = weights[cols_to_mult] * money_in_portfolio
     
     portfolio_weights = weights.reset_index().rename(columns = {"index": "Ticker"})
     
-    portfolio_weights_with_ind = portfolio_weights.merge(
-        ticker_ind.rename("Industry"), 
-        left_on = "Ticker", 
-        right_index = True
+    weight_cols = [
+        c for c in portfolio_weights.columns
+        if c not in ["Ticker", "Expected Return", "Vol", "Score", "Sector", "Industry"]
+    ]
+    
+    metric_cols = ["Expected Return", "Vol", "Score"]
+
+    portfolio_weights_base = portfolio_weights.drop(
+        columns = ["Industry", "Sector"],
+        errors = "ignore"
     )
 
-    industry_breakdown = portfolio_weights_with_ind.groupby("Industry").sum(numeric_only = True)
+    ticker_ind_s = pd.Series(ticker_ind, copy = False).rename("Industry")
    
-    industry_breakdown_percent = (industry_breakdown / money_in_portfolio) * 100
-   
-    industry_breakdown_percent = industry_breakdown_percent.reset_index()
+    ticker_ind_s.index = ticker_ind_s.index.astype(str)
     
-    portfolio_weights_with_sec = portfolio_weights.merge(
-        ticker_sec.rename("Sector"), 
-        left_on = "Ticker", 
-        right_index = True
+    portfolio_weights_base["Ticker"] = portfolio_weights_base["Ticker"].astype(str)
+    
+    portfolio_weights_with_ind = portfolio_weights_base.merge(
+        ticker_ind_s,
+        left_on = "Ticker",
+        right_index = True,
+        how = "left"
     )
     
-    sector_breakdown = portfolio_weights_with_sec.groupby("Sector").sum(numeric_only = True)
-   
-    sector_breakdown_percent = (sector_breakdown / money_in_portfolio) * 100
-   
-    sector_breakdown_percent = sector_breakdown_percent.reset_index()
+    if "Industry" not in portfolio_weights_with_ind.columns:
+        
+        portfolio_weights_with_ind["Industry"] = "Unknown"
+    
+    portfolio_weights_with_ind["Industry"] = portfolio_weights_with_ind["Industry"].fillna("Unknown")
+    
+    g_ind = portfolio_weights_with_ind.groupby("Industry", dropna = False)
+
+    industry_weights = g_ind[weight_cols].sum()
+
+    industry_weights_pct = industry_weights.div(money_in_portfolio).mul(100)
+
+    industry_metrics_mean = g_ind[metric_cols].mean()
+
+    industry_breakdown_percent = (pd.concat([industry_weights_pct, industry_metrics_mean], axis = 1).reset_index())
+
+    ticker_sec_s = pd.Series(ticker_sec, copy = False).rename("Sector")
+  
+    ticker_sec_s.index = ticker_sec_s.index.astype(str)
+    
+    portfolio_weights_with_sec = portfolio_weights_base.merge(
+        ticker_sec_s,
+        left_on = "Ticker",
+        right_index = True,
+        how = "left"
+    )
+    
+    if "Sector" not in portfolio_weights_with_sec.columns:
+        
+        portfolio_weights_with_sec["Sector"] = "Unknown"
+    
+    portfolio_weights_with_sec["Sector"] = portfolio_weights_with_sec["Sector"].fillna("Unknown")
+    
+    g_sec = portfolio_weights_with_sec.groupby("Sector", dropna = False)
+
+    sector_weights = g_sec[weight_cols].sum()
+    
+    sector_weights_pct = sector_weights.div(money_in_portfolio).mul(100)
+
+    sector_metrics_mean = g_sec[metric_cols].mean()
+
+    sector_breakdown_percent = (
+        pd.concat([sector_weights_pct, sector_metrics_mean], axis = 1)
+        .reset_index()
+    )
+
 
     logging.info("Generating portfolio performance reports...")
     
-    performance_df = pa.report_portfolio_metrics(
-        w_msr = w_msr,
-        w_sortino = w_sortino,
-        w_mir = w_mir,
-        w_gmv = w_gmv,
-        w_mdp = w_mdp,
-        w_msp = w_msp,
-        w_bl = w_bl,
-        w_comb = w_comb,
-        w_comb1 = w_comb1,
-        w_comb2 = w_comb2,
-        w_comb3 = w_comb3,
-        w_comb4 = w_comb4,
-        w_comb5 = w_comb5,
-        w_comb6 = w_comb6,
-        w_comb7 = w_comb7,
-        w_comb8 = w_comb8,
-        w_comb9 = w_comb9,
-        w_comb10 = w_comb10,
-        w_comb11 = w_comb11,
-        w_deflated_msr = deflated_w_msr,
-        w_adjusted_msr = adjusted_w_msr,
-        w_upm_lpm = w_upm_lpm,
-        w_up_down_cap = w_up_down_cap,
+    report_name_map = {
+        "MSR": "MSR",
+        "Sortino": "Sortino",
+        "BL": "Black-Litterman",
+        "MIR": "MIR",
+        "GMV": "GMV",
+        "MDP": "MDP",
+        "MSP": "MSP",
+        "Deflated_MSR": "Deflated MSR",
+        "Adjusted_MSR": "Adjusted MSR",
+        "UPM-LPM": "UPM-LPM",
+        "Upside/Downside": "Up/Down Cap",
+        "Combination": "Combination",
+        "Combination1": "Combination1",
+        "Combination2": "Combination2",
+        "Combination3": "Combination3",
+        "Combination4": "Combination4",
+        "Combination5": "Combination5",
+        "Combination6": "Combination6",
+        "Combination7": "Combination7",
+        "Combination8": "Combination8",
+        "Combination9": "Combination9",
+        "Combination10": "Combination10",
+        "Combination11": "Combination11",
+        "Combination12": "Combination12",
+        "Combination13": "Combination13",
+    }
+    
+    report_weights = {
+        report_name_map[label]: selected_weights[label].to_numpy(dtype = float)
+        for label in selected_labels
+    }
+    
+    report_vols_weekly = {
+        report_name_map[label]: vols_weekly[label]
+        for label in selected_labels
+    }
+    
+    report_vols_annual = {
+        report_name_map[label]: vols_ann[label]
+        for label in selected_labels
+    }
+    
+    performance_df = pa.report_portfolio_metrics_batch(
+        weights = report_weights,
+        vols_weekly = report_vols_weekly,
+        vols_annual = report_vols_annual,
         comb_rets = comb_rets,
         bear_rets = bear_rets,
         bull_rets = bull_rets,
-        vol_msr = vol_msr,
-        vol_sortino = vol_sortino,
-        vol_mir = vol_mir,
-        vol_gmv = vol_gmv,
-        vol_mdp = vol_mdp,
-        vol_msp = vol_msp,
-        vol_bl = vol_bl,
-        vol_comb = vol_comb,
-        vol_comb1 = vol_comb1,
-        vol_comb2 = vol_comb2,
-        vol_comb3 = vol_comb3,
-        vol_comb4 = vol_comb4,
-        vol_comb5 = vol_comb5,
-        vol_comb6 = vol_comb6,
-        vol_comb7 = vol_comb7,
-        vol_comb8 = vol_comb8,
-        vol_comb9 = vol_comb9,
-        vol_comb10 = vol_comb10,
-        vol_comb11 = vol_comb11,
-        vol_deflated_msr = vol_deflated_msr,
-        vol_adjusted_msr = vol_adjusted_msr,
-        vol_upm_lpm = vol_upm_lpm,
-        vol_up_down_cap = vol_up_down_cap,
-        vol_msr_ann = vol_msr_ann,
-        vol_sortino_ann = vol_sortino_ann,
-        vol_mir_ann = vol_mir_ann,
-        vol_gmv_ann = vol_gmv_ann,
-        vol_mdp_ann = vol_mdp_ann,
-        vol_msp_ann = vol_msp_ann,
-        vol_bl_ann = vol_bl_ann,
-        vol_comb_ann = vol_comb_ann,
-        vol_comb1_ann = vol_comb1_ann,
-        vol_comb2_ann = vol_comb2_ann,
-        vol_comb3_ann = vol_comb3_ann,
-        vol_comb4_ann = vol_comb4_ann,
-        vol_comb5_ann = vol_comb5_ann,
-        vol_comb6_ann = vol_comb6_ann,
-        vol_comb7_ann = vol_comb7_ann,
-        vol_comb8_ann = vol_comb8_ann,
-        vol_comb9_ann = vol_comb9_ann,
-        vol_comb10_ann = vol_comb10_ann,
-        vol_comb11_ann = vol_comb11_ann,
-        vol_deflated_msr_ann = vol_deflated_msr_ann,
-        vol_adjusted_msr_ann = vol_adjusted_msr_ann,
-        vol_upm_lpm_ann = vol_upm_lpm_ann,
-        vol_up_down_cap_ann = vol_up_down_cap_ann,
         comb_score = comb_score,
         last_year_weekly_rets = last_year_weekly_rets,
         last_5y_weekly_rets = last_5_year_weekly_rets,
