@@ -207,22 +207,29 @@ Reproducibility
 This module is intended for analytical support. It is not investment advice.
 """
 
-
 import pandas as pd
-import datetime as dt
 import numpy as np
 import logging
 from typing import List
-from data_procesxing.financial_forecast_data import FinancialForecastData
-from functions.fast_regression import HuberENetCV
-from functions.export_forecast import export_results
+from financial_forecast_data5 import FinancialForecastData
+from fast_regression6 import HuberENetCV
+from export_forecast import export_results 
 
 from sklearn.model_selection import TimeSeriesSplit
 import itertools
-
+ 
 import config
 
+from pathlib import Path
 
+import beta_cache as bc
+
+RUN_REGRESSION = False 
+
+BETA_CACHE_MODEL = "dcfe"
+
+BETA_CACHE_FILE = Path(config.BETA_CACHE_FILE)
+ 
 REQUIRED_COLUMNS = ["Revenue", "EPS", "OCF", "NetBorrowing", "Capex"]
 
 logging.basicConfig(level = logging.INFO, format = '%(asctime)s - %(levelname)s - %(message)s')
@@ -254,17 +261,22 @@ def _clean_fc_df(
     -------
     pandas.DataFrame
         The same DataFrame with:
+    
           (i) revenue columns coerced to float, mapping textual magnitudes
               {'T'→1e12, 'B'→1e9, 'M'→1e6},
+    
          (ii) a DatetimeIndex (`pd.to_datetime`),
+    
         (iii) rows sorted by date (ascending).
 
     **Method & transformations**
     ----------------------------
     For each revenue column `c ∈ {low_rev, avg_rev, high_rev}`:
+    
       • If dtype is object (string), apply the magnitude mapping via a regex replace:
             "xT" → "x e12", "xB" → "x e9", "xM" → "x e6",
         then coerce to float (`errors='coerce'`).
+    
       • Otherwise, coerce directly to float.
 
     The index is coerced to a `DatetimeIndex`, and the frame is sorted by index.
@@ -281,7 +293,11 @@ def _clean_fc_df(
        
         if s.dtype == 'O':
        
-            fc_df[col] = pd.to_numeric(s.replace({'T':'e12','B':'e9','M':'e6'}, regex = True), errors = 'coerce')
+            fc_df[col] = pd.to_numeric(s.replace({
+                'T': 'e12',
+                'B': 'e9',
+                'M': 'e6'
+            }, regex = True), errors = 'coerce')
        
         else:
        
@@ -366,6 +382,7 @@ def regression_data_prep(
     X : numpy.ndarray, shape (N, 2), dtype=float
         Feature matrix with columns [Revenue, EPS].
     y : numpy.ndarray, shape (N,), dtype=float
+    
         Target vector defined as:
         
             y_t = OCF_t + NetBorrowing_t + Capex_t
@@ -375,9 +392,13 @@ def regression_data_prep(
     **Equations**
     -------------
     Let for period t:
+  
         X_t = [ Revenue_t , EPS_t ]
+  
         y_t = OCF_t + NetBorrowing_t + Capex_t
+  
     Then:
+  
         X = [X_1; X_2; …; X_N],  y = [y_1, y_2, …, y_N]^⊤
 
     **Notes**
@@ -386,6 +407,7 @@ def regression_data_prep(
       If `Capex` is stored as a positive spend, the correct sign is negative; if it is
       stored negative, the above additive form is equivalent. The data that I use has capex as 
       negative.
+
     • Rows with any NaNs in `required_columns` are dropped prior to construction.
     """
        
@@ -518,7 +540,7 @@ def terminal_value_pe(
     pe_10y_ind = _get_float(
         d = pe_10y_ind_dict,
         key = 'Region-Industry'
-    )
+    ) 
     
     pe_list = np.array([pe_used, pe_ind, pe_10y_ind], dtype = float)
     
@@ -853,7 +875,7 @@ def main():
 
     huber_M_values = (0.25, 1.0, 4.0)
 
-    cv_folds = 5
+    cv_folds = 3
 
     tscv = TimeSeriesSplit(n_splits = cv_folds)
 
@@ -862,7 +884,7 @@ def main():
         lambdas = lambdas,
         Ms = huber_M_values,
         n_splits = cv_folds,
-        n_jobs = -1,                 
+        n_jobs = -1,               
     )
 
     fin_dict = fdata.annuals
@@ -934,17 +956,51 @@ def main():
         
             continue
         
-        cv_splits = list(tscv.split(X))
+        if not RUN_REGRESSION:
+            
+            cached = bc.get_betas(
+                path = BETA_CACHE_FILE,
+                model_key = BETA_CACHE_MODEL, 
+                ticker = ticker
+            )
+            
+            if cached is None or "y" not in cached:
+                
+                logger.warning("%s: missing cached beta. Set RUN_REGRESSION=True once to populate cache. Skipping.", ticker)
+                
+                low_price[ticker] = avg_price[ticker] = high_price[ticker] = se_dict[ticker] = 0
+                
+                continue
 
-        betas_by_key, best_lambda, best_alpha, best_M = cv.fit_joint(
-            X = X,
-            y_dict = y_dict,
-            constrained_map = constrained_map,
-            cv_splits = cv_splits,
-            scorer = None, 
-        )
-        
-        beta = betas_by_key['y']  
+            beta = np.asarray(cached["y"], dtype=float)
+
+        else:
+            
+            cv_splits = list(tscv.split(X))
+
+            betas_by_key, best_lambda, best_alpha, best_M = cv.fit_joint(
+                X = X,
+                y_dict = y_dict,
+                constrained_map = constrained_map,
+                cv_splits = cv_splits,
+                scorer = None,
+            )
+
+            beta = betas_by_key["y"]
+
+            bc.upsert_betas(
+                path = BETA_CACHE_FILE,
+                model_key = BETA_CACHE_MODEL,
+                ticker = ticker,
+                betas_by_key = {
+                    "y": beta
+                },
+                meta = {
+                    "best_lambda": float(best_lambda),
+                    "best_alpha": float(best_alpha),
+                    "best_M": float(best_M),
+                },
+            )
         
         coe_t = coe.loc[ticker].iat[0]
             
@@ -1007,9 +1063,8 @@ def main():
         sheets = sheet,
         output_excel_file = config.MODEL_FILE
     )
-        
+         
         
 if __name__ == "__main__":
 
     main()
-
