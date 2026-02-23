@@ -4,14 +4,14 @@ from __future__ import annotations
 LSTM-based Cross-Asset Forecasting with Skewed-t Modelling, Copula Simulation, and
 Macro–Fundamental Scenarios
 ==========================================================================
-
+ 
 Overview
 --------
 This module implements an end-to-end pipeline for multi-asset return forecasting and
 scenario simulation. It trains a *global* direct-H model that predicts H future
 log-return steps using a recurrent backbone (LSTM), a gated self-attention mixer,
 and two probabilistic heads:
-
+ 
 1) A *quantile* head that outputs per-step monotone quantiles (10%, 50%, 90%) via
    a non-decreasing parameterisation.
 
@@ -154,7 +154,7 @@ Define
 
 Let
 
-  log c(ν) = lgamma((ν + 1)/2) − lgamma(ν/2) − 0.5 · [log(π) + log(ν − 2)].
+  log c(ν) = lgamma((ν + 1) / 2) − lgamma(ν / 2) − 0.5 · [log(π) + log(ν − 2)].
 
 The log-density is
 
@@ -408,6 +408,9 @@ for _v in (
     _os.environ.setdefault(_v, "1")
 
 import cProfile, faulthandler, logging, pstats, random
+import signal
+import threading
+from contextlib import contextmanager, nullcontext
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
@@ -435,8 +438,25 @@ from scipy.special import gammaln
 
 
 import tensorflow as tf
+
+try:
+
+    tf.config.set_visible_devices([], "GPU")
+
+except Exception:
+
+    pass
+
+SEED = 42
+
+random.seed(SEED)
+
+np.random.seed(SEED)
+
+tf.keras.utils.set_random_seed(SEED)
+
 from tensorflow.keras.callbacks import EarlyStopping, Callback
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers.legacy import Adam
 from tensorflow.keras.layers import Input, LSTM, Dense, LayerNormalization, Lambda, MultiHeadAttention, Add, Concatenate
 from tensorflow.keras.models import Model
 from tensorflow.keras.regularizers import l2
@@ -447,6 +467,60 @@ STATE = None
 SAVE_TO_EXCEL = True
 
 
+@contextmanager
+def _time_limit(seconds: float, label: str = "operation"):
+    """
+    Hard timeout for a block. On timeout:
+ 
+    - dumps a traceback (faulthandler)
+ 
+    - raises TimeoutError so caller can skip/continue
+
+    Notes:
+ 
+    - Uses SIGALRM, so it only works reliably in the MAIN THREAD on Unix/macOS.
+ 
+    """
+ 
+    if seconds is None or seconds <= 0:
+ 
+        yield
+ 
+        return
+
+    if threading.current_thread() is not threading.main_thread():
+
+        yield
+
+        return
+
+    def _handler(
+        signum, 
+        frame
+    ):
+    
+        raise TimeoutError(f"Timed out after {seconds:.1f}s in {label}")
+
+
+    old_handler = signal.signal(signal.SIGALRM, _handler)
+
+    try:
+
+        faulthandler.dump_traceback_later(seconds, repeat=False)
+
+        signal.setitimer(signal.ITIMER_REAL, seconds)
+
+        yield
+
+    finally:
+
+        signal.setitimer(signal.ITIMER_REAL, 0.0)
+
+        faulthandler.cancel_dump_traceback_later()
+
+        signal.signal(signal.SIGALRM, old_handler)
+        
+        
 @dataclass(frozen = True)
 class ModelHP:
     
@@ -563,7 +637,7 @@ def _pinball_loss_seq_tf(
 
     loss = tf.maximum(qv * e, (qv - 1.0) * e)
 
-    return tf.reduce_mean(tf.reduce_sum(loss, axis=-1)) / tf.cast(tf.size(q), tf.float32)
+    return tf.reduce_mean(tf.reduce_sum(loss, axis = -1), axis = 1) / tf.cast(tf.size(q), tf.float32)
 
 
 @tf.function(jit_compile = True, reduce_retracing = True)
@@ -675,7 +749,7 @@ def _skewt_nll_seq_tf(
    
     log_pdf = log_base - 0.5 * (nu + 1.0) * tf.math.log1p((zt * zt) / (nu - 2.0))
     
-    nll = -tf.reduce_mean(log_pdf)
+    nll = -tf.reduce_mean(log_pdf, axis = 1)
 
     reg = (lambda_sigma * tf.reduce_mean(tf.square(sig)) + lambda_invnu * tf.reduce_mean(1.0 / (nu - 2.0)))
     
@@ -775,6 +849,14 @@ class LSTM_Cross_Asset_Forecaster:
     GRAPH_MONTHLY_REUSE = False      
    
     GRAPH_MONTHLY_REUSE_WEEKS = 5
+    
+    ENABLE_TICKER_TIMEOUTS = True
+
+    TICKER_TIMEOUT_BUILDSTATE_SEC = 120.0  
+
+    TICKER_TIMEOUT_CACHEBUILD_SEC = 120.0   
+
+    TICKER_TIMEOUT_WINDOWS_SEC   = 120.0   
 
 
     def __init__(
@@ -1144,7 +1226,7 @@ class LSTM_Cross_Asset_Forecaster:
             d[d == 0.0] = np.nan
            
             out[:, j] = self._ffill_1d(
-                a = d
+                x = d
             )
         
         if "EPS (Basic)" in regs:
@@ -1164,7 +1246,7 @@ class LSTM_Cross_Asset_Forecaster:
             d[d == 0.0] = np.nan
            
             out[:, j] = self._ffill_1d(
-                a = d
+                x = d
             )
         
         return out
@@ -1688,7 +1770,7 @@ class LSTM_Cross_Asset_Forecaster:
            
                     C = (S - win * np.outer(mu, mu)) / max(win - 1, 1)
            
-                    C = np.divide(C, denom, out=np.zeros_like(C), where = (denom > 0))
+                    C = np.divide(C, denom, out = np.zeros_like(C), where = (denom > 0))
            
                 np.fill_diagonal(C, 0.0)
 
@@ -1696,7 +1778,7 @@ class LSTM_Cross_Asset_Forecaster:
 
                 if topK < M:
                 
-                    idx_top = np.argpartition(-np.abs(C), kth = min(topK, M - 1)-1, axis=1)[:, :topK]
+                    idx_top = np.argpartition(-np.abs(C), kth = min(topK, M - 1)-1, axis = 1)[:, :topK]
                 
                 else:
                 
@@ -1706,7 +1788,7 @@ class LSTM_Cross_Asset_Forecaster:
                
                 vals = C[rows, idx_top]   
 
-                d = np.sum(np.abs(vals), axis=1) 
+                d = np.sum(np.abs(vals), axis = 1) 
                 
                 Dinv = 1.0 / np.sqrt(np.clip(d, 1e-6, None))
                 
@@ -2040,7 +2122,7 @@ class LSTM_Cross_Asset_Forecaster:
 
         a = 4.0 * lam * c * (nu_safe - 2.0) / (nu_safe - 1.0)
         
-        b2 = 1.0 + 3.0 * lam**2 - a ** 2
+        b2 = 1.0 + 3.0 * lam ** 2 - a ** 2
         
         b = np.sqrt(np.maximum(b2, 1e-12))  
 
@@ -2148,12 +2230,11 @@ class LSTM_Cross_Asset_Forecaster:
         improves coverage calibration; the skewed-t head models heavy tails and skew.
         """
     
-        tf.random.set_seed(seed)
-
         inp = Input((self.SEQUENCE_LENGTH, 1 + n_reg), dtype = "float32", name = "seq")
 
         x = LSTM(
-            self._LSTM1, return_sequences = True,
+            self._LSTM1, 
+            return_sequences = True,
             kernel_regularizer = l2(self.L2_LAMBDA),
             recurrent_regularizer = l2(self.L2_LAMBDA),
             kernel_initializer = tf.keras.initializers.GlorotUniform(seed = seed),
@@ -2162,8 +2243,6 @@ class LSTM_Cross_Asset_Forecaster:
             recurrent_dropout = 0.0
         )(inp)
         
-        x = LayerNormalization()(x)
-
         if self.USE_EMBEDDING and n_tickers:
           
             tick_id_inp = Input((), dtype = "int32", name = "tick_id")
@@ -2337,7 +2416,7 @@ class LSTM_Cross_Asset_Forecaster:
     
             F = factors_df.reindex(idx).ffill().to_numpy(np.float64, copy = False)  
 
-            maskF = np.isfinite(F).all(axis=1, keepdims=True)
+            maskF = np.isfinite(F).all(axis = 1, keepdims = True)
            
             mask = maskY & maskF
            
@@ -3563,7 +3642,7 @@ class LSTM_Cross_Asset_Forecaster:
        
         else:
          
-            tickers = ['AMZN', 'GOOG', 'KO', 'MSFT', 'NVDA', 'TJX', 'TTD', 'TTWO']
+            tickers = ['GOOG', 'KO', 'NVDA', 'TJX', 'PLTR', 'TTWO', 'HOOD', 'MCD']
 
         close_df = r.weekly_close
       
@@ -3633,7 +3712,7 @@ class LSTM_Cross_Asset_Forecaster:
 
         macro_rec = np.empty(
             len_macro_clean,
-            dtype=[("ds", "datetime64[ns]"),
+            dtype = [("ds", "datetime64[ns]"),
                    ("country", f"U{max(1, max(len(c) for c in macro_clean['country']) if len_macro_clean > 0 else 1)}")]
                  + [(reg, "float32") for reg in self.MACRO_REGRESSORS]
         )
@@ -3802,7 +3881,9 @@ class LSTM_Cross_Asset_Forecaster:
         
         for t in tickers:
         
-            c = _norm_country(analyst["country"].get(t, None))
+            c = _norm_country(
+                x = analyst["country"].get(t, None)
+            )
         
             by_country.setdefault(c, []).append(t)
 
@@ -3822,97 +3903,128 @@ class LSTM_Cross_Asset_Forecaster:
         
         for t in grouped_tickers:
         
-            pr = price_rec[price_rec["Ticker"] == t]
+            try:
         
-            if len(pr) == 0:
+                ctx = (_time_limit(self.TICKER_TIMEOUT_BUILDSTATE_SEC, f"build_state:ticker={t}")
+                       if self.ENABLE_TICKER_TIMEOUTS else nullcontext())
+
+                with ctx:
         
+                    pr = price_rec[price_rec["Ticker"] == t]
+
+                    if len(pr) == 0:
+        
+                        continue
+
+                    s = (pd.DataFrame({"ds": pr["ds"], "y": pr["y"]})
+                         .set_index("ds").sort_index()["y"]
+                         .resample("W-FRI").last().ffill())
+
+                    y = s.to_numpy(dtype=np.float32, copy=False)
+        
+                    ys = np.maximum(y, self.SMALL_FLOOR)
+        
+                    lr = np.zeros_like(ys, dtype=np.float32)
+        
+                    lr[1:] = np.log(ys[1:]) - np.log(ys[:-1])
+
+                    weekly_price_by_ticker[t] = {
+                        "index": s.index.values,
+                        "y": y,
+                        "lr": lr
+                    }
+
+                    rv26 = self._rolling_std_np(
+                        x = lr,
+                        w = 26
+                    )
+        
+                    rv52 = self._rolling_std_np(
+                        x = lr,
+                        w = 52
+                    )
+        
+                    weekly_price_by_ticker[t]["rv26"] = rv26
+        
+                    weekly_price_by_ticker[t]["rv52"] = rv52
+
+                    rq26 = self._rolling_rq_np(
+                        x = lr,
+                        w = 26
+                    )
+                  
+                    rq52 = self._rolling_rq_np(
+                        x = lr,
+                        w = 52
+                    )
+                  
+                    weekly_price_by_ticker[t]["rq26"] = rq26
+                  
+                    weekly_price_by_ticker[t]["rq52"] = rq52
+
+                    bpv26 = self._rolling_bpv_np(
+                        x = lr,
+                        w = 26
+                    )
+                    
+                    bpv52 = self._rolling_bpv_np(
+                        x = lr,
+                        w = 52
+                    )
+                    
+                    weekly_price_by_ticker[t]["bpv26"] = bpv26
+                    
+                    weekly_price_by_ticker[t]["bpv52"] = bpv52
+
+                    s_lr = pd.Series(lr, index=s.index)
+                   
+                    skew = s_lr.rolling(seq_len, min_periods = seq_len).skew().shift(hor)
+                   
+                    kurt = s_lr.rolling(seq_len, min_periods = seq_len).kurt().shift(hor)
+
+                    moments_by_ticker[t] = np.column_stack((
+                        np.nan_to_num(skew.to_numpy(dtype = np.float32), nan = 0.0, posinf = 0.0, neginf = 0.0),
+                        np.nan_to_num(kurt.to_numpy(dtype = np.float32), nan = 0.0, posinf = 0.0, neginf = 0.0),
+                    )).astype(np.float32, copy = False)
+
+                    if t in fd_rec_dict:
+                    
+                        df_fd = (pd.DataFrame({
+                            "ds": fd_rec_dict[t]["ds"],
+                            "Revenue": fd_rec_dict[t]["Revenue"],
+                            "EPS (Basic)": fd_rec_dict[t]["EPS (Basic)"],
+                        }).set_index("ds").sort_index())
+
+                        fdw = df_fd.resample("W-FRI").last().ffill()
+
+                        fd_weekly_by_ticker[t] = {
+                            "index": fdw.index.values,
+                            "values": fdw[["Revenue", "EPS (Basic)"]].to_numpy(dtype = np.float32, copy = False)
+                        }
+
+            except TimeoutError as e:
+
+                weekly_price_by_ticker.pop(t, None)
+
+                moments_by_ticker.pop(t, None)
+
+                fd_weekly_by_ticker.pop(t, None)
+
+                self.logger.warning("[TIMEOUT] %s — skipping ticker %s", str(e), t)
+
                 continue
-        
-            s = (pd.DataFrame({"ds": pr["ds"], "y": pr["y"]})
-                 .set_index("ds").sort_index()["y"]
-                 .resample("W-FRI").last().ffill())
-            
-            y = s.to_numpy(dtype = np.float32, copy = False)
-            
-            ys = np.maximum(y, self.SMALL_FLOOR)
-            
-            lr = np.zeros_like(ys, dtype = np.float32)
-            
-            lr[1:] = np.log(ys[1:]) - np.log(ys[:-1])
-            
-            weekly_price_by_ticker[t] = {
-                "index": s.index.values, 
-                "y": y, 
-                "lr": lr
-            }
 
-            rv26 = self._rolling_std_np(
-                x = lr, 
-                w = 26
-            )
-            
-            rv52 = self._rolling_std_np(
-                x = lr, 
-                w = 52
-            )
-            
-            weekly_price_by_ticker[t]["rv26"] = rv26
-            
-            weekly_price_by_ticker[t]["rv52"] = rv52
+            except Exception as e:
 
-            rq26 = self._rolling_rq_np(
-                x = lr, 
-                w = 26
-            )
-            
-            rq52 = self._rolling_rq_np(
-                x = lr, 
-                w = 52
-            )
-            
-            weekly_price_by_ticker[t]["rq26"] = rq26
-            
-            weekly_price_by_ticker[t]["rq52"] = rq52
+                weekly_price_by_ticker.pop(t, None)
 
-            bpv26 = self._rolling_bpv_np(
-                x = lr, 
-                w = 26
-            )
-            
-            bpv52 = self._rolling_bpv_np(
-                x = lr, 
-                w = 52
-            )
-            
-            weekly_price_by_ticker[t]["bpv26"] = bpv26
-            
-            weekly_price_by_ticker[t]["bpv52"] = bpv52
+                moments_by_ticker.pop(t, None)
 
-            s_lr = pd.Series(lr, index = s.index)
-            
-            skew = s_lr.rolling(seq_len, min_periods = seq_len).skew().shift(hor)
-            
-            kurt = s_lr.rolling(seq_len, min_periods = seq_len).kurt().shift(hor)
-            
-            moments_by_ticker[t] = np.column_stack((
-                np.nan_to_num(skew.to_numpy(dtype = np.float32), nan = 0.0, posinf = 0.0, neginf = 0.0),
-                np.nan_to_num(kurt.to_numpy(dtype = np.float32), nan = 0.0, posinf = 0.0, neginf = 0.0),
-            )).astype(np.float32, copy = False)
+                fd_weekly_by_ticker.pop(t, None)
 
-            if t in fd_rec_dict:
-               
-                df_fd = (pd.DataFrame({
-                    "ds": fd_rec_dict[t]["ds"],
-                    "Revenue": fd_rec_dict[t]["Revenue"],
-                    "EPS (Basic)": fd_rec_dict[t]["EPS (Basic)"],
-                }).set_index("ds").sort_index())
-               
-                fdw = df_fd.resample("W-FRI").last().ffill()
-               
-                fd_weekly_by_ticker[t] = {
-                    "index": fdw.index.values,
-                    "values": fdw[["Revenue", "EPS (Basic)"]].to_numpy(dtype = np.float32, copy = False)
-                }
+                self.logger.warning("[ERROR] build_state ticker=%s failed (%s) — skipping", t, repr(e), exc_info=True)
+
+                continue
 
         graph_feats_by_ticker = {}
         
@@ -4087,7 +4199,7 @@ class LSTM_Cross_Asset_Forecaster:
                
                 fd_idx = fd_weekly_by_ticker[t]["index"]
                
-                idx_fd = np.searchsorted(fd_idx, dates, side =" right") - 1
+                idx_fd = np.searchsorted(fd_idx, dates, side = "right") - 1
                
                 valid_fd = idx_fd >= 0
             
@@ -4125,35 +4237,54 @@ class LSTM_Cross_Asset_Forecaster:
         tail_for_scaler = []
 
         for t in grouped_tickers:
-            
-            built = self._build_unscaled_cache_for_ticker(
-                t = t, 
-                regs = regs, 
-                reg_pos = reg_pos,
-                align_cache = align_cache,
-                macro_weekly_by_country = macro_weekly_by_country,
-                factor_weekly_values = factor_weekly_values,
-                moments_by_ticker = moments_by_ticker,
-                fd_weekly_by_ticker = fd_weekly_by_ticker,
-                fd_rec_dict = fd_rec_dict,
-                weekly_price_by_ticker = weekly_price_by_ticker,
-                graph_feats_by_ticker = graph_feats_by_ticker,
-                analyst = analyst
-            )
-            
-            if built is None:
+         
+            try:
+         
+                ctx = (_time_limit(self.TICKER_TIMEOUT_CACHEBUILD_SEC, f"unscaled_cache:ticker={t}")
+                       if self.ENABLE_TICKER_TIMEOUTS else nullcontext())
+
+                with ctx:
                 
+                    built = self._build_unscaled_cache_for_ticker(
+                        t = t,
+                        regs = regs,
+                        reg_pos = reg_pos,
+                        align_cache = align_cache,
+                        macro_weekly_by_country = macro_weekly_by_country,
+                        factor_weekly_values = factor_weekly_values,
+                        moments_by_ticker = moments_by_ticker,
+                        fd_weekly_by_ticker = fd_weekly_by_ticker,
+                        fd_rec_dict = fd_rec_dict,
+                        weekly_price_by_ticker = weekly_price_by_ticker,
+                        graph_feats_by_ticker = graph_feats_by_ticker,
+                        analyst = analyst
+                    )
+
+                if built is None:
+                   
+                    continue
+
+                DEL_by_ticker[t] = built["DEL_full"]
+            
+                REGMAT_by_ticker[t] = built["reg_mat"]
+            
+                LRCORE_by_ticker[t] = built["lr_core"]
+
+                if built["DEL_full"].shape[0] > 0:
+            
+                    tail_for_scaler.append(built["DEL_full"][-min(260, built["DEL_full"].shape[0]):])
+
+            except TimeoutError as e:
+            
+                self.logger.warning("[TIMEOUT] %s — skipping ticker %s", str(e), t)
+            
                 continue
-
-            DEL_by_ticker[t] = built["DEL_full"]
             
-            REGMAT_by_ticker[t] = built["reg_mat"]
+            except Exception as e:
             
-            LRCORE_by_ticker[t] = built["lr_core"]
-
-            if built["DEL_full"].shape[0] > 0:
+                self.logger.warning("[ERROR] cache build ticker=%s failed (%s) — skipping", t, repr(e), exc_info=True)
             
-                tail_for_scaler.append(built["DEL_full"][-min(260, built["DEL_full"].shape[0]):])
+                continue
 
         if tail_for_scaler:
         
@@ -4238,8 +4369,8 @@ class LSTM_Cross_Asset_Forecaster:
             "DEL_by_ticker": DEL_by_ticker,
             "REGMAT_by_ticker": REGMAT_by_ticker,
             "LRCORE_by_ticker": LRCORE_by_ticker,
-
         }
+        
         presence_flags = {
             t: {
                 "has_factors": (factor_weekly_values.shape[0] > 0),
@@ -4374,46 +4505,65 @@ class LSTM_Cross_Asset_Forecaster:
             pool_rv_cal = []
 
             for t in state_pack["tickers"]:
-                
+          
                 analyst = state_pack["analyst"]
-                
+          
                 ctry = analyst["country"].get(t, None)
-                
+          
                 if ctry not in state_pack["country_slices"]:
-                
+          
                     continue
-                
+
                 DEL = state_pack["DEL_by_ticker"].get(t)
-                
+          
                 RM = state_pack["REGMAT_by_ticker"].get(t)
-                
+          
                 LR = state_pack["LRCORE_by_ticker"].get(t)
-                
+          
                 if DEL is None or RM is None or LR is None:
-                
+          
                     continue
-                
-                built = self._make_windows_for_ticker(
-                    t = t, 
-                    ctry = ctry, 
-                    regs = regs, 
-                    reg_pos = reg_pos,
-                    HIST = HIST, 
-                    HOR = HOR, 
-                    SEQ_LEN = SEQ_LEN,
-                    sc_reg_full = sc_reg_full,
-                    q_low = q_low,
-                    q_high = q_high,
-                    ret_scaler_full = ret_scaler_full,
-                    macro_idx = macro_idx, 
-                    factors_idx = factor_idx,
-                    reg_mat_pre = RM,
-                    DEL_full_pre = DEL, 
-                    lr_core_pre = LR
-                )
-                
+
+                try:
+          
+                    ctx = (_time_limit(self.TICKER_TIMEOUT_WINDOWS_SEC, f"make_windows:ticker={t}")
+                           if self.ENABLE_TICKER_TIMEOUTS else nullcontext())
+
+                    with ctx:
+          
+                        built = self._make_windows_for_ticker(
+                            t = t,
+                            ctry = ctry,
+                            regs = regs,
+                            reg_pos = reg_pos,
+                            HIST = HIST,
+                            HOR = HOR,
+                            SEQ_LEN = SEQ_LEN,
+                            sc_reg_full = sc_reg_full,
+                            q_low = q_low,
+                            q_high = q_high,
+                            ret_scaler_full = ret_scaler_full,
+                            macro_idx = macro_idx,
+                            factors_idx = factor_idx,
+                            reg_mat_pre = RM,
+                            DEL_full_pre = DEL,
+                            lr_core_pre = LR
+                        )
+
+                except TimeoutError as e:
+          
+                    self.logger.warning("[TIMEOUT] %s — skipping ticker %s", str(e), t)
+          
+                    continue
+          
+                except Exception as e:
+          
+                    self.logger.warning("[ERROR] make_windows ticker=%s failed (%s) — skipping", t, repr(e), exc_info=True)
+          
+                    continue
+
                 if built is None:
-                
+          
                     continue
                 
                 if self.USE_AUX_RV_TARGET:
@@ -4985,7 +5135,10 @@ class LSTM_Cross_Asset_Forecaster:
                 row_fore = row_fore
             )
             
-            rng_scn = np.random.default_rng(self._seed_from_str(t + ":scn", base=self.SEED))
+            rng_scn = np.random.default_rng(self._seed_from_str(
+                s = t + ":scn", 
+                base = self.SEED
+            ))
 
             if np.isfinite(comb["targ_rev"]) and last_rev > 0 and (fin_rev_idx is not None):
             
@@ -5623,6 +5776,7 @@ class LSTM_Cross_Asset_Forecaster:
         Robustness
         ----------
         • KeyboardInterrupt is handled to allow a clean shutdown.
+       
         • SharedMemory is always closed/unlinked in a finally block.
         """
 
@@ -5723,5 +5877,3 @@ if __name__ == "__main__":
         stats = pstats.Stats(profiler).sort_stats("cumtime")
 
         stats.print_stats(20)
-
-
