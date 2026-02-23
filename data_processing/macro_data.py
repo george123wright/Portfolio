@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from functools import cached_property
-from ratio_data import RatioData
+from data_processing.ratio_data import RatioData
 import config
 
 
@@ -22,6 +22,8 @@ COUNTRY_FALLBACK = {
 
 
 _QVARS = ["Interest", "Cpi", "Gdp", "Unemp"]
+
+_QVARS_LARGE = ["Interest", "Cpi", "Gdp", "Unemp", "Balance Of Trade", "Corporate Profits", "Balance On Current Account"]
 
 
 _VAR_KEY = {
@@ -53,15 +55,11 @@ class MacroData:
 
     Key behavior
     ------------
-  
     - Country name canonicalization with fallbacks (e.g., "Guernsey" → "United Kingdom").
-    
     - Historical quarterly series are annualized into year-end panels and converted to
     percentage changes where appropriate.
-    
     - If a country's quarterly series is missing a macro column, US data are used
     as fallback on a per-period basis.
-    
     - Forecast tables are looked up by country name with US fallback when missing.
 
     Attributes
@@ -273,25 +271,26 @@ class MacroData:
         self
     ) -> dict[str,pd.DataFrame]:
         """
-        Annualized macro *rate-of-change* panel by country (with US fallbacks).
-
-        Process
-        -------
-        1) Load quarterly macro for each country and US.
-        2) For any missing quarterly macro column in a country, fill from US for the
-        overlapping quarters.
-        3) Annualize:
-        - Interest: year mean → 'Interest_Rate' then % change → 'InterestRate_pct_change'
-        - CPI:      year mean → 'CPI'           then % change → 'Inflation_rate'
-        - GDP:      year last → 'Gdp'           then % change → 'GDP_growth'
-        - Unemp:    year mean → 'Unemployment_Rate' then % change → 'Unemployment_pct_change'
-        4) Join annual % change columns and fill remaining gaps from US.
-
-        Returns
-        -------
-        dict[str, pd.DataFrame]
-            country → DataFrame indexed by PeriodIndex('Y') with columns:
-            ['InterestRate_pct_change','Inflation_rate','GDP_growth','Unemployment_pct_change'].
+                Annualized macro *rate-of-change* panel by country (with US fallbacks).
+        
+                Process
+                -------
+                1) Load quarterly macro for each country and US.
+                2) For any missing quarterly macro column in a country, fill from US for the
+                overlapping quarters.
+                3) Annualize:
+                - Interest: year mean → 'Interest_Rate' then % change → 'InterestRate_pct_change'
+                - CPI:      year mean → 'CPI'           then % change → 'Inflation_rate'
+                - GDP:      year last → 'Gdp'           then % change → 'GDP_growth'
+                - Unemp:    year mean → 'Unemployment_Rate' then % change → 'Unemployment_pct_change'
+                4) Join annual % change columns and fill remaining gaps from US.
+        
+                Returns
+                -------
+                dict[str, pd.DataFrame]
+                    country → DataFrame indexed by PeriodIndex('Y') with columns:
+                    ['InterestRate_pct_change','Inflation_rate','GDP_growth','Unemployment_pct_change'].
+                
         """
       
         wb = pd.ExcelFile(self.hist_path, engine = "openpyxl")
@@ -359,10 +358,12 @@ class MacroData:
             df_q.index = df_q.index.to_period("Q")
 
             for v in _QVARS:
-            
+                            
                 if v not in df_q.columns:
-               
-                    df_q[v] = us_q[v].loc[df_q.index].values
+                    
+                    df_q = df_q.loc[df_q.index.intersection(us_q.index)]
+                    df_q[v] = us_q[v].loc[df_q.index]
+
                
                 else:
                
@@ -417,18 +418,19 @@ class MacroData:
         self
     ) -> dict[str,pd.DataFrame]:
         """
-        Quarterly macro *levels* by country (no % transforms), 2010Q1 onward.
-
-        Process
-        -------
-        - Load quarterly macro for each sheet, fill missing columns forward from US per-quarter.
-        - Convert special units for selected countries (e.g., divide 'Gdp' by 1e9 for CHINA/UK/Germany).
-
-        Returns
-        -------
-        dict[str, pd.DataFrame]
-            country → DataFrame with columns ['Interest','Cpi','Gdp','Unemp'],
-            index PeriodIndex('Q'), filtered to ≥ 2010Q1.
+                Quarterly macro *levels* by country (no % transforms), 2000Q1 onward.
+        
+                Process
+                -------
+                - Load quarterly macro for each sheet, fill missing columns forward from US per-quarter.
+                - Convert special units for selected countries (e.g., divide 'Gdp' by 1e9 for CHINA/UK/Germany).
+        
+                Returns
+                -------
+                dict[str, pd.DataFrame]
+                    country → DataFrame with columns ['Interest','Cpi','Gdp','Unemp'],
+                    index PeriodIndex('Q'), filtered to ≥ 2000Q1.
+                
         """
        
         wb = pd.ExcelFile(
@@ -446,7 +448,7 @@ class MacroData:
        
         us_q.index = us_q.index.to_period("Q")
        
-        us_q = us_q[us_q.index >= pd.Period("2010Q1")]
+        us_q = us_q[us_q.index >= pd.Period("2000Q1")]
 
         data = {
             "United States": us_q[_QVARS].ffill().fillna(0)
@@ -468,7 +470,7 @@ class MacroData:
             
             df_q.index = df_q.index.to_period("Q")
            
-            df_q = df_q[df_q.index >= pd.Period("2010Q1")]
+            df_q = df_q[df_q.index >= pd.Period("2000Q1")]
 
             for v in _QVARS:
              
@@ -484,16 +486,89 @@ class MacroData:
 
 
     @cached_property
+    def historical_large_non_pct(
+        self
+    ) -> dict[str,pd.DataFrame]:
+        """
+                Quarterly macro *levels* by country (no % transforms), 2000Q1 onward.
+        
+                Process
+                -------
+                - Load quarterly macro for each sheet, fill missing columns forward from US per-quarter.
+                - Convert special units for selected countries (e.g., divide 'Gdp' by 1e9 for CHINA/UK/Germany).
+        
+                Returns
+                -------
+                dict[str, pd.DataFrame]
+                    country → DataFrame with columns ["Interest", "Cpi", "Gdp", "Unemp", "Balance Of Trade", "Corporate Profits", "Balance On Current Account"],
+                    index PeriodIndex('Q'), filtered to ≥ 2000Q1.
+                
+        """
+       
+        wb = pd.ExcelFile(
+            self.hist_path, 
+            engine = "openpyxl"
+        )
+       
+        us_q = pd.read_excel(
+            self.hist_path,
+            sheet_name = "United States",
+            index_col = 0, 
+            engine = "openpyxl",
+            parse_dates = True
+        )
+       
+        us_q.index = us_q.index.to_period("Q")
+       
+        us_q = us_q[us_q.index >= pd.Period("2000Q1")]
+
+        data = {
+            "United States": us_q[_QVARS_LARGE].ffill().fillna(0)
+        }
+
+        for sheet in wb.sheet_names:
+       
+            if sheet in (self.SHEET_INDEXES, "United States", "FX"):
+              
+                continue
+
+            df_q = pd.read_excel(
+                self.hist_path,
+                sheet_name = sheet,
+                index_col = 0, 
+                engine = "openpyxl",
+                parse_dates = True
+            )
+            
+            df_q.index = df_q.index.to_period("Q")
+           
+            df_q = df_q[df_q.index >= pd.Period("2000Q1")]
+
+            for v in _QVARS_LARGE:
+             
+                df_q[v] = df_q.get(v, us_q[v].loc[df_q.index]).ffill().fillna(0)
+
+            if sheet in ["CHINA", "United Kingdom", "Germany"]:
+              
+                df_q["Gdp"] = df_q["Gdp"] / 1e9
+
+            data[sheet] = df_q[_QVARS_LARGE]
+
+        return data
+
+
+    @cached_property
     def currency(
         self
     ) -> pd.Series:
         """
-        Load latest FX quotes from the forecasts workbook.
-
-        Returns
-        -------
-        pd.Series
-            'Last' column from the 'Currency' sheet, indexed by currency pair (e.g., 'GBPUSD').
+                Load latest FX quotes from the forecasts workbook.
+        
+                Returns
+                -------
+                pd.Series
+                    'Last' column from the 'Currency' sheet, indexed by currency pair (e.g., 'GBPUSD').
+                
         """
       
         df = pd.read_excel(
@@ -501,7 +576,6 @@ class MacroData:
             sheet_name = "Currency",
             index_col = 0,
             engine = "openpyxl",
-            parse_dates = True
         )
        
         return df["Last"]
@@ -512,12 +586,13 @@ class MacroData:
         self
     ) -> pd.Series:
         """
-        Load latest Interest Rates from the forecasts workbook.
-
-        Returns
-        -------
-        pd.Series
-            'Last' column from the 'Interest_Rate' sheet, indexed by Country.
+                Load latest Interest Rates from the forecasts workbook.
+        
+                Returns
+                -------
+                pd.Series
+                    'Last' column from the 'Interest_Rate' sheet, indexed by Country.
+                
         """
       
         df = pd.read_excel(
@@ -525,7 +600,6 @@ class MacroData:
             sheet_name = "Interest_Rate",
             index_col = 0,
             engine = "openpyxl",
-            parse_dates = True
         )
        
         return df["Last"]  
@@ -536,12 +610,13 @@ class MacroData:
         self
     ) -> pd.DataFrame:
         """
-        Load index/commodity price levels.
-
-        Returns
-        -------
-        pd.DataFrame
-            From the 'Stock Indexes and Commodities' sheet, datetime index (converted), raw prices.
+                Load index/commodity price levels.
+        
+                Returns
+                -------
+                pd.DataFrame
+                    From the 'Stock Indexes and Commodities' sheet, datetime index (converted), raw prices.
+                
         """
       
         df = pd.read_excel(
@@ -562,27 +637,28 @@ class MacroData:
         self
     ) -> dict[str,pd.DataFrame]:
         """
-        Load macro forecast tables for Interest, CPI/Inflation, GDP, and Unemployment.
-
-        Returns
-        -------
-        dict[str, pd.DataFrame]
-            {
-            'Interest_Rate': df,
-            'Inflation_Rate': df,
-            'Gdp': df,
-            'Unemployment_Rate': df,
-            }
-        where DataFrames are indexed by country and columns are horizon labels
-        (e.g., 'Last', 'Q1/26', or calendar years for GDP).
-
-        Side effects
-        ------------
-        - Builds `_forecast_key` for fast country name → index resolution.
-
-        Notes
-        -----
-        - Attempts to parse yearly indices to PeriodIndex('Y') when possible.
+                Load macro forecast tables for Interest, CPI/Inflation, GDP, and Unemployment.
+        
+                Returns
+                -------
+                dict[str, pd.DataFrame]
+                    {
+                    'Interest_Rate': df,
+                    'Inflation_Rate': df,
+                    'Gdp': df,
+                    'Unemployment_Rate': df,
+                    }
+                where DataFrames are indexed by country and columns are horizon labels
+                (e.g., 'Last', 'Q1/26', or calendar years for GDP).
+        
+                Side effects
+                ------------
+                - Builds `_forecast_key` for fast country name → index resolution.
+        
+                Notes
+                -----
+                - Attempts to parse yearly indices to PeriodIndex('Y') when possible.
+                
         """
        
         out = {}
@@ -682,26 +758,27 @@ class MacroData:
         country: str | None
     ) -> dict[str, float]:
         """
-        Compute a compact macro forecast dictionary for one country.
-
-        Parameters
-        ----------
-        country : str | None
-            Country name; resolves via `_sheet_for` and COUNTRY_FALLBACK.
-
-        Returns
-        -------
-        dict[str, float]
-            {
-            'InterestRate_pct_change': (IR_Q1/26 - IR_Last)/IR_Last,
-            'Inflation_rate':          CPI_Q1/26 (level as rate),
-            'GDP_growth':              (GDP_2026 - GDP_Last)/GDP_Last,
-            'Unemployment_pct_change': (U_Q1/26  - U_Last)/U_Last,
-            }
-
-        Notes
-        -----
-        - GDP uses calendar-year columns (e.g., '2026'); other variables use quarter labels.
+                Compute a compact macro forecast dictionary for one country.
+        
+                Parameters
+                ----------
+                country : str | None
+                    Country name; resolves via `_sheet_for` and COUNTRY_FALLBACK.
+        
+                Returns
+                -------
+                dict[str, float]
+                    {
+                    'InterestRate_pct_change': (IR_Q1/26 - IR_Last)/IR_Last,
+                    'Inflation_rate':          CPI_Q1/26 (level as rate),
+                    'GDP_growth':              (GDP_2026 - GDP_Last)/GDP_Last,
+                    'Unemployment_pct_change': (U_Q1/26  - U_Last)/U_Last,
+                    }
+        
+                Notes
+                -----
+                - GDP uses calendar-year columns (e.g., '2026'); other variables use quarter labels.
+                
         """
        
         sheet = self._sheet_for(
@@ -746,25 +823,26 @@ class MacroData:
         self
     ) -> dict[str, dict[str, float]]:
         """
-        Build per-ticker macro forecast bundles (raw row arrays).
-
-        Returns
-        -------
-        dict[str, dict[str, np.ndarray]]
-            {
-            TICKER: {
-                'InterestRate':              <forecast row values>,
-                'Consumer_Price_Index_Cpi':  <forecast row values>,
-                'GDP':                       <['2025','2026'] values>,
-                'Unemployment':              <forecast row values>,
-            },
-            ...
-            }
-
-        Notes
-        -----
-        - Country for each ticker comes from `r.analyst['country']` with sheet resolution
-        and fallbacks as in `_sheet_for`.
+                Build per-ticker macro forecast bundles (raw row arrays).
+        
+                Returns
+                -------
+                dict[str, dict[str, np.ndarray]]
+                    {
+                    TICKER: {
+                        'InterestRate':              <forecast row values>,
+                        'Consumer_Price_Index_Cpi':  <forecast row values>,
+                        'GDP':                       <['2025','2026'] values>,
+                        'Unemployment':              <forecast row values>,
+                    },
+                    ...
+                    }
+        
+                Notes
+                -----
+                - Country for each ticker comes from `r.analyst['country']` with sheet resolution
+                and fallbacks as in `_sheet_for`.
+                
         """
   
         records: dict[str, dict[float]] = {}
@@ -815,17 +893,18 @@ class MacroData:
         self
     ) -> pd.DataFrame:
         """
-        Attach annual *rate-of-change* macro history to each ticker based on its country.
-
-        Returns
-        -------
-        pd.DataFrame
-            MultiIndex [ticker, year] with columns:
-            ['InterestRate_pct_change','Inflation_rate','GDP_growth','Unemployment_pct_change'].
-
-        Notes
-        -----
-        - Ticker → country from `RatioData.analyst['country']`; falls back to US when unknown.
+                Attach annual *rate-of-change* macro history to each ticker based on its country.
+        
+                Returns
+                -------
+                pd.DataFrame
+                    MultiIndex [ticker, year] with columns:
+                    ['InterestRate_pct_change','Inflation_rate','GDP_growth','Unemployment_pct_change'].
+        
+                Notes
+                -----
+                - Ticker → country from `RatioData.analyst['country']`; falls back to US when unknown.
+                
         """
        
         frames: dict[str, pd.DataFrame] = {}
@@ -849,12 +928,13 @@ class MacroData:
         self
     ) -> pd.DataFrame:
         """
-        Attach quarterly *level* macro history (2010Q1+) to each ticker based on its country.
-
-        Returns
-        -------
-        pd.DataFrame
-            MultiIndex [ticker, year(Q)] with columns ['Interest','Cpi','Gdp','Unemp'].
+                Attach quarterly *level* macro history (2000Q1+) to each ticker based on its country.
+        
+                Returns
+                -------
+                pd.DataFrame
+                    MultiIndex [ticker, year(Q)] with columns ['Interest','Cpi','Gdp','Unemp'].
+                
         """
 
        
@@ -872,23 +952,55 @@ class MacroData:
            
                 frames[ticker] = self.historical_non_pct[sheet]
        
-        return pd.concat(frames, names=["ticker", "year"])
+        return pd.concat(frames, names = ["ticker", "year"])
     
 
+    def assign_macro_history_large_non_pct(
+        self
+    ) -> pd.DataFrame:
+        """
+                Attach quarterly *level* macro history (2000Q1+) to each ticker based on its country.
+        
+                Returns
+                -------
+                pd.DataFrame
+                    MultiIndex [ticker, year(Q)] with columns ['Interest', 'Cpi', 'Gdp', 'Unemp'].
+                
+        """
+
+       
+        frames: dict[str, pd.DataFrame] = {}
+       
+        for ticker in self.tickers:
+       
+            sheet = self._sheet_for(
+                country = self.r.analyst.loc[ticker, "country"]
+                if "country" in self.r.analyst.columns
+                else None
+            )
+       
+            if sheet in self.historical_large_non_pct:
+           
+                frames[ticker] = self.historical_large_non_pct[sheet]
+       
+        return pd.concat(frames, names = ["ticker", "year"])
+    
+    
     def assign_macro_forecasts(
         self
     ) -> dict[str, dict[str, float]]:
         """
-        Build a per-ticker dictionary of compact macro forecast metrics.
-
-        Returns
-        -------
-        dict[str, dict[str, float]]
-            Each ticker mapped to the output of `get_base_macro_fc(...)`.
-
-        Notes
-        -----
-        - Applies COUNTRY_FALLBACK (e.g., 'Guernsey' → 'United Kingdom', 'Taiwan' → 'China').
+                Build a per-ticker dictionary of compact macro forecast metrics.
+        
+                Returns
+                -------
+                dict[str, dict[str, float]]
+                    Each ticker mapped to the output of `get_base_macro_fc(...)`.
+        
+                Notes
+                -----
+                - Applies COUNTRY_FALLBACK (e.g., 'Guernsey' → 'United Kingdom', 'Taiwan' → 'China').
+                
         """
   
         records: dict[str, dict[str, float]] = {}
@@ -996,8 +1108,8 @@ class MacroData:
       
             records.append({
                 'Currency Pair': pair,
-                'GBP-X Today':   curr_rate,
-                'GBP-X Q1/26':   fut_rate,
+                'GBP-X Today': curr_rate,
+                f'GBP-X {future_col}': fut_rate,
                 'Pred Change (%)': pct_change,
             })
             
