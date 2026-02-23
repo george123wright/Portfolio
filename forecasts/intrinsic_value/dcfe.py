@@ -211,9 +211,9 @@ import pandas as pd
 import numpy as np
 import logging
 from typing import List
-from financial_forecast_data5 import FinancialForecastData
-from fast_regression6 import HuberENetCV
-from export_forecast import export_results 
+from data_processing.financial_forecast_data import FinancialForecastData
+from functions.fast_regression import HuberENetCV
+from functions.export_forecast import export_results 
 
 from sklearn.model_selection import TimeSeriesSplit
 import itertools
