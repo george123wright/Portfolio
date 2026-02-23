@@ -185,23 +185,23 @@ Reproducibility notes
 import re
 import time
 import logging
-import requests
+import requests  
 import pandas as pd
-from collections import Counter
+from collections import Counter 
 from typing import List, Dict, Any
 
-from nltk.sentiment import SentimentIntensityAnalyzer
+from nltk.sentiment import SentimentIntensityAnalyzer    
 import nltk
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill
 from openpyxl.formatting.rule import CellIsRule
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import get_column_letter 
 from openpyxl.worksheet.table import Table, TableStyleInfo
 import config
 
 
 nltk.download('vader_lexicon', quiet = True)
-
+ 
 logger = logging.getLogger(__name__)
 
 logger.setLevel(logging.INFO)
@@ -233,7 +233,7 @@ STOPWORDS = {
     "it", 
     "by", 
     "from", 
-    "are", 
+    "are",  
     "an",
     "i",
     "you",
@@ -389,7 +389,9 @@ def get_wsb_posts(
     Network / Robustness
     --------------------
     - Uses a desktop-style `User-Agent`.
+   
     - Wraps `requests.get(...).raise_for_status()` in try/except and logs on failure.
+   
     - Endpoint: ``https://www.reddit.com/r/wallstreetbets/.json?limit={limit}``
 
     Notes
@@ -445,27 +447,35 @@ def get_comments_for_post(
     Network / Backoff
     -----------------
     - Endpoint: ``https://www.reddit.com/r/wallstreetbets/comments/{post_id}/.json``
+    
     - Retries up to `max_retries = 2` times with simple exponential backoff
     (sleep 5s, then 10s) when a 429 (rate limit) is detected.
+    
     - Other HTTP exceptions are logged and cause an early return [].
 
     Implementation details
     ----------------------
     The Reddit comments JSON is a list of two listings:
+   
     1) the post
+   
     2) the comments tree
 
     We extract the second element, traverse `data.children` recursively, and collect
     comment bodies where `kind == "t1"`.
 
     Pseudocode of recursion:
+      
         - If node.kind != 't1' → skip
+      
         - Append `node.data.body` if present
+      
         - If `node.data.replies` is a dict, recurse into `replies.data.children`
 
     Caveats
     -------
     - Deleted/removed comments may have empty or missing `body`.
+    
     - Deeply nested threads are handled, but the total comment count is subject
     to Reddit's collapsed/continued threads behavior in the JSON view.
     """
@@ -579,14 +589,19 @@ def extract_tickers(
         Method
         ------
         - Regex pattern: ``r'\\b[A-Z]{2,5}\\b'``
+       
         * ``\\b`` are word boundaries to avoid partial matches.
+       
         * ``[A-Z]{2,5}`` restricts to 2–5 uppercase letters (e.g., 'AAPL', 'TSLA').
+       
         - Post-filter to drop false positives using the curated `NOTTICKERS` set.
 
         Limitations
         -----------
         - Symbols with dots/hyphens (e.g., 'BRK.B', 'RDS-A', 'SHOP.TO') are **not** captured.
+       
         - Multi-word tickers or casings with lowercase letters are excluded.
+       
         - This is intentionally conservative; expand the regex and false-positive filters
         if you target international symbols or more exotic tickers.
         """
@@ -621,6 +636,7 @@ def extract_words(
     - This is a lightweight tokeniser for bag-of-words features (e.g., top-3
     words per ticker). It intentionally avoids stemming/lemmatisation to keep
     the vocabulary interpretable.
+    
     - Emojis, punctuation-only tokens, and URLs are effectively discarded by the regex.
     """
 
@@ -646,7 +662,9 @@ def format_sheet_as_table(
     Effects
     -------
     - Wraps the used range A1:({last_col}{last_row}) in an Excel table.
+    
     - Applies `TableStyleMedium9` with row striping.
+   
     - Saves the workbook in-place.
 
     Returns
@@ -656,6 +674,7 @@ def format_sheet_as_table(
     Robustness
     ----------
     - If the sheet does not exist, logs a warning and returns.
+    
     - Any exception during workbook operations is caught and logged.
 
     Notes
@@ -1026,4 +1045,3 @@ def main() -> None:
 if __name__ == "__main__":
     
     main()
-
