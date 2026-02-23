@@ -97,15 +97,11 @@ Let E denote equity market value (MCAP) and D the market value of debt. With a s
 cost of equity `coe` and after-tax cost of debt `cod`, the weighted average cost of
 capital is
 
-    V = E + D,       
-    
-    WACC = (coe · E / V) + (cod · D / V).
+    V = E + D,       WACC = (coe · E / V) + (cod · D / V).
 
 For the date grid of forecast periods with year fractions τ_t, the discount factors are
 
-    D_t = 1 / (1 + WACC)^{τ_t} 
-    
-        = exp( − τ_t · log(1+WACC) ).
+    D_t = 1 / (1 + WACC)^{τ_t} = exp( − τ_t · log(1+WACC) ).
 
 Terminal Value by Multiples
 ---------------------------
@@ -115,22 +111,18 @@ scenario c and family f is
     TV_f(c) = m_f · B_f(c),
 
 which is then discounted by D_Terminal = (1+WACC)^T (or equivalently exp(T · log(1+WACC))).
-O
-nly positive multiples and positive bases are used. In particular, for the earnings
+Only positive multiples and positive bases are used. In particular, for the earnings
 route the base is EPS_T(c) · Shares, and the route is enabled only if EPS_T(c) > 0.
-Other bases are Revenue_T(c), FCF_T(c), EBITDA_T(c), EBIT_T(c). 
-
-Available multiple families are EV/Sales, EV/Earnings, EV/FCF, EV/EBITDA, EV/EBIT; families 
-depending on EBITDA or EBIT are only used if the corresponding FCFF recipe is feasible.
+Other bases are Revenue_T(c), FCF_T(c), EBITDA_T(c), EBIT_T(c). Available multiple
+families are EV/Sales, EV/Earnings, EV/FCF, EV/EBITDA, EV/EBIT; families depending on
+EBITDA or EBIT are only used if the corresponding FCFF recipe is feasible.
 
 Uncertainty Aggregation
 -----------------------
 Let disc_ff be the discounted FCFF tensor of shape (M, C, T) over methods M and scenarios C.
-
-The present value per method–scenario is PV^{(m)}(c) = ∑_t disc_ff^{(m)}_t(c).
-
-For each terminal route r, the discounted terminal value TV_r(c) is computed. The per-share 
-price for route r, method m, scenario c is obtained by converting enterprise value to equity
+The present value per method–scenario is PV^{(m)}(c) = ∑_t disc_ff^{(m)}_t(c). For each
+terminal route r, the discounted terminal value TV_r(c) is computed. The per-share price
+for route r, method m, scenario c is obtained by converting enterprise value to equity
 value using a ticker-specific ratio (MC/EV) and dividing by shares outstanding:
 
     Price_{r,m}(c) = [ PV^{(m)}(c) + TV_r(c) ] · ( MC / EV ) / Shares.
@@ -153,16 +145,23 @@ from __future__ import annotations
 
 import logging
 import numpy as np
-import pandas as pd
-import datetime as dt
+import pandas as pd 
 import itertools
 from sklearn.model_selection import TimeSeriesSplit
 
 from functions.fast_regression import HuberENetCV  
 from functions.export_forecast import export_results
 from data_processing.financial_forecast_data import FinancialForecastData
-import config
+import config 
 
+from pathlib import Path
+import beta_cache as bc
+
+RUN_REGRESSION = True 
+
+BETA_CACHE_MODEL = "dcf"
+
+BETA_CACHE_FILE = Path(config.BETA_CACHE_FILE)
 
 pd.set_option("future.no_silent_downcasting", True)
 
@@ -475,7 +474,7 @@ def fcff_methods(
 
     and, if wc_alpha is present,
 
-        ΔRev_t = Revenue_t − Revenue_{t−1}   (ΔRev_1 = 0),
+        ΔRev_t = Revenue_t − Revenue_{t−1}   (ΔRev_1 = 0), 
 
         CWC_t  = clip( wc_alpha · ΔRev_t,  −wc_clip_frac · Revenue_t,  +wc_clip_frac · Revenue_t ).
 
@@ -655,9 +654,13 @@ def _regression(
     capex_rev_ratio: float,
     shares_out: float,
     cv: HuberENetCV,
+    *,
+    betas_by_key: dict | None = None,
 ):
     """
     Run the regression layer and build FCFF paths and terminal bases.
+    
+    If betas_by_key is provided, regression fitting is skipped and cached betas are used.
 
     Steps
     -----
@@ -681,23 +684,25 @@ def _regression(
   
     """    
   
-    X, y_dict, cv_splits = _prepare_regression_data(
-        regression_data = regression_data
-    )
+    if betas_by_key is None:
+        
+        X, y_dict, cv_splits = _prepare_regression_data(
+            regression_data = regression_data
+        )
 
-    betas_by_key, best_lambda, best_alpha, best_M = cv.fit_joint(
-        X = X,
-        y_dict = y_dict,
-        constrained_map = CONSTRAINED_MAP,
-        cv_splits = cv_splits,
-        scorer = None, 
-    )
-    
+        betas_by_key, best_lambda, best_alpha, best_M = cv.fit_joint(
+            X = X,
+            y_dict = y_dict,
+            constrained_map = CONSTRAINED_MAP,
+            cv_splits = cv_splits,
+            scorer = None,
+        )
+
     REVS, EPS = _build_rev_eps_grid(
         forecast_df = forecast_df,
         years = years,
     )
-    
+
     wc_alpha = _calc_wc_alpha(
         regression_data = regression_data
     )
@@ -710,7 +715,7 @@ def _regression(
         shares_out = shares_out,
         wc_alpha = wc_alpha,
     )
-    
+
     return valid_ff, terminals, allowed
 
 
@@ -978,7 +983,7 @@ def build_DCF(
     se : float
   
         Aggregate standard error proxy on the per-share scale.
-   
+    
     """
     
     mv_debt_t = float(kpis["market_value_debt"].iat[0])
@@ -1016,9 +1021,9 @@ def build_DCF(
 
     dcf = sum_ff[None, :, :] + tv_disc_all[:, None, :]    
     
-    se_by_year = np.std(disc_ff, axis = (0, 1), ddof = 1) / np.sqrt(na)  
+    se_by_year = np.nanstd(disc_ff, axis = (0, 1), ddof = 1) / np.sqrt(na)  
         
-    tv_se = np.std(tv_disc_all, ddof = 1) / np.sqrt(float(forecast_df['num_analysts'].iat[-1]))
+    tv_se = np.nanstd(tv_disc_all, ddof = 1) / np.sqrt(float(forecast_df['num_analysts'].iat[-1]))
     
     mc_ev_shares = mc_ev / shares_out
     
@@ -1053,6 +1058,7 @@ def main():
     4) Assemble a DataFrame of valuation summaries indexed by ticker.
    
     """
+    
     tickers = list(config.tickers)
 
     latest_prices = r.last_price
@@ -1188,6 +1194,62 @@ def main():
         
         shares_out_t = float(shares_outstanding[ticker])
         
+        if not RUN_REGRESSION:
+           
+            betas_by_key = bc.get_betas(
+                path = BETA_CACHE_FILE, 
+                model_key = BETA_CACHE_MODEL, 
+                ticker = ticker
+            )
+          
+            if betas_by_key is None:
+          
+                logger.warning("%s: missing cached betas for dcf23. Set RUN_REGRESSION=True once to populate cache. Skipping.", ticker)
+                
+                _zero_dicts(
+                    ticker = ticker
+                )
+                
+                continue
+
+            missing_keys = [k for k in KEYS if k not in betas_by_key]
+           
+            if missing_keys:
+           
+                logger.warning("%s: cached betas missing keys %s. Set RUN_REGRESSION=True once to refresh cache. Skipping.", ticker, missing_keys)
+           
+                _zero_dicts(
+                    ticker = ticker
+                )
+           
+                continue
+
+        else:
+
+            X, y_dict, cv_splits = _prepare_regression_data(
+                regression_data = regression_data
+            )
+
+            betas_by_key, best_lambda, best_alpha, best_M = cv.fit_joint(
+                X = X,
+                y_dict = y_dict,
+                constrained_map = CONSTRAINED_MAP,
+                cv_splits = cv_splits,
+                scorer = None,
+            )
+
+            bc.upsert_betas(
+                path = BETA_CACHE_FILE,
+                model_key = BETA_CACHE_MODEL,
+                ticker = ticker,
+                betas_by_key = betas_by_key,
+                meta = {
+                    "best_lambda": float(best_lambda),
+                    "best_alpha": float(best_alpha),
+                    "best_M": float(best_M),
+                },
+            )
+
         valid_ff, terminals, allowed = _regression(
             regression_data = regression_data,
             years = years,
@@ -1195,6 +1257,7 @@ def main():
             capex_rev_ratio = capex_rev_ratio,
             shares_out = shares_out_t,
             cv = cv,
+            betas_by_key = betas_by_key,   
         )
 
         if not valid_ff:
@@ -1294,3 +1357,4 @@ def main():
 if __name__ == "__main__":
     
     main()
+
