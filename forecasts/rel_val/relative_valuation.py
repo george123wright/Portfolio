@@ -8,7 +8,6 @@ import pandas as pd
 from pbv import bvps
 import config
 
-
 def rel_val_model(
     low_eps: float, 
     avg_eps: float, 
@@ -39,10 +38,13 @@ def rel_val_model(
     bvps_0: float,
     dps: float,
     shares_outstanding: int,
-    price: float
+    price: float,
+    discount_rate: float
 ) -> tuple[float, float, float, float, float]:
     """
     Composite relative valuation blending P/E, P/B (forward BVPS), Graham, P/S, and EV/Sales.
+    
+    All prices are discounted by the discount rate.
 
     We generate a panel of implied prices from the following models:
 
@@ -144,7 +146,9 @@ def rel_val_model(
     Notes
     -----
     • All EPS and revenue inputs are cast to float and NaNs dropped per scenario list.
+    
     • The Graham component uses the same BVPS_next as the P/B component.
+        
     """
     
     low_eps = float(low_eps)
@@ -252,6 +256,8 @@ def rel_val_model(
                 prices.append(price_i)
             
     if prices:
+        
+        prices = prices / (1 + discount_rate)
      
         price_low = np.min(prices)
      
