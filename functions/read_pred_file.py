@@ -2,14 +2,18 @@ import pandas as pd
 from typing import Dict
 from functions.export_forecast import export_results
 from data_processing.ratio_data import RatioData
-import config
-
+import config 
+ 
 
 SHEET_NAMES = [
     "DCF",
     "DCFE",
     "RI",
-    "SARIMAX Monte Carlo",
+    "DCF_CapIQ",
+    "FCFE_CapIQ",
+    "DDM_CapIQ",
+    "RI_CapIQ",
+    "SARIMAX Monte Carlo", 
     "Prophet Pred",
     "Prophet PCA",
     "LSTM_DirectH",
@@ -43,7 +47,9 @@ def _read_model_sheets() -> Dict[str, pd.DataFrame]:
     }
 
 
-def clean_headers(cols):
+def clean_headers(
+    cols
+):
    
     seen, out = set(), []
    
@@ -122,7 +128,8 @@ def _add_prices_and_metrics(
 
 
     def _apply_return_and_se(
-        df: pd.DataFrame
+        df: pd.DataFrame,
+        se_ret: bool = True
     ) -> None:
    
         cp = latest_prices.reindex(df.index)
@@ -134,8 +141,12 @@ def _add_prices_and_metrics(
         if "Avg Price" in df.columns:
 
             df.loc[valid, "Returns"] = df.loc[valid, "Avg Price"].div(cp[valid]).sub(1.0)
+            
+        if "Price" in df.columns:
 
-        if "SE" in df.columns:
+            df.loc[valid, "Returns"] = df.loc[valid, "Price"].div(cp[valid]).sub(1.0)
+
+        if "SE" in df.columns and not se_ret:
 
             df.loc[:, "SE"] = pd.to_numeric(df["SE"], errors = "coerce")
 
@@ -145,6 +156,15 @@ def _add_prices_and_metrics(
       
         if key in dfs:
       
+            _apply_return_and_se(
+                df = dfs[key],
+                se_ret = False
+            )
+            
+    for key in ("DCF_CapIQ", "FCFE_CapIQ", "DDM_CapIQ", "RI_CapIQ"):
+       
+        if key in dfs:
+       
             _apply_return_and_se(
                 df = dfs[key]
             )
@@ -242,6 +262,10 @@ def process_and_export_forecasts(
         "DCF": "DCF",
         "DCFE": "DCFE",
         "RI": "RI",
+        "DCF_CapIQ": "DCF CapIQ",
+        "FCFE_CapIQ": "FCFE CapIQ",
+        "DDM_CapIQ": "DDM CapIQ",
+        "RI_CapIQ": "RI CapIQ",
         "SARIMAX Monte Carlo": "SARIMAX Monte Carlo",
         "Prophet Pred": "Prophet Pred",
         "Prophet PCA": "Prophet PCA",
@@ -265,7 +289,7 @@ def process_and_export_forecasts(
     for name, df in sheets.items():
         
         df.columns = clean_headers(
-            cols = df.columns
+            cols = df.columns 
         )
         
         assert df.columns.is_unique
