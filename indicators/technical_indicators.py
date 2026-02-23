@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 """
-Indicator-driven signal calibration, backtesting, and composite scoring.
+Indicator-driven signal calibration, backtesting, and composite scoring. 
 
-Overview
+Overview 
 --------
 This module implements a complete pipeline for:
 
@@ -14,7 +14,7 @@ This module implements a complete pipeline for:
 3) grid-search calibration of indicator parameters per ticker subject to
    statistical significance gates,
 
-4) converting indicator "pulses" into persistent positions with explicit
+4) converting indicator "pulses" into persistent positions with explicit 
    rules for signal lag, cooldown, and pulse conflicts,
 
 5) evaluating performance (Sharpe ratio, t-statistic, and one-sided p-value),
@@ -321,9 +321,7 @@ from openpyxl.formatting.rule import CellIsRule
 
 from numba import njit, prange
 
-from math import erfc
-
-import json
+import json 
 import config
 
 
@@ -332,6 +330,7 @@ UPDATE_PARAM: bool = False
 CONFLICT_MODE: str = "sell_wins"  
 
 SIGNIFICANCE_ALPHA = 0.05
+
 MIN_SHARPE_FOR_SIG = 0.30
 
 USE_COARSE_SCREEN: bool = False           
@@ -488,9 +487,9 @@ COOLDOWN_BARS: int = 0
 CALIB_COLS = [
     "Ticker", "Indicator", "ParamJSON", "Weight",
     "Sharpe", "SharpeBH", "TStat", "PValue", "NTrades",
+    "Indicator Value",          
     "Start", "End", "LastUpdated"
 ]
-
 
 logger = logging.getLogger(__name__)
 
@@ -581,7 +580,7 @@ def read_sheet(
     """
 
     try:
-
+ 
         df = pd.read_excel(excel_file, sheet_name=sheet, index_col = 0, header = 0, parse_dates = True)
 
     except Exception as exc:
@@ -638,6 +637,74 @@ def load_data(
     return out
 
 
+def _align_ohlcv(
+    h: pd.Series,
+    l: pd.Series,
+    c: pd.Series,
+    v: pd.Series
+) -> tuple[pd.Series, pd.Series, pd.Series, pd.Series]:
+    """
+    Strictly align OHLCV series on a shared DatetimeIndex.
+
+    Behavior
+    --------
+    - Validates each input has a datetime-like index.
+    - Drops duplicate timestamps per series with `keep="last"`.
+    - Sorts each series by index ascending.
+    - Takes an inner intersection across High/Low/Close/Volume indexes.
+    - Returns all four series reindexed to that common index.
+
+    Raises
+    ------
+    ValueError
+        If any input has a non-datetime index, or if the common intersection is
+        empty after alignment.
+    """
+
+    def _dedupe(
+        s: pd.Series,
+        name: str
+    ) -> pd.Series:
+    
+        if not pd.api.types.is_datetime64_any_dtype(s.index):
+    
+            raise ValueError(f"{name} series index is not datetime")
+    
+        if s.index.has_duplicates:
+    
+            s = s[~s.index.duplicated(keep = "last")]
+    
+        return s.sort_index()
+
+    h2 = _dedupe(
+        s = h, 
+        name = "High"
+    )
+    
+    l2 = _dedupe(
+        s = l, 
+        name = "Low"
+    )
+    
+    c2 = _dedupe(
+        s = c, 
+        name = "Close"
+    )
+    
+    v2 = _dedupe(
+        s = v, 
+        name = "Volume"
+    )
+
+    common_idx = h2.index.intersection(l2.index).intersection(c2.index).intersection(v2.index).sort_values()
+
+    if common_idx.empty:
+    
+        raise ValueError("No common dates across High/Low/Close/Volume after alignment")
+
+    return h2.reindex(common_idx), l2.reindex(common_idx), c2.reindex(common_idx), v2.reindex(common_idx)
+
+
 def _excel_safe_datetimes(
     df: pd.DataFrame
 ) -> pd.DataFrame:
@@ -653,7 +720,9 @@ def _excel_safe_datetimes(
     -------
     pd.DataFrame
         Copy of `df` with:
+    
         - tz-aware pandas datetime columns converted to UTC then made tz-naive.
+    
         - object columns that contain datetime/timestamp objects coerced similarly.
 
     Why
@@ -668,7 +737,9 @@ def _excel_safe_datetimes(
         ts_utc_naive = ts.dt.tz_convert("UTC").dt.tz_localize(None)
 
     For object columns, each element `x` is mapped:
+  
     - if `x` is pd.Timestamp with tz: `x.tz_convert("UTC").tz_localize(None)`
+  
     - if `x` is datetime with tzinfo: `x.astimezone(UTC).replace(tzinfo=None)`
     - otherwise left unchanged.
     """
@@ -913,6 +984,97 @@ def _neighbor_window(
     return arr[lo: hi]
 
 
+def _to_int_or_default(
+    value, 
+    default: int
+) -> int:
+    """
+    Convert `value` to int with null/parse-safe fallback.
+
+    NaN-like values return `default`. String/float numerics are accepted when
+    possible; unparseable inputs return `default`.
+    """
+
+    if pd.isna(value):
+  
+        return int(default)
+  
+    try:
+  
+        return int(value)
+  
+    except Exception:
+  
+        try:
+  
+            return int(float(value))
+  
+        except Exception:
+  
+            return int(default)
+
+
+def _to_float_or_default(
+    value, 
+    default: float
+) -> float:
+    """
+    Convert `value` to float with null/parse-safe fallback.
+
+    NaN-like or unparseable values return `default`.
+    """
+
+    if pd.isna(value):
+
+        return float(default)
+
+    try:
+
+        return float(value)
+
+    except Exception:
+
+        return float(default)
+
+
+def _to_json_obj_or_default(
+    value,
+    default: dict
+) -> dict:
+    """
+    Parse a JSON object from `value` with defensive fallback.
+
+    Returns `default` for NaN/empty strings, invalid JSON, or valid JSON that is
+    not a dictionary.
+    """
+
+    if pd.isna(value):
+
+        return dict(default)
+
+    s = str(value).strip()
+
+    if not s:
+
+        return dict(default)
+
+    try:
+
+        parsed = json.loads(s)
+
+    except Exception:
+
+        return dict(default)
+
+    if isinstance(parsed, dict):
+        
+        return parsed  
+    
+    else:
+    
+        return dict(default)
+
+
 def load_calibration_map() -> dict[str, dict[str, dict]]:
     """
     Load the saved calibration table and convert it into a nested dictionary.
@@ -941,7 +1103,10 @@ def load_calibration_map() -> dict[str, dict[str, dict]]:
     
     - Indicator keys are normalised to lower case to ensure consistent lookups.
     
-    - All numeric fields are coerced to their primitive types with sensible defaults.
+    - Rows with missing/blank ticker or indicator are skipped.
+
+    - All numeric fields are parsed via null-safe coercion helpers so valid zeros
+      (e.g., 0 or 0.0) are preserved rather than replaced by defaults.
     """
     
     df = load_calibration_df()
@@ -949,28 +1114,66 @@ def load_calibration_map() -> dict[str, dict[str, dict]]:
     out: dict[str, dict[str, dict]] = {}
    
     for _, row in df.iterrows():
-   
-        tk = str(row["Ticker"])
-   
-        raw = row.get("ParamJSON")
-   
-        s = "" if pd.isna(raw) else str(raw)
-   
-        try:
-   
-            params = json.loads(s) if s else {}
-   
-        except Exception:
-   
-            params = {}
-   
-        out.setdefault(tk, {})[str(row["Indicator"]).lower()] = {
+      
+        tk_raw = row.get("Ticker")
+      
+        ind_raw = row.get("Indicator")
+
+        if pd.isna(tk_raw) or pd.isna(ind_raw):
+      
+            continue
+
+        tk = str(tk_raw).strip()
+      
+        ind = str(ind_raw).strip().lower()
+
+        if not tk or not ind:
+      
+            continue
+
+        params = _to_json_obj_or_default(
+            value = row.get("ParamJSON"),
+            default = {}
+        )
+        
+        w =  _to_int_or_default(
+            value = row.get("Weight"),
+            default = 0
+        )
+        
+        sr = _to_float_or_default(
+            value = row.get("Sharpe"),
+            default = 0.0
+        )
+        
+        t = _to_float_or_default(
+            value = row.get("TStat"),
+            default = 0.0
+        ) 
+        
+        p = _to_float_or_default(
+            value = row.get("PValue"), 
+            default = 1.0
+        )
+        
+        n = _to_int_or_default(
+            value = row.get("NTrades"),
+            default = 0
+        )
+        
+        iv =  _to_float_or_default(
+            value = row.get("Indicator Value"),
+            default = np.nan
+        )
+
+        out.setdefault(tk, {})[ind] = {
             "params": params,
-            "weight": int(row.get("Weight", 0) or 0),
-            "sharpe": float(row.get("Sharpe", 0.0) or 0.0),
-            "t_stat": float(row.get("TStat", 0.0) or 0.0),
-            "p_value": float(row.get("PValue", 1.0) or 1.0),
-            "n_trades": int(row.get("NTrades", 0) or 0),
+            "weight": w,
+            "sharpe": sr,
+            "t_stat": t,
+            "p_value": p,
+            "n_trades": n,
+            "indicator_value": iv,
         }
         
     return out
@@ -1027,6 +1230,7 @@ def write_calibration_rows(
         df = new
   
     else:
+        
         old = old.reindex(columns = CALIB_COLS)
   
         key = ["Ticker", "Indicator"]
@@ -1129,7 +1333,7 @@ def save_scores(
        
         green = PatternFill("solid", start_color = "90EE90", end_color = "90EE90")
        
-        red  =  PatternFill("solid", start_color = "FFC7CE", end_color = "FFC7CE")
+        red = PatternFill("solid", start_color = "FFC7CE", end_color = "FFC7CE")
 
         last_col = get_column_letter(
             col_idx = ws.max_column
@@ -1139,7 +1343,7 @@ def save_scores(
         
         ws.conditional_formatting.add(rng, CellIsRule(operator = "greaterThan", formula = ["0"], fill = green))
         
-        ws.conditional_formatting.add(rng, CellIsRule(operator = "lessThan",  formula = ["0"], fill = red))
+        ws.conditional_formatting.add(rng, CellIsRule(operator = "lessThan", formula = ["0"], fill = red))
 
 
 def _build_gate(
@@ -1267,6 +1471,319 @@ def _mode_id(
     except KeyError:
 
         raise ValueError(f"Unknown CONFLICT_MODE: {mode}")
+
+
+def _indicator_value_and_live_mask(
+    name: str,
+    params: dict,
+    pc: Precomp,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Compute the per-bar indicator value series and a boolean mask flagging bars
+    where the indicator's entry condition is currently 'live'.
+
+    The 'value' is what will be reported in the Calibration sheet as
+    'Indicator Value' (last non-NaN value). The live mask is exposed for
+    diagnostics and optional downstream use; composite scoring in this module
+    currently uses weighted positions directly.
+
+    Indicator conventions
+    ---------------------
+    rsi:
+        value_t = RSI_t
+        long live when RSI_t < buy_thresh
+        short live when RSI_t > sell_thresh
+        live = (RSI_t < buy_thresh) or (RSI_t > sell_thresh)
+
+    mfi:
+        same pattern as RSI.
+
+    bb:
+        value_t = z_t = (Close_t - mid_t) / std_t  (distance in σ)
+        long live when z_t <= -num_std
+        short live when z_t >=  num_std
+
+    atr:
+        value_t = ATR_t
+        long live when Close_t > hi_prev_t + mult * ATR_{t-1}
+        short live when Close_t < lo_prev_t - mult * ATR_{t-1}
+
+    stoch:
+        value_t = %K_t
+        long live when %K_t < lower
+        short live when %K_t > upper
+
+    ema:
+        value_t = EMA_fast_t − EMA_slow_t
+        live when value_t ≠ 0 (fast above or below slow)
+
+    macd:
+        value_t = MACD_line_t − Signal_t
+        live when value_t ≠ 0 (MACD above or below signal)
+
+    vwap:
+        value_t = Close_t − RVWAP_t (difference to rolling VWAP)
+        live when Close_t ≠ RVWAP_t (above or below VWAP)
+
+    obv:
+        value_t = OBV_t
+        live when bullish or bearish divergence pattern is present
+        (same logic as the OBV pulse construction).
+    """
+   
+    name = name.lower()
+    
+    T = pc.c.shape[0]
+
+    values = np.full(T, np.nan, dtype = np.float64)
+    
+    live = np.zeros(T, dtype = bool)
+
+    if name == "rsi":
+       
+        window = int(params.get("window", RSI_WINDOW))
+       
+        rsi = _rsi_cached(
+            pc = pc,
+            window = window
+        )
+       
+        buy_thresh = float(params.get("buy_thresh", RSI_BUY_THRESH))
+       
+        sell_thresh = float(params.get("sell_thresh", RSI_SELL_THRESH))
+       
+        values = rsi.astype(np.float64)
+       
+        live = (~np.isnan(values)) & ((values < buy_thresh) | (values > sell_thresh))
+       
+        return values, live
+
+    if name == "mfi":
+
+        window = int(params.get("window", MFI_WINDOW))
+
+        mfi = _mfi_cached(
+            pc = pc,
+            window = window
+        )
+
+        buy_thresh = float(params.get("buy_thresh", MFI_BUY_THRESH))
+
+        sell_thresh = float(params.get("sell_thresh", MFI_SELL_THRESH))
+
+        values = mfi.astype(np.float64)
+
+        live = (~np.isnan(values)) & ((values < buy_thresh) | (values > sell_thresh))
+
+        return values, live
+
+    if name == "bb":
+
+        window = int(params.get("window", BB_WINDOW))
+
+        num_std = float(params.get("num_std", BB_STD))
+
+        mid, sd = _bb_cached(
+            pc = pc, 
+            window = window
+        )
+
+        with np.errstate(divide = "ignore", invalid = "ignore"):
+
+            z = (pc.c - mid) / sd
+
+        values = z.astype(np.float64)
+
+        live = (~np.isnan(values)) & ((values <= -num_std) | (values >= num_std))
+
+        return values, live
+
+    if name == "atr":
+
+        mult = float(params.get("mult", ATR_MULTIPLIER))
+
+        atr_window = int(params.get("atr_window", ATR_WINDOW))
+
+        break_window = int(params.get("break_window", ATR_BREAK_WINDOW))
+
+        atr = _atr_cached(
+            pc = pc, 
+            window = atr_window
+        )
+
+        hi_prev, lo_prev = _break_cached(
+            pc = pc,
+            window = break_window
+        )
+
+        atr_prev = np.roll(atr, 1)
+
+        atr_prev[0] = np.nan
+
+        up_th = hi_prev + mult * atr_prev
+
+        dn_th = lo_prev - mult * atr_prev
+
+        c = pc.c.astype(np.float64)
+
+        values = atr.astype(np.float64)
+
+        live = (
+            np.isfinite(c)
+            & np.isfinite(up_th)
+            & np.isfinite(dn_th)
+            & ((c > up_th) | (c < dn_th))
+        )
+      
+        return values, live
+
+    if name == "stoch":
+    
+        k = pc.stoch_k.astype(np.float64)
+    
+        lower = float(params.get("lower", 20.0))
+    
+        upper = float(params.get("upper", 80.0))
+    
+        values = k
+    
+        live = (~np.isnan(values)) & ((values < lower) | (values > upper))
+    
+        return values, live
+
+    if name == "ema":
+
+        fast = int(params.get("fast", EMA_FAST))
+
+        slow = int(params.get("slow", EMA_SLOW))
+
+        ef = _ema_cached(
+            pc = pc,
+            span = fast
+        )
+
+        es = _ema_cached(
+            pc = pc,
+            span = slow
+        )
+
+        spread = ef - es
+
+        values = spread.astype(np.float64)
+
+        live = np.isfinite(values) & (values != 0.0)
+       
+        return values, live
+
+    if name == "macd":
+
+        fast = int(params.get("fast", EMA_FAST))
+
+        slow = int(params.get("slow", EMA_SLOW))
+
+        sig_span = int(params.get("signal", 9))
+
+        line, sig = _macd_signal_cached(
+            pc = pc, 
+            fast = fast,
+            slow = slow, 
+            signal = sig_span
+        )
+
+        spread = line - sig
+
+        values = spread.astype(np.float64)
+
+        live = np.isfinite(values) & (values != 0.0)
+
+        return values, live
+
+    if name == "vwap":
+
+        window = int(params.get("window", VWAP_WINDOW))
+
+        num = _rolling_sum_from_cumsum(
+            cs = pc._cs_pv, 
+            w = window
+        )
+
+        den = _rolling_sum_from_cumsum(
+            cs = pc._cs_v,
+            w = window
+        )
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+
+            rvwap = num / den
+
+        c = pc.c.astype(np.float64)
+
+        values = c - rvwap
+
+        live = np.isfinite(rvwap) & (c != rvwap)
+
+        return values, live
+
+    if name == "obv":
+
+        lookback = int(params.get("lookback", OBV_LOOKBACK))
+
+        obv = pc.obv.astype(np.float64)
+
+        price_low_prev, price_high_prev = _price_extrema_cached(
+            pc = pc, 
+            window = lookback
+        )
+
+        obv_low_prev, obv_high_prev = _obv_extrema_cached(
+            pc = pc, 
+            window = lookback
+        )
+
+        c = pc.c[:, None].astype(np.float64)
+
+        obv2 = obv[:, None]
+
+        buy_div = (c < price_low_prev) & (obv2 >= obv_low_prev)
+
+        sell_div = (c > price_high_prev) & (obv2 <= obv_high_prev)
+
+        values = obv
+
+        live = (buy_div | sell_div).reshape(-1)
+
+        return values, live
+
+    return values, live
+
+
+def _last_indicator_value(
+    name: str,
+    params: dict,
+    pc: Precomp
+) -> float:
+    """
+    Convenience wrapper: return the last non-NaN indicator value for this
+    ticker/indicator/parameter set, or NaN if unavailable.
+    """
+ 
+    values, _ = _indicator_value_and_live_mask(
+        name = name, 
+        params = params, 
+        pc = pc
+    )
+ 
+    if values.size == 0:
+ 
+        return float("nan")
+ 
+    mask = np.isfinite(values)
+ 
+    if not mask.any():
+ 
+        return float("nan")
+ 
+    return float(values[mask][-1])
 
 
 def crosses_over(
@@ -1965,8 +2482,28 @@ def precompute_all(
     Indicator grid scans revisit the same rolling transforms many times. Centralising
     them reduces asymptotic cost from O(K * T) to O(T) for each distinct parameter,
     and allows vectorised or Numba kernels to operate on contiguous arrays.
+
+    Preconditions
+    -------------
+    Inputs must already be aligned and clean:
+    - identical DatetimeIndex across h/l/c/v,
+    - no duplicate timestamps,
+    - monotonic increasing index.
+    Use `_align_ohlcv` upstream to enforce this.
     """
-   
+
+    if not (h.index.equals(l.index) and h.index.equals(c.index) and h.index.equals(v.index)):
+
+        raise ValueError("OHLCV series must share identical DatetimeIndex; align with _align_ohlcv first")
+
+    if c.index.has_duplicates:
+
+        raise ValueError("OHLCV index contains duplicate timestamps; dedupe before precompute_all")
+
+    if not c.index.is_monotonic_increasing:
+
+        raise ValueError("OHLCV index must be strictly sorted ascending")
+
     idx = c.index
 
     c_np = c.to_numpy(np.float64)
@@ -2639,20 +3176,7 @@ def eval_bb_grid(
         c2 = pc.c[:, None]
       
         c2_prev = np.roll(c2, 1, axis=0); c2_prev[0, :] = np.nan
-      
-        buy_mat  = crosses_over_prerolled(
-            x = c2,
-            x_prev = c2_prev, 
-            y = lower,
-            y_prev = np.roll(lower, 1, axis = 0)
-        )
-      
-        sell_mat = crosses_under_prerolled(
-            x = c2,
-            x_prev = c2_prev, 
-            y = upper, 
-            y_prev = np.roll(upper, 1, axis = 0)
-        )
+
         lower_prev = np.roll(lower, 1, axis = 0)
         
         lower_prev[0, :] = np.nan
@@ -2912,20 +3436,17 @@ def eval_mfi_cartesian_kernel(
 
     Outputs
     -------
-    sharpe, tstat, pval : float64[Nb, Ns]
-        Annualised Sharpe, one-sided t-statistic, and corresponding p-value for each grid point.
+    sharpe, tstat : float64[Nb, Ns]
+        Annualised Sharpe and one-sided t-statistic for each grid point.
     flips : int32[Nb, Ns]
         Number of position flips.
     n_valid : int
         Number of valid daily returns used (shared across grid points).
 
-    Statistical Formulas
-    --------------------
-    - Sharpe = sqrt(A) * mean(X) / std(X).
-    
-    - t = mean(X) / (std(X) / sqrt(n)).
-    
-    - p = 0.5 * erfc( max(t, 0) / sqrt(2) )  (numerically stable one-sided p-value).
+    Notes
+    -----
+    This kernel intentionally does not compute p-values. Callers derive one-sided
+    Student-t p-values from `tstat` and `n_valid`.
     """
 
     T = mfi.shape[0]
@@ -2937,8 +3458,6 @@ def eval_mfi_cartesian_kernel(
     sharpe = np.full((Nb, Ns), -np.inf)
   
     tstat = np.zeros((Nb, Ns))
-  
-    pval = np.ones((Nb, Ns))
   
     flips = np.zeros((Nb, Ns), dtype = np.int32)
 
@@ -2970,8 +3489,6 @@ def eval_mfi_cartesian_kernel(
         
             prev_pos = 0
         
-            prev_val = np.nan
-        
             pos_series = np.zeros(T, np.int8)
 
             for t in range(T):
@@ -2985,12 +3502,16 @@ def eval_mfi_cartesian_kernel(
                 if tt >= 0 and cool == 0:
                 
                     cur = mfi[tt]
-                
-                    if not np.isnan(cur) and not np.isnan(prev_val):
-                
-                        b = (cur > bt) and (prev_val <= bt)
-                
-                        s = (cur < st) and (prev_val >= st)
+
+                    if tt - 1 >= 0:
+
+                        prev = mfi[tt - 1]
+
+                        if not np.isnan(cur) and not np.isnan(prev):
+
+                            b = (cur > bt) and (prev <= bt)
+
+                            s = (cur < st) and (prev >= st)
                 
                 if cool > 0:
                 
@@ -3032,8 +3553,6 @@ def eval_mfi_cartesian_kernel(
              
                 prev_pos = pos_series[t]
 
-                prev_val = mfi[t]  
-
             mean = 0.0
             
             m2 = 0.0
@@ -3060,8 +3579,6 @@ def eval_mfi_cartesian_kernel(
              
                 tstat[ib, is_] = 0.0
              
-                pval[ib, is_] = 1.0
-             
                 flips[ib, is_] = flips_count
              
                 continue
@@ -3076,8 +3593,6 @@ def eval_mfi_cartesian_kernel(
             
                 tstat[ib, is_] = 0.0
             
-                pval[ib, is_] = 1.0
-            
                 flips[ib, is_] = flips_count
             
                 continue
@@ -3090,15 +3605,9 @@ def eval_mfi_cartesian_kernel(
             
             tstat[ib, is_] = t
             
-            z = max(t, 0.0)
-            
-            p = 0.5 * erfc(z / np.sqrt(2.0))
-            
-            pval[ib, is_] = p
-            
             flips[ib, is_] = flips_count
 
-    return sharpe, tstat, pval, flips, n_valid
+    return sharpe, tstat, flips, n_valid
 
 
 def eval_mfi_grid(
@@ -3124,8 +3633,11 @@ def eval_mfi_grid(
     2) Optionally apply the trend/volume gate by setting barred entries to NaN.
     
     3) Call the Numba kernel `eval_mfi_cartesian_kernel` over the buy/sell threshold grid.
+
+    4) Compute one-sided Student-t p-values from kernel t-statistics using
+       `df = max(n - 1, 1)`.
     
-    4) Collect statistics and identify the best configuration by `_best_index`,
+    5) Collect statistics and identify the best configuration by `_best_index`,
     optionally restricting search to the top-K Sharpe candidates for efficiency.
 
     Returns
@@ -3175,7 +3687,7 @@ def eval_mfi_grid(
     
             mfi[~gate] = np.nan
 
-        sr, tt, pv, flips, n = eval_mfi_cartesian_kernel(
+        sr, tt, flips, n = eval_mfi_cartesian_kernel(
             mfi = mfi,
             r = pc.r.astype(np.float64),
             buys = B,
@@ -3187,6 +3699,10 @@ def eval_mfi_grid(
             ),
             annualisation = float(ANNUALISATION)
         )
+
+        df_t = max(int(n) - 1, 1)
+
+        pv = stats.t.sf(np.maximum(tt, 0.0), df = df_t)
        
         Nb, Ns = sr.shape
        
@@ -3471,9 +3987,21 @@ def eval_rsi_cartesian_kernel(
   
     - t-statistic = mean(X) / (std(X) / sqrt(n)),
   
-    - one-sided p-value via erfc, and
-  
     - number of flips.
+
+    Outputs
+    -------
+    sharpe, tstat : float64[Nb, Ns]
+        Annualised Sharpe and one-sided t-statistic for each grid point.
+    flips : int32[Nb, Ns]
+        Number of position flips.
+    n_valid : int
+        Number of valid daily returns used (shared across grid points).
+
+    Notes
+    -----
+    This kernel intentionally does not compute p-values. Callers derive one-sided
+    Student-t p-values from `tstat` and `n_valid`.
 
     NaNs in RSI or returns suppress signal generation and contribution to statistics.
     """
@@ -3487,8 +4015,6 @@ def eval_rsi_cartesian_kernel(
     sharpe = np.full((Nb, Ns), -np.inf)
     
     tstat = np.zeros((Nb, Ns))
-    
-    pval = np.ones((Nb, Ns))
     
     flips = np.zeros((Nb, Ns), dtype = np.int32)
 
@@ -3520,8 +4046,6 @@ def eval_rsi_cartesian_kernel(
   
             prev_pos = 0
 
-            prev_rsi = np.nan
-  
             pos_series = np.zeros(T, np.int8)
 
             for t in range(T):
@@ -3535,12 +4059,16 @@ def eval_rsi_cartesian_kernel(
                 if tt >= 0 and cool == 0:
                 
                     cur = rsi[tt]
-                
-                    if not np.isnan(cur) and not np.isnan(prev_rsi):
-                
-                        b = (cur > bt) and (prev_rsi <= bt)
-                
-                        s = (cur < st) and (prev_rsi >= st)
+
+                    if tt - 1 >= 0:
+
+                        prev = rsi[tt - 1]
+
+                        if not np.isnan(cur) and not np.isnan(prev):
+
+                            b = (cur > bt) and (prev <= bt)
+
+                            s = (cur < st) and (prev >= st)
                 
                 if cool > 0:
                 
@@ -3582,8 +4110,6 @@ def eval_rsi_cartesian_kernel(
              
                 prev_pos = pos_series[t]
 
-                prev_rsi = rsi[t]  
-
             mean = 0.0
             
             m2 = 0.0
@@ -3610,8 +4136,6 @@ def eval_rsi_cartesian_kernel(
                
                 tstat[ib, is_] = 0.0
                
-                pval[ib, is_] = 1.0
-               
                 flips[ib, is_] = flips_count
                
                 continue
@@ -3626,8 +4150,6 @@ def eval_rsi_cartesian_kernel(
 
                 tstat[ib, is_] = 0.0
 
-                pval[ib, is_] = 1.0
-
                 flips[ib, is_] = flips_count
 
                 continue
@@ -3640,15 +4162,9 @@ def eval_rsi_cartesian_kernel(
 
             tstat[ib, is_] = t
 
-            z = max(t, 0.0)
-
-            p = 0.5 * erfc(z / np.sqrt(2.0))
-
-            pval[ib, is_] = p
-
             flips[ib, is_] = flips_count
 
-    return sharpe, tstat, pval, flips, n_valid
+    return sharpe, tstat, flips, n_valid
 
 
 def eval_rsi_grid(
@@ -3671,10 +4187,13 @@ def eval_rsi_grid(
 
     2) Invoke `eval_rsi_cartesian_kernel` for that window.
 
-    3) Concatenate window-level results and select the best configuration via
+    3) Compute one-sided Student-t p-values from kernel t-statistics using
+       `df = max(n - 1, 1)`.
+
+    4) Concatenate window-level results and select the best configuration via
     `_best_index`, favouring p < alpha and Sharpe >= minimum.
 
-    4) Return the best window and thresholds together with performance statistics.
+    5) Return the best window and thresholds together with performance statistics.
 
     Returns
     -------
@@ -3703,7 +4222,7 @@ def eval_rsi_grid(
        
         rsi = _rsi_cached(
             pc = pc,
-            windows = int(w)
+            window = int(w)
         ).astype(np.float64)
        
         if not gate.all():
@@ -3712,7 +4231,7 @@ def eval_rsi_grid(
        
             rsi[~gate] = np.nan
 
-        sr, tt, pv, flips, n = eval_rsi_cartesian_kernel(
+        sr, tt, flips, n = eval_rsi_cartesian_kernel(
             rsi = rsi,
             r = pc.r.astype(np.float64),
             buys = B,
@@ -3724,6 +4243,10 @@ def eval_rsi_grid(
             ),
             annualisation = float(ANNUALISATION)
         )
+
+        df_t = max(int(n) - 1, 1)
+
+        pv = stats.t.sf(np.maximum(tt, 0.0), df = df_t)
       
         Nb, Ns = sr.shape
       
@@ -4266,7 +4789,9 @@ def eval_vwap_grid(
         sells = sell_mat,
         signal_lag = signal_lag, 
         cooldown_bars = cooldown,
-        mode_id = _mode_id(conflict_mode)
+        mode_id = _mode_id(
+            mode = conflict_mode
+        )
     )
     
     sharpe, t_stat, p_val, n = _eval_stats_from_pos(
@@ -4603,53 +5128,88 @@ def _coarse_then_full_atr(
     Stage 1
     -------
     Scan coarse multipliers for each combination of `atr_win_grid` and `break_win_grid`;
-    select the best coarse configuration by Sharpe.
+    select the best coarse configuration by Sharpe, then apply the coarse
+    significance gate (`SCREEN_MIN_SHARPE`, `SCREEN_ALPHA`).
 
     Stage 2
     -------
-    Refine the multiplier over the full `ATR_MULT_GRID` while fixing the windows to
-    those that produced the best coarse result.
+    If coarse passes significance, refine the multiplier over the full
+    `ATR_MULT_GRID` while fixing windows to the best coarse pair. If coarse
+    fails, return the coarse result with `passed=False`.
 
     Returns
     -------
-    dict
-        Best refined configuration with keys: "atr_window", "break_window", "mult",
-        and associated statistics.
+    tuple[dict, bool]
+        (best_result, passed), where `passed` indicates whether the coarse
+        significance gate passed and refinement was executed. A deterministic
+        fallback result is returned with `passed=False` when grids are empty.
     """
+
+    fallback = {
+        "atr_window": int(ATR_WINDOW),
+        "break_window": int(ATR_BREAK_WINDOW),
+        "mult": float(ATR_MULTIPLIER),
+        "sharpe": float("-inf"),
+        "t_stat": 0.0,
+        "p_value": 1.0,
+        "n": 0,
+        "n_trades": 0,
+    }
 
     coarse_M = np.array(COARSE_GRIDS["atr"]["mult"], dtype = float)
   
+    atr_windows = list(np.array(atr_win_grid, dtype = int))
+  
+    break_windows = list(np.array(break_win_grid, dtype = int))
+
+    if (len(coarse_M) == 0) or (len(atr_windows) == 0) or (len(break_windows) == 0):
+
+        return fallback, False
+
     best = None
-  
-    for aw in atr_win_grid:
-  
-        for bw in break_win_grid:
-  
+
+    for aw in atr_windows:
+
+        for bw in break_windows:
+
             res = eval_atr_grid(
-                pc = pc, 
+                pc = pc,
                 mult_grid = coarse_M,
-                atr_window = aw, 
-                break_window = bw,
-                is_pro_trend = is_pro, 
-                is_anti_trend = is_anti, 
+                atr_window = int(aw),
+                break_window = int(bw),
+                is_pro_trend = is_pro,
+                is_anti_trend = is_anti,
                 vol_required = vol_req
             )
-            
+
             if (best is None) or (res["sharpe"] > best["sharpe"]):
-            
+
                 best = res
+
+    if best is None:
+
+        return fallback, False
+
+    if not _is_sig(
+        sharpe = best["sharpe"],
+        p_value = best["p_value"],
+        min_sharpe = SCREEN_MIN_SHARPE,
+        alpha = SCREEN_ALPHA
+    ):
+
+        return best, False
 
     refined = eval_atr_grid(
         pc = pc,
         mult_grid = np.array(ATR_MULT_GRID, dtype = float),
         atr_window = best["atr_window"],
         break_window = best["break_window"],
-        is_pro_trend = is_pro, 
-        is_anti_trend = is_anti, 
+        is_pro_trend = is_pro,
+        is_anti_trend = is_anti,
         vol_required = vol_req
     )
-    
-    return refined
+
+    return refined, True
 
 
 def _coarse_then_full_rsi(
@@ -5600,7 +6160,9 @@ def tune_thresholds_if_significant(
         
             return IndicatorResult(
                 name = name, 
-                params = default_params_for(name),
+                params = default_params_for(
+                    name = name
+                ),
                 sharpe = best["sharpe"],
                 t_stat = best["t_stat"],
                 p_value = best["p_value"],
@@ -5736,7 +6298,7 @@ def tune_thresholds_if_significant(
 
     if name == "atr":
         
-        best = _coarse_then_full_atr(
+        best, _passed = _coarse_then_full_atr(
             pc = pc, 
             atr_win_grid = ATR_WINDOW_GRID, 
             break_win_grid = ATR_BREAK_GRID,
@@ -5957,7 +6519,9 @@ def calibrate_ticker(
        
         base = IndicatorResult(
             name = name, 
-            params = default_params_for(name = name), 
+            params = default_params_for(
+                name = name
+            ), 
             sharpe = 0.0, 
             t_stat = 0.0, 
             p_value = 1.0,
@@ -5977,13 +6541,20 @@ def calibrate_ticker(
             sr_bh_ann = bh_sharpe
         )
 
+        indicator_value = _last_indicator_value(
+            name = name,
+            params = best.params,
+            pc = pc
+        )
+
         results[name] = {
             "params": best.params,
             "weight": w_rel,
             "sharpe": best.sharpe,
             "t_stat": best.t_stat,
             "p_value": best.p_value,
-            "n_trades": best.n_trades
+            "n_trades": best.n_trades,
+            "indicator_value": indicator_value,  
         }
 
         rows.append({
@@ -5996,6 +6567,7 @@ def calibrate_ticker(
             "TStat": best.t_stat,
             "PValue": best.p_value,
             "NTrades": best.n_trades,
+            "Indicator Value": indicator_value,  
             "Start": start, 
             "End": end, 
             "LastUpdated": now_naive
@@ -6526,7 +7098,9 @@ def score_for_ticker(
         else:
 
             calib[name] = {
-                "params": default_params_for(name),
+                "params": default_params_for(
+                    name = name
+                ),
                 "weight": DEFAULT_WEIGHTS.get(name, 1),
                 "sharpe": 0.0,
                 "t_stat": 0.0,
@@ -6535,24 +7109,36 @@ def score_for_ticker(
             }
 
     score = np.zeros(pc.c.shape[0], dtype=np.int16)
-   
+
     for name in INDICATOR_ORDER:
-   
-        w = int(calib[name].get("weight", 0))
-   
-        if w <= 0:
-   
+        
+        meta = calib[name]
+        
+        if not meta:
+        
             continue
-   
-        params = calib[name].get("params", {})
-   
+
+        w = int(meta.get("weight", 0) or 0)
+      
+        if w == 0:
+      
+            continue
+        
+        dpf = default_params_for(
+            name = name
+        )
+
+        params = meta.get("params", dpf)
+
         pos = _pos_for_indicator(
-            name = name, 
-            params = params, 
+            name = name,
+            params = params,
             pc = pc
-        ).astype(np.int16)
-   
-        score = score + (w * pos)
+        ).astype(np.int8)
+
+        contrib = w * pos
+
+        score += contrib.astype(np.int16)
 
     score = np.clip(score, -SCORE_CLAMP, SCORE_CLAMP)
   
@@ -6598,7 +7184,8 @@ def main() -> None:
             else:
      
               - use cached parameters/weights; if absent, fall back to
-                on-the-fly calibration (safe default);
+                on-the-fly calibration and immediately persist those calibration
+                rows (auto-persist in non-update mode).
      
          d) compute the composite integer score series with
             `score_for_ticker(pc, tk, calib_raw)`. This series sums
@@ -6608,7 +7195,9 @@ def main() -> None:
     4) Persist calibration (if updated)
      
        If `UPDATE_PARAM` is True, upsert accumulated calibration rows into
-       the "Calibration" sheet using `write_calibration_rows`.
+       the "Calibration" sheet using `write_calibration_rows`. In non-update
+       mode, missing-cache fallback calibrations are also written immediately
+       per ticker.
 
     5) Persist composite scores
      
@@ -6670,6 +7259,7 @@ def main() -> None:
     for tk in tickers:
    
         try:
+            
             c = _col(
                 df = data["close"], 
                 tk = tk, 
@@ -6692,6 +7282,13 @@ def main() -> None:
                 df = data["volume"],
                 tk = tk,
                 name = "Volume"
+            )
+
+            h, l, c, v = _align_ohlcv(
+                h = h,
+                l = l,
+                c = c,
+                v = v
             )
             
             pc = precompute_all(
@@ -6722,6 +7319,18 @@ def main() -> None:
                         c = c, 
                         tk = tk
                     )
+
+                    try:
+
+                        write_calibration_rows(rows = rows)
+
+                    except Exception as exc:
+
+                        logger.exception("Failed to persist fallback calibration for %s: %s", tk, exc)
+
+                    if cache_map is not None:
+
+                        cache_map[tk] = calib_raw
          
                 else:
          
