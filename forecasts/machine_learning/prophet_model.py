@@ -6,18 +6,18 @@ Overview
 This module implements a hybrid forecasting pipeline that models weekly equity prices
 using Meta Prophet with exogenous regressors, then captures residual mean
 dynamics via ARIMA and residual conditional volatility via GARCH. Forecasts are
-generated under multiple fundamental scenarios (revenue/EPS targets), macro paths
+generated under multiple fundamental scenarios (revenue/EPS targets), macro paths 
 are interpolated over the forecast horizon, and predictive intervals are widened by
 combining Prophet and GARCH uncertainty. Rolling cross-validation provides out-of-sample
 error estimates which are merged with scenario dispersion to form a final standard error.
 
-Core model components
+Core model components 
 ---------------------
 1) Prophet with regressors:
     
     y_t = g(t) + s_y(t) + β' x_t + ε_t,
    
-   where g(t) is a piecewise-linear trend with changepoints, s_y(t) is yearly seasonality,
+   where g(t) is a piecewise-linear trend with changepoints, s_y(t) is yearly seasonality, 
    x_t are exogenous regressors (macro and financial), β are coefficients with Gaussian
    priors N(0, prior_scale^2) on standardised regressors, and ε_t is i.i.d. noise
    within Prophet’s additive error model.
@@ -84,7 +84,7 @@ from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.stattools import adfuller
 from arch import arch_model
 
-from export_forecast import export_results
+from functions.export_forecast import export_results
 from data_processing.financial_forecast_data import FinancialForecastData
 import config
 
@@ -109,7 +109,9 @@ def configure_logger() -> logging.Logger:
     Behaviour
     ---------
     - Sets logger level to INFO.
+    
     - Adds a StreamHandler with the format: "%(asctime)s - %(levelname)s - %(message)s".
+    
     - Avoids duplicate handlers on repeated calls.
 
     Returns
@@ -234,8 +236,11 @@ def clip_to_bounds(
     Rule
     ----
     For columns {yhat, yhat_lower, yhat_upper}, apply:
+    
         lower bound = 0.2 * price,
+    
         upper bound = 5.0 * price.
+    
     This avoids pathological extrapolations in thin data regimes.
 
     Returns
@@ -269,6 +274,7 @@ def evaluate_forecast(
     - `cross_validation(model, initial, period, horizon)` forms expanding windows
       with cutoffs spaced by `period`. For each cutoff, the model is trained on
       data up to the cutoff and scored over the next `horizon`.
+   
     - `performance_metrics` computes RMSE, MAPE, MAE, coverage etc.
 
     Parameters
@@ -402,7 +408,7 @@ def build_base_future(
         include_history = True
     )
 
-    future_base = pd.merge_asof(
+    future_base = pd.merge_asof( 
         future_base,
         fin_df,       
         on = 'ds',
@@ -566,10 +572,14 @@ def _choose_arima(
     Procedure
     ---------
     1) Determine d via `_adf_d_order` on `resid`.
+    
     2) For p in p_grid, q in q_grid, fit SARIMAX with order (p,d,q) and trend='n'
        (trend suppressed because Prophet already models trend/level).
+    
     3) Select the model minimising Akaike Information Criterion:
+    
          AIC = 2k − 2 log L,
+    
        where k is the number of estimated parameters and L is the maximised likelihood.
 
     Returns
@@ -639,6 +649,7 @@ def _fit_garch(
     Fitting
     -------
     - Uses `arch_model(..., mean='Zero', vol='GARCH', p=1, q=1, dist='t')`.
+    
     - Requires at least 50 observations; else returns None.
 
     Returns
@@ -720,8 +731,10 @@ def _forecast_garch(
     Method
     ------
     - Call `garch_res.forecast(horizon = steps, reindex = False)`.
+   
     - Extract the forecasted variance for the final available period,
       take the square root, and pad to `steps` if necessary.
+   
     - Replace NaNs with zeros.
 
     Returns
@@ -744,9 +757,9 @@ def _forecast_garch(
 
         if sigma.shape[0] < steps:
 
-            sigma = np.pad(sigma, (0, steps - sigma.shape[0]), constant_values=sigma[-1] if sigma.size else 0.0)
+            sigma = np.pad(sigma, (0, steps - sigma.shape[0]), constant_values = sigma[-1] if sigma.size else 0.0)
 
-        return np.nan_to_num(sigma, nan=0.0)[:steps]
+        return np.nan_to_num(sigma, nan = 0.0)[:steps]
 
     except Exception:
 
@@ -789,7 +802,7 @@ def fit_arima_garch_on_prophet_residuals(
 
     ins = prophet_model.predict(df_model[['ds'] + regressors].copy())
 
-    e = pd.Series(df_model['y'].values - ins['yhat'].values, index=df_model['ds'])
+    e = pd.Series(df_model['y'].values - ins['yhat'].values, index = df_model['ds'])
 
     e = e.dropna()
 
@@ -799,7 +812,7 @@ def fit_arima_garch_on_prophet_residuals(
 
     if arima_res is not None:
 
-        u = e - pd.Series(arima_res.fittedvalues, index=e.index)
+        u = e - pd.Series(arima_res.fittedvalues, index = e.index)
 
     else:
 
@@ -888,7 +901,7 @@ def apply_hybrid_adjustment(
         
         sig_g = _forecast_garch(
             garch_res = garch_res,
-            H = H
+            steps = H
         )  
         
     else:
@@ -959,8 +972,11 @@ def forecast_with_prophet(
     Prediction and hybridisation
     ----------------------------
     - Ensure no missing regressor values remain; raise on NaNs.
+   
     - Obtain Prophet predictions, then optionally apply hybrid adjustment:
+    
         yhat_hyb as mean, and intervals widened using σ_comb (see module overview).
+   
     - Clip {yhat, yhat_lower, yhat_upper} to [lb * current_price, ub * current_price].
 
     Returns
@@ -1115,7 +1131,7 @@ def forecast_with_prophet_without_fd(
         how = 'left'
     )
     
-    future.ffill(inplace=True)
+    future.ffill(inplace = True)
 
     for reg in regressors:
         
@@ -1171,16 +1187,24 @@ def main() -> None:
    
       8) If no financials: forecast once. Else, iterate over scenario pairs
          (rev_key, eps_key) from REV_KEYS × EPS_KEYS:
+           
             - Obtain targets from `next_period_forecast()` for that ticker.
+           
             - Apply linear ramps for Revenue/EPS to those targets.
+           
             - Predict with Prophet, apply hybrid adjustment, and record end-horizon
               {yhat, yhat_lower, yhat_upper}.
    
       9) Aggregate scenarios:
+           
             min_price  = min end-horizon yhat_lower across scenarios (or single run),
+           
             max_price  = max end-horizon yhat_upper,
+           
             avg_price  = mean of end-horizon yhat across scenarios,
+           
             avg_return = avg_price / current_price − 1,
+           
             scenario_se:
       
                 • No-financials case: ((max − min) / 2) / (1.96 * current_price),
@@ -1197,7 +1221,9 @@ def main() -> None:
     Export
     ------
     Writes a sheet "Prophet Pred" with columns:
+    
         Current Price, Avg Price, Low Price, High Price, Returns, SE,
+    
     indexed by ticker, to `config.MODEL_FILE` via `export_results`.
 
     Key equations (summary)
@@ -1211,6 +1237,7 @@ def main() -> None:
     Hybrid mean: ŷ_h,hyb = ŷ_h^Prophet + μ_h
    
     Hybrid PI:   σ_comb,h = sqrt( σ_p,h^2 + σ_g,h^2 ),
+                
                  PI_h = ŷ_h,hyb ± 1.96 σ_comb,h
    
     Return:      r̂ = avg_price / current_price − 1
@@ -1368,7 +1395,10 @@ def main() -> None:
        
         else:
        
-            df_price_fd = add_financials(df_price, fd_ticker)  
+            df_price_fd = add_financials(
+                daily_df = df_price, 
+                fd = fd_ticker
+            )  
        
             df_model = df_price_fd.merge(tm, on='ds', how='left')
        
@@ -1408,6 +1438,7 @@ def main() -> None:
                 df_model = df_model[['ds','y'] + regressors],
                 regressors = regressors
             )
+            
         except Exception as e:
         
             logger.warning("ARIMA/GARCH fit failed for %s: %s", ticker, e)
@@ -1493,6 +1524,7 @@ def main() -> None:
                 label = f"{rev_key}|{eps_key}"
                 
                 rev_target = next_fc.at[ticker, rev_key]
+                
                 eps_target = next_fc.at[ticker, eps_key]
 
                 try:
@@ -1586,6 +1618,7 @@ def main() -> None:
             if pd.isna(final_rmse[ticker]):
              
                 se[ticker] = np.sqrt(scenario_se[ticker] ** 2 + (max_rmse ** 2))
+                
             else:
                
                 se[ticker] = np.sqrt((scenario_se[ticker] ** 2) + (final_rmse[ticker] ** 2))
@@ -1617,6 +1650,7 @@ def main() -> None:
     sheets_to_write = {
         "Prophet Pred": prophet_results,
     }
+    
     export_results(
         sheets = sheets_to_write, 
         output_excel_file = config.MODEL_FILE
@@ -1626,4 +1660,5 @@ def main() -> None:
     
     
 if __name__ == "__main__":
+    
     main()
