@@ -62,7 +62,7 @@ x_t ∈ R^p the feature vector containing, for example, "Revenue Growth",
 4) Circular moving-block bootstrap (time-aware resampling):
   
    For block size b and sample length T, draw starting points s_j ∼ Uniform{0,…,T−1}
-   for j = 1,…,⌈T / b⌉, form blocks { (s_j + i) mod T : i = 0,…,b−1 }, concatenate
+   for j = 1, …, ⌈T / b⌉, form blocks { (s_j + i) mod T : i = 0,…,b−1 }, concatenate
    to length T, and refit the estimator on the resampled sequence. This preserves
    short-run dependence up to lag ≈ b.
 
@@ -108,7 +108,7 @@ logging.basicConfig(
     level = logging.INFO,
     format = "%(asctime)s %(levelname)-8s %(message)s",
     datefmt = "%H:%M:%S",
-)
+) 
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,8 @@ logger = logging.getLogger(__name__)
 def _min_train_tss(
     n_samples: int,
     n_splits: int,
-    min_train: int = 6
+    min_train: int = 6,
+    min_test: int = 2,
 ) -> TimeSeriesSplit:
     """
     Construct a TimeSeriesSplit that guarantees at least `min_train` training
@@ -127,7 +128,9 @@ def _min_train_tss(
     - If n_samples < (min_train + 2), the number of splits is reduced so that the
       first training window has at least `min_train` observations while leaving at
       least one observation for validation: splits = max(2, n_samples − min_train).
+ 
     - Otherwise, use `n_splits`.
+ 
     - Constrain to 2 ≤ splits ≤ n_samples − 1.
 
     Rationale
@@ -136,19 +139,26 @@ def _min_train_tss(
     sets. Ensuring a minimum training size in the first fold stabilises model
     selection under small samples.
     """
+    
+    if n_samples < 3:
 
-    if n_samples < (min_train + 2):
+        return TimeSeriesSplit(n_splits=2, test_size=1)
 
-        splits = max(2, n_samples - min_train)
+    test_size = min_test
+    
+    if (n_samples - min_train) < (2 * test_size):
+        
+        test_size = 1
 
-    else:
+    max_splits_train = (n_samples - min_train) // test_size
 
-        splits = n_splits
+    max_splits_feasible = (n_samples - 1) // test_size
 
-    splits = max(2, min(splits, n_samples - 1))
+    splits = min(n_splits, max_splits_train, max_splits_feasible)
+   
+    splits = max(2, splits)
 
-    return TimeSeriesSplit(n_splits = splits)
-
+    return TimeSeriesSplit(n_splits=splits, test_size=test_size)
 
 def _block_bootstrap_indices(
     n: int, 
@@ -495,8 +505,11 @@ def bootstrap_models_from_arrays(
     Procedure
     ---------
     For seeds s = 0,…,n_resamples−1:
+    
       1) Generate circular moving-block indices of length n.
+    
       2) Fit a cloned estimator on the resampled data.
+    
     The operation is parallelised across CPU cores.
 
     Returns
@@ -504,7 +517,7 @@ def bootstrap_models_from_arrays(
     list[object]
         List of fitted estimator clones suitable for `.predict`.
     """
-    
+     
     seeds = list(range(n_resamples))
     
     models = Parallel(n_jobs=-1)(
@@ -639,6 +652,12 @@ def process_ticker(
     X_arr, y_arr, feature_cols, train_medians = _clean_df_once(
         df = growth
     )
+    
+    if y_arr.size < 4:
+        
+        logger.warning("Skip %s: only %d usable rows after cleaning", tk, y_arr.size)
+        
+        return {"Ticker": tk, "Low Returns": 0.0, "Returns": 0.0, "High Returns": 0.0, "SE": 0.0}
 
     base_model = fit_base_model_from_arrays(
         X_arr = X_arr,
@@ -660,7 +679,13 @@ def process_ticker(
      
         logger.warning("No financial forecast for %s; returning zeros.", tk)
      
-        return {"Ticker": tk, "Low Returns": 0.0, "Returns": 0.0, "High Returns": 0.0, "SE": 0.0}
+        return {
+            "Ticker": tk, 
+            "Low Returns": 0.0,
+            "Returns": 0.0, 
+            "High Returns": 0.0,
+            "SE": 0.0
+        }
 
     rev_covs, eps_covs = fin_forecast
     
@@ -677,10 +702,10 @@ def process_ticker(
     )
     
     scen_arr = scen_df.to_numpy()
-
+    
     _ = base_model.predict(scen_arr)
 
-    preds_bs = np.vstack([m.predict(scen_arr) for m in bs_models])
+    preds_bs = np.vstack([m.predict(scen_arr) for m in bs_models]).clip(config.lbr, config.ubr) 
 
     pred_mix = preds_bs.reshape(-1)
 
@@ -698,7 +723,13 @@ def process_ticker(
 
     logger.info("%s: Low %.4f, Med %.4f, Avg %.4f, High %.4f, SE %.4f", tk, low, med, avg, high, se)
 
-    return {"Ticker": tk, "Low Returns": float(low), "Returns": float(med), "High Returns": float(high), "SE": float(se)}
+    return {
+        "Ticker": tk,
+        "Low Returns": float(low),
+        "Returns": float(med), 
+        "High Returns": float(high), 
+        "SE": float(se)
+    }
 
 
 def main() -> None:
@@ -716,9 +747,11 @@ def main() -> None:
     2) Obtain macro forecast inputs per ticker via `macro.assign_macro_forecasts()`.
     
     3) For each ticker:
+    
          a) Build revenue/EPS forecast-to-history changes via
             `FinancialForecastData.get_forecast_pct_changes(ticker)` producing
             (rev_covs, eps_covs).
+    
          b) Call `process_ticker` to fit the model, bootstrap, construct the
             scenario matrix, and compute mixture percentiles and SE.
     
@@ -789,6 +822,6 @@ def main() -> None:
 
 if __name__ == "__main__":
    
-    logger.info("Starting lin_reg_returns10_improved.py")
+    logger.info("Starting hgb.py")
    
     main()
