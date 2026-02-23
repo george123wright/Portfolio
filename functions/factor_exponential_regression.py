@@ -98,7 +98,9 @@ def _daily_from_annual(
         Daily simple return consistent with geometric compounding.
     """
     
-    return float((1.0 + float(x_ann)) ** (1.0 / 252.0) - 1.0)
+    ret = (1.0 + float(x_ann)) ** (1.0 / 252.0) - 1.0
+    
+    return float(ret)
 
 
 def _excess_daily_from_annual_total(
@@ -805,7 +807,7 @@ def exp_fac_reg(
        
         if "Index Excess Return" in X_cols and "Index" in factor_preds_df.columns:
        
-            idx_ann_total = float(factor_preds_df.at[t, "Index"])
+            idx_ann_total = max(float(factor_preds_df.at[t, "Index"]), -0.99)
        
             mu_day["Index Excess Return"] = _excess_daily_from_annual_total(
                 x_ann_total = idx_ann_total, 
@@ -813,15 +815,19 @@ def exp_fac_reg(
             )
        
         if "Sector Return" in X_cols and "Sector" in factor_preds_df.columns:
-       
+            
+            sec_ann_total = max(float(factor_preds_df.at[t, "Sector"]), -0.99)
+            
             mu_day["Sector Return"] = _daily_from_annual(
-                x_ann = float(factor_preds_df.at[t, "Sector"])
+                x_ann = sec_ann_total
             )
        
         if "Industry Return" in X_cols and "Industry" in factor_preds_df.columns:
-       
+                        
+            ind_ann_total = max(float(factor_preds_df.at[t, "Industry"]), -0.99)
+            
             mu_day["Industry Return"] = _daily_from_annual(
-                x_ann = float(factor_preds_df.at[t, "Industry"])
+                x_ann = ind_ann_total
             )
        
         for etf, pred_col in fac_map.items():
@@ -896,5 +902,3 @@ def exp_fac_reg(
     out = pd.DataFrame(rows).set_index("Ticker").sort_index()
     
     return out
-
-
