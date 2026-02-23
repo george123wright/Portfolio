@@ -104,8 +104,6 @@ from scipy.stats import norm
 from scipy.stats import qmc
 import statsmodels.api as sm
 
-from coe2 import relever_beta_from_unlevered
-
 import config
 
 
@@ -124,6 +122,7 @@ class LRUCache:
     Notes
     -----
     - GET: moves the key to the end (most-recently used) on a hit.
+  
     - SET: inserts/updates, then evicts the oldest item if size > capacity.
     """
 
@@ -328,36 +327,53 @@ class PortfolioAnalytics:
     ):
         """
         Coerce x to a float.
+      
         - If scalar -> float(x).
+      
         - If pd.Series with index matching weights -> weighted average.
+      
         - If pd.Series time-series -> last valid (take='last') or mean (take='mean').
+      
         - If 1-length array/Series -> the single value.
+      
         """
-        import numpy as np
-        import pandas as pd
 
         if np.isscalar(x):
+    
             return float(x)
 
         if isinstance(x, pd.Series):
+     
             if weights is not None and isinstance(weights, pd.Series):
+     
                 w = weights.reindex(x.index).fillna(0.0)
+     
                 return float((x.fillna(0.0) * w).sum())
+     
             s = x.dropna()
+     
             if s.empty:
+     
                 return float('nan')
+     
             if take == 'mean':
+     
                 return float(s.mean())
-            return float(s.iloc[-1])  # default: last valid
+     
+            return float(s.iloc[-1])
 
-        # numpy array / list / tuple
-        arr = np.asarray(x, dtype=float).ravel()
+        arr = np.asarray(x, dtype = float).ravel()
+   
         if arr.size == 0:
+   
             return float('nan')
+   
         if arr.size == 1:
+   
             return float(arr[0])
-        # fall back to mean
+
         return float(np.nanmean(arr))
+
 
     @staticmethod
     def portfolio_return(
@@ -513,16 +529,30 @@ class PortfolioAnalytics:
 
 
     @staticmethod
-    def port_d_to_e_batch(W: np.ndarray, d_to_e: pd.Series, names: list[str]) -> pd.Series:
-        # weighted average per portfolio: (d/e)^T W → length-K
+    def port_d_to_e_batch(
+        W: np.ndarray,
+        d_to_e: pd.Series,
+        names: list[str]
+    ) -> pd.Series:
+
         v = d_to_e.to_numpy(dtype=float)
-        out = v @ W                      # shape (K,)
+
+        out = v @ W                   
+
         return pd.Series(out, index=names, name="D_to_E")
 
+
     @staticmethod
-    def port_tax_batch(W: np.ndarray, tax: pd.Series, names: list[str]) -> pd.Series:
+    def port_tax_batch(
+        W: np.ndarray, 
+        tax: pd.Series,
+        names: list[str]
+    ) -> pd.Series:
+    
         v = tax.to_numpy(dtype=float)
+    
         out = v @ W
+    
         return pd.Series(out, index=names, name="Tax")
 
 
@@ -1125,10 +1155,10 @@ class PortfolioAnalytics:
     def estimate_alpha_with_external_beta(
         self,
         beta0: pd.Series,
-        exp_ret: pd.Series,                # per-ticker expected return on the SAME horizon as market_exp_ret
-        market_exp_ret: float,             # scalar expected market return on the SAME horizon
+        exp_ret: pd.Series,            
+        market_exp_ret: float,           
         *,
-        risk_free: float = 0.0,            # set to 0 if exp_ret already excess
+        risk_free: float = 0.0,          
         treat_exp_ret_as_excess: bool = True,
         universe: pd.Index | list[str] | None = None,
         beta_fallback: float = 1.0
@@ -1136,8 +1166,11 @@ class PortfolioAnalytics:
         """
         Compute alphas using external levered betas from coe2.py (Excel 'COE' sheet).
         All inputs must be in the SAME return convention and horizon (e.g., annual).
+   
         - If treat_exp_ret_as_excess=True, exp_ret and market_exp_ret are excess returns.
+   
         - Otherwise they are total returns; alpha formula adjusts for Rf.
+   
         """
 
         if universe is None:
@@ -1155,6 +1188,7 @@ class PortfolioAnalytics:
         if treat_exp_ret_as_excess:
 
             alpha = exp_ret - beta * market_exp_ret
+    
         else:
 
             alpha = exp_ret - beta * market_exp_ret - (1.0 - beta) * risk_free
@@ -2622,26 +2656,34 @@ class PortfolioAnalytics:
         xls = pd.ExcelFile(forecast_file)
       
         model_sheets = {
-            "Prophet Pred": "Prophet",
-            "Analyst Target": "AnalystTarget",
-            "Exponential Returns": "EMA",
-            "DCF": "DCF",
-            "DCFE": "DCFE",
-            "Daily Returns": "Daily",
-            "RI": "RI",
-            "CAPM BL Pred": "CAPM",
-            "FF3 Pred": "FF3",
-            "FF5 Pred": "FF5",
-            "Factor Exponential Regression": "FER",
-            "SARIMAX Monte Carlo": "SARIMAX",
-            "Rel Val Pred": "RelVal",
-            "LSTM_DirectH": "LSTM_DirectH",
-            "LSTM_Cross_Asset": "LSTM_Cross_Asset",
-            "Prophet PCA": "ProphetPCA",
-            "HGB Returns CA": "HGB Returns CA",
-            "HGB Returns": "HGB Returns",
+            'Prophet Pred': 'Prophet',
+            "Prophet PCA": 'ProphetPCA',
+            'Analyst Target': 'AnalystTarget',
+            'Exponential Returns':'EMA',
+            'DCF': 'DCF',
+            'DCFE': 'DCFE',
+            'DCF CapIQ': 'DCF CapIQ',
+            'FCFE CapIQ': 'FCFE CapIQ',
+            'DDM CapIQ': 'DDM CapIQ',
+            'Daily Returns': 'Daily',
+            'RI': 'RI',
+            'RI CapIQ': 'RI CapIQ',
+            'CAPM BL Pred': 'CAPM',
+            'FF3 Pred': 'FF3',
+            'FF5 Pred': 'FF5',
+            'Factor Exponential Regression': 'FER',
+            'Gordon Growth Model': 'Gordon Growth Model',
+            'SARIMAX Monte Carlo': 'SARIMAX',
+            'Rel Val Pred': 'RelVal',
+            'LSTM_DirectH': 'LSTM_DirectH',
+            'LSTM_Cross_Asset': 'LSTM_Cross_Asset',
             'GRU_cal': 'GRU_cal',
             'GRU_raw': 'GRU_raw',
+            'Advanced MC': 'AdvMC',
+            'HGB Returns': 'HGB Returns',
+            'HGB Returns CA': 'HGB Returns CA',
+            'TVP + GARCH Monte Carlo': 'TVP + GARCH Monte Carlo',
+            'SARIMAX Factor': 'SARIMAX Factor',
         }
         
         model_returns: Dict[str, pd.Series] = {}
@@ -3260,6 +3302,9 @@ class PortfolioAnalytics:
         sigma_bl: pd.DataFrame,
         d_to_e: pd.Series,
         tax: pd.Series,
+        w_comb12: np.ndarray | None = None,
+        vol_comb12: float | None = None,
+        vol_comb12_ann: float | None = None,
         sims: int = 1_000_000,
         n_trials: int = 1,
         qmc_mode: bool = False,
@@ -3294,6 +3339,10 @@ class PortfolioAnalytics:
             "Combination10": w_comb10,
             "Combination11": w_comb11
         }
+      
+        if w_comb12 is not None:
+      
+            weights["Combination12"] = w_comb12
         
         vols_weekly = {
             "MSR": vol_msr, 
@@ -3321,6 +3370,10 @@ class PortfolioAnalytics:
             "Combination11": vol_comb11
         }
         
+        if vol_comb12 is not None:
+            
+            vols_weekly["Combination12"] = vol_comb12
+        
         vols_annual = {
             "MSR": vol_msr_ann,
             "Sortino": vol_sortino_ann, 
@@ -3346,6 +3399,10 @@ class PortfolioAnalytics:
             "Combination10": vol_comb10_ann,
             "Combination11": vol_comb11_ann
         }
+      
+        if vol_comb12_ann is not None:
+          
+            vols_annual["Combination12"] = vol_comb12_ann
 
         return self.report_portfolio_metrics_batch(
             weights = weights,
