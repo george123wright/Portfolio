@@ -148,20 +148,26 @@ gradients.
 Shapes and notation
 -------------------
 - Sequence length L equals H_hist plus H.
+
 - Input tensor has shape (N, L, 1 + p), where p is the number of
   regressors.
+  
 - Target has shape (N, 1) and equals the direct sum of future H log
   returns.
+  
 - All tensors are float32 for performance and numerical consistency.
 
 Parallelism, determinism, and caching
 -------------------------------------
 - Multi-process execution uses the 'spawn' start method for TensorFlow
   safety. An initialiser injects a read-only state pack into each worker.
+  
 - A process-local singleton forecaster avoids repeated model creation and
   JIT compilation.
+  
 - NumPy, Python, and TensorFlow seeds are set; intra- and inter-op thread
   pools are limited to one where supported to improve reproducibility.
+  
 - Covariances are regularised to be symmetric positive definite, using
   adaptive jitter and spectral shifting when necessary.
 
@@ -222,17 +228,19 @@ from sklearn.preprocessing import RobustScaler
 from statsmodels.tsa.api import VAR
 
 import multiprocessing as mp
-from concurrent.futures import ProcessPoolExecutor, as_completed, TimeoutError
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED, TimeoutError
 from sklearn.covariance import LedoitWolf
 
 from dataclasses import dataclass
 
+import time
+
 import config
-from financial_forecast_data4 import FinancialForecastData
+from financial_forecast_data5 import FinancialForecastData
 
 import tensorflow as tf
 from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.optimizers.legacy import Adam
 from tensorflow.keras.layers import Input, GRU, Dense, Lambda
 from tensorflow.keras.models import Model
 from tensorflow.keras.regularizers import l2
@@ -1110,8 +1118,9 @@ class GRU_Forecaster:
         Closed-form expectation of the sum of future H AR(1) returns.
 
         For r_t = m + φ (r_{t−1} − m) + ε_t, the expected H-step sum is:
-        E[∑_{k=1..H} r_{t+k} | r_t]
-        = H m + (r_t − m) φ (1 − φ^H) / (1 − φ),
+        
+            E[∑_{k=1..H} r_{t+k} | r_t] = H m + (r_t − m) φ (1 − φ^H) / (1 − φ),
+            
         with the limit H m when φ ≈ 1.
 
         Parameters
@@ -1230,10 +1239,12 @@ class GRU_Forecaster:
         for _ in range(max_tries):
        
             try:
+                
+                S_j = S + jitter * I
+                
+                np.linalg.cholesky(S_j)
        
-                np.linalg.cholesky(S + jitter * I)
-       
-                return (S + (jitter * I) if jitter else S).astype(np.float32, copy = False)
+                return (S_j if jitter else S).astype(np.float32, copy = False)
        
             except np.linalg.LinAlgError:
               
@@ -1308,8 +1319,10 @@ class GRU_Forecaster:
         Design
         ------
         - For each rolling window i (i = 0..N−1), build a length-L tensor:
+        
         * positions 0..hist−1: channel 0 contains scaled returns; channels 1..p
             contain past regressor deltas,
+        
         * positions hist..hist+hor−1: channel 0 is zero (the future returns are
             to be predicted); channels 1..p contain *future* regressor deltas
             aligned to the horizon.
@@ -1440,8 +1453,13 @@ class GRU_Forecaster:
 
         Transformations
         ---------------
-        - Interest, Unemp: ΔX_t = X_t − X_{t−1}.
-        - Cpi, Gdp: Δx_t = log(max(X_t, ε)) − log(max(X_{t−1}, ε)), ε = 1e−6.
+        - Interest, Unemp: 
+        
+            ΔX_t = X_t − X_{t−1}.
+        
+        - Cpi, Gdp: 
+        
+            Δx_t = log(max(X_t, ε)) − log(max(X_{t−1}, ε)), ε = 1e−6.
 
         Parameters
         ----------
@@ -2321,38 +2339,57 @@ class GRU_Forecaster:
         Outputs
         -------
         A serialisable dictionary with keys (non-exhaustive):
+      
         - "tickers": ordered list of tickers grouped by country.
+      
         - "macro_weekly_by_country": dict[country] → weekly macro DataFrame.
+      
         - "macro_weekly_idx_by_country": dict[country] → macro weekly index (np.ndarray).
+      
         - "country_var_results": dict[country] → VAR(1) fit artefacts or None.
+      
         - "macro_future_by_country": dict[country] → simulated macro deltas
         of shape (S, H, 4) in stationary space (either VAR-based or white noise
         with Ledoit–Wolf covariance when insufficient sample).
+      
         - "factor_future_global": np.ndarray, shape (S, H, n_factors), stationary
         bootstrap resamples of factor returns.
+      
         - "factor_weekly_index", "factor_weekly_values": weekly factor panel.
+      
         - "weekly_price_by_ticker": dict[ticker] → {index, y (levels), lr (log-ret)}.
+      
         - "moments_by_ticker": dict[ticker] → 104-week rolling skew/kurt shifted
         by +H to avoid leakage into the target window.
+      
         - "fd_weekly_by_ticker": dict[ticker] → resampled weekly revenue/EPS levels.
+      
         - "align_cache": dict[ticker] → indices mapping from price dates to macro,
         factor, and financial weekly indices; includes a mask of valid positions.
+      
         - "next_fc": DataFrame of next-period revenue/EPS points used to build
         scenario paths.
+      
         - "latest_price": dict-like mapping ticker → latest level.
+      
         - "ticker_country": Series mapping ticker → country string.
+      
         - "presence_flags": dict[ticker] → {has_factors, has_fin, has_moms} booleans.
 
         Key steps and rationale
         -----------------------
         - Macro: convert to weekly frequency via 'W-FRI' resampling and forward
         fill; differencing/log-differencing enforces approximate stationarity.
+       
         - VAR(1): fit per country in stationary space; ensure stability and SPD Σ.
         When not estimable, fall back to Gaussian innovations with LW Σ.
+       
         - Factors: weekly returns panel; generate future paths using stationary
         bootstrap to preserve dependence.
+       
         - Financials: resample to weekly last observation carried forward to align
         with price/factor/macro cadence.
+       
         - Moments: compute 104-week rolling skewness and kurtosis of returns and
         shift by +H weeks so that only information available at forecast origin
         is used as a 'known future' regressor.
@@ -2388,8 +2425,6 @@ class GRU_Forecaster:
     
             tickers = ['NVDA', 'GOOG', 'TTWO', 'TJX']
             
-            #tickers = ['AMZN', 'GOOG', 'KO', 'MSFT', 'NVDA', 'TJX', 'TTD', 'TTWO']
-
         close_df = r.weekly_close
     
         dates_all = close_df.index.values
@@ -2915,42 +2950,58 @@ class GRU_Forecaster:
         Pipeline
         --------
         1) Preconditions and alignment
+    
         - Retrieve aligned indices mapping the ticker's price dates to
             country macro, factor, and financial streams (`align_cache`).
+    
         - Enforce index upper bounds and drop invalid positions.
+    
         - Require at least L+1 aligned observations to create ≥1 training
             window.
 
         2) Feature construction
+    
         - Build regressor level matrix, then transform to deltas using
             `build_transform_matrix` and robust-scale via `fit_scale_deltas`.
+    
         - Scale returns using a robust scaler (training mask only).
+    
         - Construct windows `X_all` and direct-H targets `y_all`.
 
         3) Train/validation split
+     
         - Use `choose_splits` to select a time-series split; default to 80/20
             split when only 1 fold is available.
 
         4) Baseline residuals
+     
         - Fit AR(1) with intercept on training returns; compute baseline sums
             μ_base for train, validation, and 'now' using `ar1_sum_forecast`.
+     
         - Residual targets: y_res = y − μ_base.
 
         5) Model training
+       
         - (Re)initialise a cached Keras model for this `n_reg`.
+       
         - Compile with Adam(clipnorm=1), dual loss (`pinball_loss`, `student_t_nll`)
             and equal weights.
+       
         - Train with shuffled mini-batches, early stopping, and LR plateau
             reduction. Reduce epochs when data are scarce.
 
         6) Validation calibration
+      
         - Forward pass on validation windows to obtain (μ, σ, ν).
+      
         - Grid search for global σ multiplier `s*` that matches central
             coverages (`_calibrate_sigma_scale`).
+      
         - Fit isotonic regression on PITs; store corrected levels α′ and the
             isotonic model for draw recalibration.
 
         7) Scenario simulation
+   
         - Build the last historical slice `X_hist` and assemble future deltas
             by combining:
             * macro deltas from per-country VAR paths (weekly expanded),
@@ -2959,20 +3010,26 @@ class GRU_Forecaster:
                 converted into weekly log-increments with mean-zero noise per
                 quarter (noise debiased to preserve quarterly aggregates),
             * moment deltas equal to the last observed H deltas (persistence).
+   
         - Robust-scale the future deltas with training scaler and clip bounds.
 
         8) Residual sampling with MC-dropout
+    
         - For blocks of S scenarios and T Monte Carlo passes, forward-propagate
             `X_block` with `training=True` to activate dropout. Collect per-pass
             (μ_t, σ_t, ν_t).
+    
         - Draw z ∼ t_ν, recalibrate via PIT if available, form residuals
             ε̂ = μ_t + σ_t z, and add μ_base_now to obtain total sums.
+    
         - Convert sums of log returns to price factors via expm1, accumulate
             across passes to form a large sample.
 
         9) Summaries
+      
         - Extract central interval quantiles using corrected α′ on both the raw
             sample and the PIT-calibrated sample.
+      
         - Report price levels by scaling the latest price; also report sample
             mean and standard deviation of return sums.
 
@@ -3046,6 +3103,12 @@ class GRU_Forecaster:
             ctry = STATE["ticker_country"].get(ticker)
             
             dfm_ct = STATE["macro_weekly_by_country"].get(ctry)
+            
+            if dfm_ct is None:
+                
+                return skip(
+                    reason = "insufficient_macro_history"
+                )
             
             n_m = len(dfm_ct)
             
@@ -3450,44 +3513,6 @@ class GRU_Forecaster:
             ))
             
             mu_base_now = np.float32(mu_base_now) 
-
-            Xc = tf.convert_to_tensor(X_cal)
-
-            outs_cal = fns["fwd"](Xc)
-
-            if isinstance(outs_cal, dict):
-                
-                params_cal = outs_cal["dist_head"]  
-            
-            else:
-                
-                params_cal = outs_cal[1]
-
-            params_cal = params_cal.numpy().astype(np.float32, copy = False)
-
-            mu_c = self.MU_MAX * np.tanh(params_cal[:, 0:1])
-           
-            sigma_c = np.log1p(np.exp(params_cal[:, 1:2])) + self.SIGMA_FLOOR
-           
-            sigma_c = np.minimum(self.SIGMA_MAX, sigma_c)
-           
-            df_c = self.NU_FLOOR + np.log1p(np.exp(params_cal[:, 2:3]))
-
-            self._SIGMA_CAL_SCALE = float(self._calibrate_sigma_scale(
-                y_cal_res = y_cal_res, 
-                mu_c = mu_c, 
-                sigma_c = sigma_c, 
-                df_c = df_c
-            ))
-
-            sigma_c_cal = np.minimum(self.SIGMA_MAX, sigma_c * self._SIGMA_CAL_SCALE)
-
-            self._alpha_levels_adj, self._iso_model = self._fit_pit_isotonic(
-                y_true_res_cal = y_cal_res,
-                mu_c = mu_c,
-                sigma_c = sigma_c_cal,
-                df_c = df_c
-            )
             
             if len(X_tr) > 4 * self.BATCH:
                 
@@ -3531,6 +3556,43 @@ class GRU_Forecaster:
                 callbacks = callbacks, 
                 verbose = 0, 
                 validation_data = ds_val
+            )
+            Xc = tf.convert_to_tensor(X_cal)
+
+            outs_cal = fns["fwd"](Xc)
+
+            if isinstance(outs_cal, dict):
+                
+                params_cal = outs_cal["dist_head"]  
+            
+            else:
+                
+                params_cal = outs_cal[1]
+
+            params_cal = params_cal.numpy().astype(np.float32, copy = False)
+
+            mu_c = self.MU_MAX * np.tanh(params_cal[:, 0:1])
+           
+            sigma_c = np.log1p(np.exp(params_cal[:, 1:2])) + self.SIGMA_FLOOR
+           
+            sigma_c = np.minimum(self.SIGMA_MAX, sigma_c)
+           
+            df_c = self.NU_FLOOR + np.log1p(np.exp(params_cal[:, 2:3]))
+
+            self._SIGMA_CAL_SCALE = float(self._calibrate_sigma_scale(
+                y_cal_res = y_cal_res, 
+                mu_c = mu_c, 
+                sigma_c = sigma_c, 
+                df_c = df_c
+            ))
+
+            sigma_c_cal = np.minimum(self.SIGMA_MAX, sigma_c * self._SIGMA_CAL_SCALE)
+
+            self._alpha_levels_adj, self._iso_model = self._fit_pit_isotonic(
+                y_true_res_cal = y_cal_res,
+                mu_c = mu_c,
+                sigma_c = sigma_c_cal,
+                df_c = df_c
             )
 
             X_hist = np.empty((1, HIST, n_ch), dtype = np.float32)
@@ -3797,18 +3859,18 @@ class GRU_Forecaster:
                 samples_resid_q = mu_stack + sigma_stack * t_draws_q[..., None]
 
                 samples_total = samples_resid + mu_base_now            
-                
+                 
                 samples_total_q = samples_resid_q + mu_base_now
-
-                block = samples_total.reshape(mc, n_scn, w).transpose(1, 0, 2).reshape(n_scn, mc * w)
-                
-                block_q = samples_total_q.reshape(mc, n_scn, w).transpose(1, 0, 2).reshape(n_scn, mc * w)
-
-                samples_buf[:, fill:fill + mc * w] = np.expm1(block)
-                
-                samples_buf_q[:, fill:fill + mc * w] = np.expm1(block_q)    
                 
                 mc_w = mc * w
+
+                block = samples_total.reshape(mc, n_scn, w).transpose(1, 0, 2).reshape(n_scn, mc_w)
+                
+                block_q = samples_total_q.reshape(mc, n_scn, w).transpose(1, 0, 2).reshape(n_scn, mc_w)
+
+                samples_buf[:, fill:fill + mc_w] = np.expm1(block)
+                
+                samples_buf_q[:, fill:fill + mc_w] = np.expm1(block_q)    
 
                 fill += mc_w
                 
@@ -3818,8 +3880,12 @@ class GRU_Forecaster:
             
             rets_q = samples_buf_q.reshape(-1)
 
-            alpha_adj = getattr(self, "_alpha_levels_adj", np.array([0.10, 0.50, 0.90], dtype=np.float32))
-
+            alpha_adj = getattr(self, "_alpha_levels_adj", np.array([0.10, 0.50, 0.90], np.float32))
+          
+            alpha_adj = np.nan_to_num(alpha_adj, nan=0.5, posinf=0.999999, neginf=1e-6)
+          
+            alpha_adj = np.clip(alpha_adj, 1e-6, 1.0 - 1e-6)
+          
             p10_raw, p50_raw, p90_raw = np.quantile(rets, alpha_adj)
 
             p10_q, p50_q, p90_q = np.quantile(rets_q, alpha_adj)
@@ -3946,9 +4012,81 @@ class GRU_Forecaster:
             out = delta_reg[-hist:, :]
        
         return out.astype(np.float32, copy = False)
+    
+    
+    def _hard_kill_executor(
+        self,
+        exe
+    ):
 
+        try:
+    
+            exe.shutdown(wait=False, cancel_futures=True)
+    
+        except Exception:
+    
+            pass
 
-    def run(self):
+        procs = getattr(exe, "_processes", {}) or {}
+
+        for p in list(procs.values()):
+
+            try:
+
+                if p is None:
+
+                    continue
+
+                if p.is_alive():
+
+                    try:
+
+                        p.terminate()
+
+                    except Exception:
+
+                        pass
+
+                    try:
+
+                        p.join(timeout = 5)
+
+                    except Exception:
+
+                        pass
+
+                    if p.is_alive():
+
+                        try:
+
+                            p.kill()  
+
+                        except Exception:
+
+                            try:
+
+                                p.terminate()
+
+                            except Exception:
+
+                                pass
+
+                        try:
+
+                            p.join(timeout=5)
+
+                        except Exception:
+
+                            pass
+
+            except Exception:
+
+                pass
+
+        
+    def run(
+        self
+    ):
         """
         End-to-end orchestration: build state, launch a process pool, collect per-ticker
         results, compile summary DataFrames, and optionally write Excel outputs.
@@ -3994,6 +4132,8 @@ class GRU_Forecaster:
         """
 
         faulthandler.enable()
+        
+        faulthandler.dump_traceback_later(600, repeat = True) 
 
         state_pack = self.build_state()
 
@@ -4011,64 +4151,258 @@ class GRU_Forecaster:
        
         bad_rows: List[Dict[str, Any]] = []
 
-        with ProcessPoolExecutor(
-            max_workers = max_workers,
-            mp_context = ctx,
-            initializer = _init_worker,
-            initargs = (state_pack,)
-        ) as exe:
+        SEQ_LEN = self.SEQUENCE_LENGTH
+
+        eligible = []
       
-            futures = [exe.submit(_worker_forecast_one, t) for t in tickers]
+        for t in tickers:
       
-            for fut in as_completed(futures):
+            wp = state_pack["weekly_price_by_ticker"].get(t)
       
+            align = state_pack["align_cache"].get(t)
+
+            if wp is None:
+
+                bad_rows.append({"Ticker": t, "status": "skipped", "reason": "no_price_history_weekly"})
+
+                continue
+
+            if align is None:
+
+                bad_rows.append({"Ticker": t, "status": "skipped", "reason": "alignment_missing"})
+
+                continue
+
+            if len(wp["y"]) < SEQ_LEN + 2:
+
+                bad_rows.append({"Ticker": t, "status": "skipped", "reason": "short_price_history"})
+
+                continue
+
+            if len(align["idx_keep"]) < SEQ_LEN + 1:
+
+                bad_rows.append({"Ticker": t, "status": "skipped", "reason": "insufficient_joint_features"})
+
+                continue
+
+            eligible.append(t)
+
+        tickers = eligible
+        
+        remaining = list(tickers)
+
+        TOTAL = len(remaining)
+
+        done_ct = 0
+
+        HEARTBEAT_SECS = 60
+
+        PER_TICKER_TIMEOUT_SECS = 1800 
+
+        finished_tickers: set[str] = set()
+
+        MAX_POOL_RESTARTS = 25
+
+        pool_restarts = 0
+
+        while remaining:
+
+            remaining = [t for t in remaining if t not in finished_tickers]
+
+            if not remaining:
+
+                break
+
+            if pool_restarts > MAX_POOL_RESTARTS:
+
+                for t in remaining:
+
+                    bad_rows.append({"Ticker": t, "status": "error", "reason": "too_many_pool_restarts"})
+
+                break
+
+            exe = ProcessPoolExecutor(
+                max_workers=max_workers,
+                mp_context=ctx,
+                initializer=_init_worker,
+                initargs=(state_pack,)
+            )
+
+            try:
+
+                fut_to_ticker = {exe.submit(_worker_forecast_one, t): t for t in remaining}
+
+                pending = set(fut_to_ticker.keys())
+
+                start_ts = {fut: time.monotonic() for fut in pending}
+
+                timed_out_this_round = set()
+
+                restart_needed = False
+
+                while pending:
+
+                    done, pending = wait(pending, timeout = HEARTBEAT_SECS, return_when = FIRST_COMPLETED)
+
+                    if not done:
+
+                        self.logger.info(
+                            "Still running… %d/%d done, %d pending",
+                            done_ct, TOTAL, len(pending)
+                        )
+
+                        if len(pending) <= 5:
+
+                            now = time.monotonic()
+
+                            slow = sorted(
+                                [(now - start_ts[f], fut_to_ticker[f]) for f in pending],
+                                reverse=True
+                            )
+
+                            self.logger.info(
+                                "Pending tickers: %s",
+                                ", ".join([f"{t}({int(el)}s)" for el, t in slow])
+                            )
+
+                    for fut in done:
+                     
+                        t = fut_to_ticker[fut]
+                     
+                        start_ts.pop(fut, None)
+
+                        if t in finished_tickers:
+
+                            continue
+
+                        finished_tickers.add(t)
+
+                        done_ct += 1
+
+                        try:
+
+                            res = fut.result()
+
+                            if isinstance(res, tuple) and len(res) == 2:
+
+                                raw, cal = res
+
+                                ok_rows_raw.append(raw)
+
+                                ok_rows_cal.append(cal)
+
+                                self.logger.info(
+                                    "Ticker %s [raw]: Min %.2f, Avg %.2f, Max %.2f, Return %.4f, SE %.4f",
+                                    raw["Ticker"], raw["Min Price"], raw["Avg Price"], raw["Max Price"], raw["Returns"], raw["SE"]
+                                )
+                                
+                                self.logger.info(
+                                    "Ticker %s [cal]: Min %.2f, Avg %.2f, Max %.2f, Return %.4f, SE %.4f",
+                                    cal["Ticker"], cal["Min Price"], cal["Avg Price"], cal["Max Price"], cal["Returns"], cal["SE"]
+                                )
+
+                            elif isinstance(res, dict) and res.get("status") == "ok":
+                    
+                                ok_rows_raw.append(res)
+                    
+                                self.logger.info(
+                                    "Ticker %s [raw]: Min %.2f, Avg %.2f, Max %.2f, Return %.4f, SE %.4f",
+                                    res["Ticker"], res["Min Price"], res["Avg Price"], res["Max Price"], res["Returns"], res["SE"]
+                                )
+
+                            else:
+                    
+                                bad_rows.append(res if isinstance(res, dict) else {
+                                    "Ticker": t, "status": "error", "reason": "bad result type"
+                                })
+                    
+                                rr = res if isinstance(res, dict) else {"status": "error", "reason": "bad result type"}
+                    
+                                self.logger.info("Ticker %s: %s (%s)", t, rr.get("status"), rr.get("reason"))
+
+                        except Exception as ex:
+                    
+                            self.logger.error("Ticker %s failed: %s", t, ex)
+                    
+                            bad_rows.append({"Ticker": t, "status": "error", "reason": str(ex)})
+
+                    if pending:
+
+                        now = time.monotonic()
+
+                        to_kill = []
+
+                        for fut in pending:
+
+                            if now - start_ts.get(fut, now) > PER_TICKER_TIMEOUT_SECS:
+
+                                to_kill.append(fut)
+
+                        if to_kill:
+
+                            for fut in to_kill:
+
+                                t = fut_to_ticker[fut]
+
+                                if t in finished_tickers:
+
+                                    continue
+
+                                if t not in timed_out_this_round:
+
+                                    timed_out_this_round.add(t)
+
+                                    finished_tickers.add(t)
+
+                                    done_ct += 1
+
+                                    self.logger.error(
+                                        "%s: HARD timeout after %ds; killing pool (will re-queue others)",
+                                        t, PER_TICKER_TIMEOUT_SECS
+                                    )
+
+                                    bad_rows.append({
+                                        "Ticker": t,
+                                        "status": "error",
+                                        "reason": f"hard_timeout>{PER_TICKER_TIMEOUT_SECS}s"
+                                    })
+
+                            remaining = []
+                         
+                            for f in pending:
+                         
+                                t = fut_to_ticker[f]
+                         
+                                if (t not in timed_out_this_round) and (t not in finished_tickers):
+                         
+                                    remaining.append(t)
+
+                            self.logger.error(
+                                "Hard-killing pool (will re-queue others): %s",
+                                ", ".join(sorted(timed_out_this_round))
+                            )
+
+                            self._hard_kill_executor(exe)
+
+                            pool_restarts += 1
+
+                            restart_needed = True
+
+                            break
+
+                if not restart_needed:
+
+                    remaining = []
+
+            finally:
+                
                 try:
-      
-                    res = fut.result(timeout = 1800)
-      
-                    if isinstance(res, tuple) and len(res) == 2:
-      
-                        raw, cal = res
-                  
-                        ok_rows_raw.append(raw)
-                   
-                        ok_rows_cal.append(cal)
-                   
-                        self.logger.info(
-                            "Ticker %s [raw]: Min %.2f, Avg %.2f, Max %.2f, Return %.4f, SE %.4f",
-                            raw["Ticker"], raw["Min Price"], raw["Avg Price"], raw["Max Price"], raw["Returns"], raw["SE"]
-                        )
-                   
-                        self.logger.info(
-                            "Ticker %s [cal]: Min %.2f, Avg %.2f, Max %.2f, Return %.4f, SE %.4f",
-                            cal["Ticker"], cal["Min Price"], cal["Avg Price"], cal["Max Price"], cal["Returns"], cal["SE"]
-                        )
-                   
-                    elif isinstance(res, dict) and res.get("status") == "ok":
-                   
-                        ok_rows_raw.append(res)  
-                       
-                        self.logger.info(
-                            "Ticker %s [raw]: Min %.2f, Avg %.2f, Max %.2f, Return %.4f, SE %.4f",
-                            res["Ticker"], res["Min Price"], res["Avg Price"], res["Max Price"], res["Returns"], res["SE"]
-                        )
-                  
-                    else:
-                  
-                        bad_rows.append(res if isinstance(res, dict) else {"status":"error","reason":"bad result type"})
-                  
-                        self.logger.info("Ticker %s: %s (%s)",
-                                        res.get("Ticker") if isinstance(res, dict) else "?", 
-                                        res.get("status") if isinstance(res, dict) else "error",
-                                        res.get("reason") if isinstance(res, dict) else "bad result type")
                 
-                except TimeoutError:
+                    exe.shutdown(wait = False, cancel_futures = True)
                 
-                    self.logger.error("A worker timed out; continuing.")
+                except Exception:
                 
-                except Exception as ex:
-                
-                    self.logger.error("Worker failed: %s", ex)
+                    pass
 
         if ok_rows_raw:
         
