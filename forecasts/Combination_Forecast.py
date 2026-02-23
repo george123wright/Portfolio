@@ -3,10 +3,10 @@ Portfolio combination-forecast and cross-sectional scoring module.
 
 Purpose
 -------
-This module builds a combined expected-return forecast per equity ticker from a
-set of heterogeneous forecasters, derives a conservative uncertainty (standard
+This module builds a combined expected-return forecast per equity ticker from a 
+set of heterogeneous forecasters, derives a conservative uncertainty (standard   
 error) for that forecast, computes a suite of return/quality/valuation/
-behavioural diagnostics, and assembles an additive score used for ranking. It
+behavioural diagnostics, and assembles an additive score used for ranking. It  
 also prepares export-ready tables for downstream portfolio construction and
 reporting.
 
@@ -148,7 +148,7 @@ Indicators (summary)
 
     P/B value screen and relative level vs industry
     
-    EPS-based trailing/forward P/E compression vs industry benchmark (excluding '.L' tickers).
+    EPS-based trailing/forward P/E compression vs industry benchmark.
 
 - **Asymmetry**:
 
@@ -244,40 +244,55 @@ import numpy as np
 import pandas as pd
 import datetime as dt
 import logging
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Sequence, Mapping, Hashable, Any, Callable
 
-from ratio_data import RatioData
-from export_forecast import export_results
+from data_processing.ratio_data import RatioData
+from data_processing.financial_forecast_data import FinancialForecastData
+from functions.export_forecast import export_results
 from functions.cov_functions import shrinkage_covariance
 import Optimiser.portfolio_functions as pf
 import Optimiser.Port_Optimisation as po
 import config
 
+IND_DATA_FILE: str = config.IND_DATA_FILE
 
-r = RatioData()
+MIN_STD: float = 1e-2
 
-pa  = pf.PortfolioAnalytics(cache = False)     
+MAX_STD: float = 2.0
 
-weekly_ret = r.weekly_rets
+MAX_MODEL_WT: float = 0.10
 
-daily_ret = r.daily_rets
+SHORT_RATIO_INCREASE: float = 1.05
 
-monthly_ret = r.close.resample('M').last().pct_change().dropna()
+SHORT_RATIO_DECREASE: float = 0.95
 
-today = dt.date.today()
+WSB_POS_THRESHOLD: float = 0.0
 
-logging.basicConfig(
-    level = logging.INFO,
-    format = '%(asctime)s - %(levelname)s - %(message)s'
-)
+WSB_VPOS_THRESHOLD: float = 0.2
 
-IND_DATA_FILE = config.IND_DATA_FILE
+WSB_HIGH_ATTENTION: int = 4
 
-MIN_STD = 1e-2
+WSB_VERY_HIGH_ATTENTION: int = 10
 
-MAX_STD = 2
+KURT_NEAR_NORMAL: float = 3.5
 
-MAX_MODEL_WT = 0.10
+RISK_RATIO_GOOD: float = 1.0
+
+PRED_ALPHA_PENALTY: int = 5
+
+EPS_REV_CLIP: int = 5
+
+HIST_GROUP_LIMIT: float = 0.10
+
+IV_GROUP_LIMIT: float = 0.40
+
+F_GROUP_LIMIT: float = 0.2
+
+ML_GROUP_LIMIT: float = 0.40
+
+MC_GROUP_LIMIT: float = 0.15
+
+SUBGROUP_LIMIT: float = 0.10
 
 
 def ensure_headers_are_strings(
@@ -314,32 +329,6 @@ def ensure_headers_are_strings(
         df.index.name = str(df.index.name)
     
     return df
-
-
-def fix_header_cells(
-    ws
-):
-    """
-    Coerce the *first row* (header row) cell values in an openpyxl worksheet to strings.
-
-    Parameters
-    ----------
-    ws : openpyxl.worksheet.worksheet.Worksheet
-        Target worksheet object.
-
-    Returns
-    -------
-    None
-
-    Notes
-    -----
-    Useful when a Table style or conditional formatting expects string headers,
-    or when a sheet was created by a third-party exporter with non-string cells.
-    """
-   
-    for cell in ws[1]:
-        
-        cell.value = str(cell.value) if cell.value is not None else ''
 
 
 class PortfolioOptimiser:
@@ -405,7 +394,7 @@ class PortfolioOptimiser:
         Fundamental/returns utility with latest prices and return matrices.
     today : datetime.date
         Convenience timestamp.
-    LOWER_PERCENTILE, UPPER_PERCENTILE, NINETY_PERCENTILE : int
+    UPPER_PERCENTILE : int
         Percentiles used in some scoring thresholds.
 
     Notes
@@ -451,17 +440,25 @@ class PortfolioOptimiser:
         self.excel_file_out = excel_file
         
         self.excel_file_in = config.DATA_FILE
-        
+
         self.ratio_data = ratio_data
-        
+
+        self.analytics = pf.PortfolioAnalytics(cache = False)
+
         self.today = dt.date.today()
-        
-        self.LOWER_PERCENTILE = 25
-        
-        self.UPPER_PERCENTILE = 75
-        
-        self.NINETY_PERCENTILE = 90
-        
+
+        self.UPPER_PERCENTILE: int = 75
+
+        self.weekly_ret = ratio_data.weekly_rets
+
+        self.daily_ret = ratio_data.daily_rets
+
+        self.daily_close = ratio_data.close
+
+        self.daily_open = ratio_data.open
+
+        self.macro_weekly = ratio_data.macro_data
+
         self._load_all_data()
 
     
@@ -557,8 +554,12 @@ class PortfolioOptimiser:
             'Exponential Returns':'EMA',
             'DCF': 'DCF',
             'DCFE': 'DCFE',
+            'DCF CapIQ': 'DCF CapIQ',
+            'FCFE CapIQ': 'FCFE CapIQ',
+            'DDM CapIQ': 'DDM CapIQ',
             'Daily Returns': 'Daily',
             'RI': 'RI',
+            'RI CapIQ': 'RI CapIQ',
             'CAPM BL Pred': 'CAPM',
             'FF3 Pred': 'FF3',
             'FF5 Pred': 'FF5',
@@ -637,11 +638,15 @@ class PortfolioOptimiser:
             'marketCap',
             'totalRevenue', 
             'Avg Revenue Estimate',
-            'Tax Rate'
+            'Tax Rate',
+            'EPS Revision 30D',
+            'EPS Revision 7D',
+            'Asset Growth Rate',
+            'Asset Growth Rate Vol'
         ]
         
         self.analyst_df = (
-            xls.parse('Analyst Data', usecols=analyst_cols, index_col = 0)
+            xls.parse('Analyst Data', usecols = analyst_cols, index_col = 0)
             .sort_index()
         )
         
@@ -670,14 +675,64 @@ class PortfolioOptimiser:
         interval: str,
     ) -> pd.Series:
         """
-        Convert a single return series in `series_ccy` to base_ccy using the same formula.
+        Convert a return series from local currency into a base currency using
+        multiplicative FX compounding.
+
+        Mathematical definition
+        -----------------------
+        Let:
+
+        - r_local,t denote the asset return in source-currency terms.
+       
+        - P_fx,t denote the FX price for pair series_ccy/base_ccy at time t.
+       
+        - r_fx,t = (P_fx,t / P_fx,t-1) - 1 denote the FX return.
+
+        The converted base-currency return is:
+
+            r_base,t = (1 + r_local,t) * (1 + r_fx,t) - 1.
+
+        This preserves exact one-period compounding and avoids approximation
+        errors that arise from additive conversions.
+
+        Implementation details
+        ----------------------
+        - If `series_ccy` equals `base_ccy`, the input is returned unchanged.
+    
+        - FX prices are fetched from `RatioData`, aligned to the return index,
+          and forward/backward filled before differencing.
+    
+        - The first missing FX return is set to 0.0 to keep the aligned output
+          finite and neutral.
+
+        Parameters
+        ----------
+        series_rets : pd.Series
+            Return series in source-currency units.
+        series_ccy : str
+            Source currency code.
+        base_ccy : str
+            Target base currency code.
+        interval : str
+            Sampling interval used by the FX data lookup.
+
+        Returns
+        -------
+        pd.Series
+            Return series expressed in base-currency units.
+
+        Advantages
+        ----------
+        The multiplicative mapping is consistent with portfolio return algebra
+        and is therefore suitable for benchmark-relative scoring and covariance
+        construction on a common currency basis.
         """
        
         if series_ccy == base_ccy:
        
             return series_rets
        
-        fx_map = r.get_fx_price_by_pair_local_to_base(
+        fx_map = self.ratio_data.get_fx_price_by_pair_local_to_base(
             country_to_pair = {
                 series_ccy: f"{series_ccy}{base_ccy}"
             },
@@ -687,7 +742,7 @@ class PortfolioOptimiser:
         
         fx_price = fx_map[f"{series_ccy}{base_ccy}"].reindex(series_rets.index).ffill().bfill()
        
-        fx_ret = fx_price.pct_change().reindex(series_rets.index).fillna(0.0)
+        fx_ret = fx_price.pct_change(fill_method=None).reindex(series_rets.index).fillna(0.0)
        
         return (1.0 + series_rets).mul(1.0 + fx_ret).sub(1.0)
 
@@ -824,17 +879,17 @@ class PortfolioOptimiser:
         inc -= (ratio >= upper).astype(int)
        
         mask_prior_nz = prior > 0
-       
-        inc -= ((ratio >= 1.05 * prior_ratio) & mask_prior_nz).astype(int)
-       
-        inc += (ratio <= 0.95 * prior_ratio).astype(int)
+
+        inc -= ((ratio >= SHORT_RATIO_INCREASE * prior_ratio) & mask_prior_nz).astype(int)
+
+        inc += (ratio <= SHORT_RATIO_DECREASE * prior_ratio).astype(int)
        
         return inc.astype(int)
 
 
     def wsb_score(
         self, 
-        index: pd.Index
+        universe: pd.Index
         ) -> pd.Series:
         """
         Construct an additive WSB sentiment/attention signal.
@@ -898,9 +953,9 @@ class PortfolioOptimiser:
             Additive sentiment/attention adjustment on `index`.
         """
 
-        common = self.wsb.index.intersection(index)
+        common = self.wsb.index.intersection(universe)
       
-        adj = pd.Series(0, index = index, dtype = int)
+        adj = pd.Series(0, index = universe, dtype = int)
       
         if common.empty:
       
@@ -908,17 +963,17 @@ class PortfolioOptimiser:
       
         w = self.wsb.loc[common]
       
-        pos = w['avg_sentiment'] > 0
-      
-        neg = w['avg_sentiment'] < 0
-      
-        hi = w['mentions'] > 4
+        pos = w['avg_sentiment'] > WSB_POS_THRESHOLD
         
-        vhi = w['mentions'] > 10
+        neg = w['avg_sentiment'] < WSB_POS_THRESHOLD
+
+        hi = w['mentions'] > WSB_HIGH_ATTENTION
         
-        vpos = w['avg_sentiment'] > 0.2
+        vhi = w['mentions'] > WSB_VERY_HIGH_ATTENTION
+
+        vpos = w['avg_sentiment'] > WSB_VPOS_THRESHOLD
         
-        vneg = w['avg_sentiment'] < -0.2
+        vneg = w['avg_sentiment'] < -WSB_VPOS_THRESHOLD
 
         add = pos.astype(int)
         
@@ -1032,7 +1087,7 @@ class PortfolioOptimiser:
         else:
             
             eg_hi = np.inf
-        
+         
         adj = (eg > 0).astype(int) - (eg < 0).astype(int)
         
         adj += (eg > eg_hi).astype(int)
@@ -1078,7 +1133,7 @@ class PortfolioOptimiser:
 
         v = operating_cash_flow.fillna(0)
         
-        adj = (v > 0).astype(int).reindex(v.index).astype(int)
+        adj = (v > 0).astype(int)
 
         return self._apply_sglp_bonus(
             adj = adj
@@ -1308,6 +1363,68 @@ class PortfolioOptimiser:
             adj = adj
         )
         
+    
+    def asset_growth_rate_sharpe(
+        self,
+        asset_growth_rate: pd.Series,
+        asset_growth_rate_vol: pd.Series
+    ) -> pd.Series:
+        """
+        Score the asset-growth signal using a Sharpe-like signal-to-noise
+        statistic.
+
+        Mathematical definition
+        -----------------------
+        For each ticker t, define:
+
+            q_t = g_t / s_t,
+
+        where g_t is the estimated asset growth rate and s_t is the volatility
+        of that growth rate.
+
+        The additive score increment is:
+
+            +1 if q_t > 1,
+            -1 if q_t < 0,
+             0 otherwise.
+
+        Inputs are aligned to a common index and missing values are replaced
+        with zero before forming q_t.
+
+        Parameters
+        ----------
+        asset_growth_rate : pd.Series
+            Cross-sectional asset growth rate estimates.
+        asset_growth_rate_vol : pd.Series
+            Cross-sectional volatility estimates of asset growth.
+
+        Returns
+        -------
+        pd.Series
+            Integer score contribution with the deterministic SGLP.L bonus
+            applied via `_apply_sglp_bonus`.
+
+        Modelling rationale
+        -------------------
+        The ratio q_t rewards growth that is large relative to its own
+        instability, so persistent balance-sheet expansion receives higher
+        scores than equally large but noisy growth episodes.
+        """
+        
+        asset_growth_rate = asset_growth_rate.reindex(asset_growth_rate_vol.index).fillna(0)
+        
+        asset_growth_rate_vol = asset_growth_rate_vol.fillna(0)
+        
+        asset_sharpe = asset_growth_rate.div(asset_growth_rate_vol).fillna(0)
+        
+        sc = (asset_sharpe > 1).astype(int)
+        
+        sc -= (asset_sharpe < 0).astype(int)
+        
+        return self._apply_sglp_bonus(
+            adj = sc
+        )
+        
 
     def price_to_book_score(
         self, 
@@ -1315,7 +1432,7 @@ class PortfolioOptimiser:
         ind_pb: pd.Series
         ) -> pd.Series:
         """
-        Score valuation using Price-to-Book (P/B), excluding tickers ending '.L'.
+        Score valuation using Price-to-Book (P/B)'.
 
         Definitions
         -----------
@@ -1324,11 +1441,6 @@ class PortfolioOptimiser:
         - Price-to-book: PB_t
        
         - Industry baseline: PB*_t
-
-        Universe Filter
-        ---------------
-        Tickers whose symbol ends with '.L' are excluded from this indicator to avoid
-        cross-market accounting and reporting distortions.
 
         Scoring Rules (on the filtered universe)
         ----------------------------------------
@@ -1354,7 +1466,7 @@ class PortfolioOptimiser:
         Returns
         -------
         pd.Series (int)
-            Additive score on the full input index (zeros for '.L' tickers), then +1
+            Additive score on the full input index, then +1
             for 'SGLP.L' if present.
 
         Notes
@@ -1370,20 +1482,16 @@ class PortfolioOptimiser:
         ipb = ind_pb.reindex(idx).fillna(0)
         
         adj = pd.Series(0, index = idx, dtype = int)
+                                        
+        val = (p> 0) & (p <= 1)
         
-        mask_arr = (~pd.Series(idx, index=idx).astype(str).str.endswith('.L')).to_numpy()
+        adj += val.astype(int)
         
-        local = pd.Index(idx)[mask_arr]
+        adj -= (p <= 0).astype(int)
         
-        val = (p.loc[local] > 0) & (p.loc[local] <= 1)
+        adj += (p < ipb).astype(int)
         
-        adj.loc[local] += val.astype(int)
-        
-        adj.loc[local] -= (p.loc[local] <= 0).astype(int)
-        
-        adj.loc[local] += (p.loc[local] < ipb.loc[local]).astype(int)
-        
-        adj.loc[local] -= (p.loc[local] > ipb.loc[local]).astype(int)
+        adj -= (p > ipb).astype(int)
 
         return self._apply_sglp_bonus(
             adj = adj
@@ -1399,8 +1507,7 @@ class PortfolioOptimiser:
         eps_1y: pd.Series
         ) -> pd.Series:
         """
-        Score EPS-based valuation diagnostics using trailing and forward P/E, excluding
-        tickers ending '.L'.
+        Score EPS-based valuation diagnostics using trailing and forward P/E.
 
         Definitions
         -----------
@@ -1418,7 +1525,7 @@ class PortfolioOptimiser:
       
         - Forward P/E:  PE_f,t  = P_t / EPS^f_t     (∞ if EPS^f_t  = 0)
 
-        Scoring Rules (excluding tickers ending '.L')
+        Scoring Rules
         ---------------------------------------------
         - Relative valuation:
       
@@ -1470,22 +1577,73 @@ class PortfolioOptimiser:
            
             pe_f = pd.Series(np.where(feps != 0, pr / feps, np.inf), index = idx)
         
-        mask = ~pd.Index(idx).str.endswith('.L')
-        
-        valid = idx[mask]
-        
         adj = pd.Series(0, index = idx, dtype = int)
         
-        adj.loc[valid] -= (pe_tr.loc[valid] > ipe.loc[valid]).astype(int)
+        adj -= (pe_tr > ipe).astype(int)
         
-        adj.loc[valid] += (pe_f.loc[valid] < pe_tr.loc[valid]).astype(int)
+        adj += (pe_f < pe_tr).astype(int)
         
-        adj.loc[valid] -= (pe_f.loc[valid] > pe_tr.loc[valid]).astype(int)
+        adj -= (pe_f > pe_tr).astype(int)
 
         return self._apply_sglp_bonus(
             adj = adj
         )        
-    
+
+
+    def peg_ratio_adjustment(
+        self, 
+        price: pd.Series, 
+        forward_eps: pd.Series, 
+        earnings_growth: pd.Series
+    ) -> pd.Series:
+        """
+        Score based on the PEG ratio (Price/Earnings divided by Growth Rate).
+        
+        Formula
+        -------
+        PEG = (Price / Forward EPS) / (Earnings Growth * 100)
+        
+        (Note: earnings growth in the sheet appears as a decimal, for example
+        0.15 for 15 percent, so the denominator is scaled accordingly.)
+
+        Parameters
+        ----------
+        price : pd.Series
+            Current Price.
+        forward_eps : pd.Series
+            Forward EPS estimate.
+        earnings_growth : pd.Series
+            projected earnings growth (decimal).
+
+        Returns
+        -------
+        pd.Series (int)
+            +1 for attractive PEG, negative scores for expensive/distressed PEG.
+        """
+        
+        idx = price.index.intersection(forward_eps.index).intersection(earnings_growth.index)
+        
+        p = price.reindex(idx).fillna(0)
+        
+        eps = forward_eps.reindex(idx).fillna(0)
+        
+        g = earnings_growth.reindex(idx).fillna(0)
+        
+        pe = p.div(eps).replace([np.inf, -np.inf], np.nan).fillna(0)
+        
+        peg = pe.div(g * 100).replace([np.inf, -np.inf], np.nan).fillna(0)
+        
+        scores = pd.Series(0, index=idx)
+        
+        scores.loc[(peg > 0) & (peg < 1.0)] = 1
+        
+        scores.loc[peg > 2.0] = -1
+        
+        scores.loc[peg < 0] = -1
+
+        return self._apply_sglp_bonus(
+            adj = scores
+        )
     
     def upside_downside_score(
         self,
@@ -1565,7 +1723,7 @@ class PortfolioOptimiser:
 
         Notes
         -----
-        - The helper functions `pa.capture_slopes` and `pa.capture_ratios` supply the
+        - The helper functions `self.analytics.capture_slopes` and `self.analytics.capture_ratios` supply the
         slope and ratio measures. The internal estimation details are library-specific,
         but both are monotonically consistent with the informal definitions above.
       
@@ -1575,6 +1733,40 @@ class PortfolioOptimiser:
         def caps_for(
             tkr
         ):
+            """
+            Compute upside/downside capture diagnostics for a single ticker
+            against the benchmark series.
+
+            Conceptual measures
+            -------------------
+            Two complementary diagnostics are requested from the analytics
+            utility:
+
+            1. Capture slopes (regression-style sensitivities in up/down states).
+           
+            2. Capture ratios:
+
+                   Upside ratio   = mean(r_asset | r_bench > 0) / mean(r_bench | r_bench > 0)
+                   Downside ratio = mean(r_asset | r_bench < 0) / mean(r_bench | r_bench < 0)
+
+            Parameters
+            ----------
+            tkr : Hashable
+                Ticker key in `hist_rets`.
+
+            Returns
+            -------
+            tuple[float, float, float, float]
+                (up_slope, down_slope, up_ratio, down_ratio). Where data are
+                insufficient, the current implementation returns placeholder
+                zeros.
+
+            Modelling rationale
+            -------------------
+            Using both slope and ratio views reduces sensitivity to a single
+            estimator choice and provides a richer view of upside participation
+            versus downside protection.
+            """
         
             p = hist_rets[tkr].dropna()
         
@@ -1584,12 +1776,12 @@ class PortfolioOptimiser:
         
                 return 0.0, 0.0
         
-            d = pa.capture_slopes(
+            d = self.analytics.capture_slopes(
                 port_rets = p,
                 bench_rets = b
             )
         
-            m = pa.capture_ratios(
+            m = self.analytics.capture_ratios(
                 port_rets = p, 
                 bench_rets = b
             )
@@ -1732,7 +1924,9 @@ class PortfolioOptimiser:
         Scoring Rule
         ------------
         - +2 if insider purchases > 0 (net buying)
+        
         - −1 if insider purchases < 0 (net selling)
+        
         -  0 otherwise (flat or missing)
 
         Parameters
@@ -1905,6 +2099,92 @@ class PortfolioOptimiser:
             adj = adj
         )
         
+
+    def beta_adjustment(
+        self,
+        beta: pd.Series
+    ) -> pd.Series:
+        """
+        Score market sensitivity (Beta).
+
+        Scoring Rule
+        ------------
+        +1 for defensive/stable assets (0.5 < beta < 1.1).
+        
+        -1 for high sensitivity (beta > 1.5).
+        
+        0 otherwise.
+
+        Parameters
+        ----------
+        beta : pd.Series
+            The asset's beta relative to the benchmark.
+
+        Returns
+        -------
+        pd.Series (int)
+            Risk-based adjustment.
+        """
+        
+        idx = beta.index
+        
+        b = beta.reindex(idx).fillna(1.0) 
+        
+        scores = pd.Series(0, index = idx)
+        
+        scores.loc[(b < 1.0)] = 1
+        
+        scores.loc[b > 1.5] = -1
+                
+        return self._apply_sglp_bonus(
+            adj = scores
+        )
+        
+
+    def volatility_trend_score(
+        self,
+        daily_rets: pd.DataFrame,
+    ) -> pd.Series:
+        """
+        Score the volatility regime. 
+        Reward volatility compression (Short Term < Long Term).
+        Penalize volatility spikes.
+
+        Parameters
+        ----------
+        daily_rets : pd.DataFrame
+            Daily return history.
+
+        Returns
+        -------
+        pd.Series (int)
+            +1 for calming vol, -1 for spiking vol.
+        """
+
+        short_vol = daily_rets.iloc[-21:].std() 
+       
+        long_vol = daily_rets.iloc[-252:].std() 
+        
+        idx = daily_rets.columns
+       
+        s_vol = short_vol.reindex(idx)
+       
+        l_vol = long_vol.reindex(idx)
+        
+        scores = pd.Series(0, index=idx)
+        
+        scores.loc[s_vol < l_vol] = 0
+        
+        scores.loc[s_vol > l_vol] = -1
+        
+        scores.loc[s_vol > (l_vol * 1.5)] = -1
+        
+        scores.loc[s_vol > (l_vol * 2)] = -1
+        
+        scores.loc[s_vol < (l_vol * 0.5)] = +1
+        
+        return scores
+        
         
     def no_new_shares_adjustment(
         self, 
@@ -1934,6 +2214,43 @@ class PortfolioOptimiser:
     
         return pd.Series((v <= 0).astype(int), index = idx)
 
+
+    def debt_to_equity_adjustment(
+        self, 
+        d_to_e: pd.Series
+    ) -> pd.Series:
+        """
+        Award +1 if 0 < debt / equity < 1. 
+       
+        Award -1 if debt / equity > 2.
+       
+        Award -2 if debt / equity > 4.
+       
+        Neutral (0) if debt / equity is 0 or between 1 and 2.
+        
+        Parameters
+        ----------
+        d_to_e : pd.Series
+            Debt to Equity ratio values.
+
+        Returns
+        -------
+        pd.Series (int)
+            +1, 0, -1, or -2 based on the debt/equity thresholds. SGLP.L +1 bonus applied if present.
+        """
+        
+        scores = pd.Series(0, index=d_to_e.index)
+        
+        scores.loc[(d_to_e > 0) & (d_to_e < 1)] = 1
+        
+        scores.loc[d_to_e > 2] = -1
+        
+        scores.loc[d_to_e > 4] = -2
+        
+        return self._apply_sglp_bonus(
+            adj = scores
+        )    
+        
 
     def gross_margin_improvement_adjustment(
         self,
@@ -1974,6 +2291,243 @@ class PortfolioOptimiser:
         )
         
 
+    def gross_profitability_score(
+        self,
+        gross_margin: pd.Series,
+        asset_turnover: pd.Series
+    ) -> pd.Series:
+        """
+        Score based on Robert Novy-Marx's 'Gross Profitability' premium.
+        
+        Formula
+        -------
+        
+        GPA = (Revenue - COGS) / Total Assets
+        
+            = Gross Margin * Asset Turnover
+            
+        Scoring Rule
+        ------------
+        +1 if GPA > 0.45 (Highly productive assets)
+       
+        -1 if GPA < 0.10 (Unproductive assets)
+        
+        0 otherwise.
+        
+        Parameters
+        ----------
+        gross_margin : pd.Series
+            Gross Profit / Revenue (decimal).
+        asset_turnover : pd.Series
+            Revenue / Total Assets.
+
+        Returns
+        -------
+        pd.Series (int)
+            +1 for high productivity, -1 for low.
+        """
+       
+        idx = gross_margin.index.intersection(asset_turnover.index)
+        
+        gm = gross_margin.reindex(idx).fillna(0)
+       
+        at = asset_turnover.reindex(idx).fillna(0)
+        
+        gpa = gm * at
+        
+        scores = pd.Series(0, index=idx)
+        
+        scores.loc[gpa > 0.45] = 1
+        
+        scores.loc[gpa < 0.10] = -1
+        
+        return self._apply_sglp_bonus(
+            adj = scores
+        )
+
+
+    def asset_growth_anomaly_score(
+        self,
+        asset_growth: pd.Series
+    ) -> pd.Series:
+        """
+        Score based on the 'Asset Growth Anomaly' (Cooper, Gulen, Schill).
+        
+        Concept
+        -------
+        High asset growth predicts NEGATIVE future returns (Empire Building).
+        Low/Negative asset growth predicts POSITIVE future returns (Efficiency).
+        
+        Scoring Rule
+        ------------
+        
+        -1 if Asset Growth > 15% (High risk of empire building)
+       
+        +1 if Asset Growth < 5% (Conservative/Shrinking)
+       
+        0 otherwise.
+
+        Parameters
+        ----------
+        asset_growth : pd.Series
+            Year-over-year growth in total assets (decimal).
+
+        Returns
+        -------
+        pd.Series (int)
+            Penalty for high growth, reward for discipline.
+        """
+        
+        idx = asset_growth.index
+        
+        ag = asset_growth.reindex(idx).fillna(0)
+        
+        scores = pd.Series(0, index = idx)
+        
+        scores.loc[ag > 0.0] = -1
+        
+        scores.loc[ag > 0.15] = -1
+        
+        scores.loc[ag < 0.05] = 1
+        
+        return self._apply_sglp_bonus(
+            adj = scores
+        )
+
+
+    def shareholder_yield_score(
+        self,
+        div_yield: pd.Series,
+        net_issuance: pd.Series,
+        market_cap: pd.Series
+    ) -> pd.Series:
+        """
+        Score based on Shareholder Yield (Dividends + Buybacks).
+        
+        Formula
+        -------
+        Buyback Yield = -(Net New Shares Issued Currency) / Market Cap
+        Shareholder Yield = Dividend Yield + Buyback Yield
+        
+        Scoring Rule
+        ------------
+        +1 if Shareholder Yield > 5%
+      
+        +2 if Shareholder Yield > 8% (Strong conviction)
+      
+        -1 if Net Issuance > 5% of Market Cap (Dilution > 5%)
+
+        Parameters
+        ----------
+        div_yield : pd.Series
+            Dividend yield (decimal or percentage, assumed decimal 0.05 here).
+        net_issuance : pd.Series
+            Value of net new shares issued (Currency units). Positive = Dilution. Negative = Buyback.
+        market_cap : pd.Series
+            Total Market Cap (Currency units).
+
+        Returns
+        -------
+        pd.Series (int)
+            Reward for high total payout.
+        """
+        
+        idx = div_yield.index.intersection(net_issuance.index).intersection(market_cap.index)
+        
+        dy = div_yield.reindex(idx).fillna(0)
+       
+        issuance = net_issuance.reindex(idx).fillna(0)
+       
+        mc = market_cap.reindex(idx).replace(0, np.inf)
+        
+        buyback_yield = -issuance / mc
+        
+        total_yield = dy + buyback_yield
+        
+        scores = pd.Series(0, index=idx)
+        
+        is_percentage = dy.max() > 5.0 
+        
+        threshold_low = 5.0 if is_percentage else 0.05
+        
+        threshold_high = 8.0 if is_percentage else 0.08
+        
+        scores.loc[total_yield > threshold_low] = 1
+        
+        scores.loc[total_yield > threshold_high] = 2 
+        
+        dilution_ratio = issuance / mc
+        
+        scores.loc[dilution_ratio > (0.05 if not is_percentage else 5.0)] = -1
+        
+        return self._apply_sglp_bonus(
+            adj = scores
+        )
+        
+
+    def accruals_score(
+        self,
+        net_income: pd.Series,
+        ocf: pd.Series,
+        total_revenue: pd.Series,
+        asset_turnover: pd.Series
+    ) -> pd.Series:
+        """
+        Score based on the Sloan Ratio (Earnings Quality).
+        
+        High accruals (Income > Cash Flow) indicate poor quality earnings and potential reversals.
+        
+        Formula
+        -------
+        Total Assets = Revenue / Asset Turnover
+        Accruals Ratio = (Net Income - Operating Cash Flow) / Total Assets
+        
+        Scoring Rule
+        ------------
+        -1 if Accruals > 0.10 (High Accruals -> Bad Future Returns)
+        
+        +1 if Accruals < 0    (Conservative/Cash-rich Earnings -> Good Future Returns)
+        
+        Parameters
+        ----------
+        net_income : pd.Series
+        ocf : pd.Series
+        total_revenue : pd.Series
+        asset_turnover : pd.Series
+
+        Returns
+        -------
+        pd.Series (int)
+            Earnings quality adjustment.
+        """
+        
+        idx = net_income.index.intersection(ocf.index).intersection(total_revenue.index)
+        
+        ni = net_income.reindex(idx).fillna(0)
+      
+        cf = ocf.reindex(idx).fillna(0)
+      
+        rev = total_revenue.reindex(idx).fillna(0)
+      
+        at = asset_turnover.reindex(idx).replace(0, np.inf)
+        
+        assets = rev / at
+
+        assets = assets.replace(0, np.inf) 
+        
+        accruals_ratio = (ni - cf) / assets
+        
+        scores = pd.Series(0, index = idx)
+        
+        scores.loc[accruals_ratio > 0.10] = -1
+        
+        scores.loc[accruals_ratio < 0.0] = 1
+        
+        return self._apply_sglp_bonus(
+            adj = scores
+        )
+        
+    
     def asset_turnover_improvement_adjustment(
         self, 
         at: pd.Series,
@@ -2013,8 +2567,8 @@ class PortfolioOptimiser:
 
 
     def skewness_adjustment(
-        self, 
-        r: pd.Series
+        self,
+        r: pd.Series | pd.DataFrame,
     ) -> pd.Series:
         """
         Translate return skewness into a ternary score.
@@ -2037,8 +2591,8 @@ class PortfolioOptimiser:
 
         Parameters
         ----------
-        r : pd.Series or pd.DataFrame-like accepted by `pa.skewness`
-            Return history used by `pa.skewness` to produce per-ticker skewness.
+        r : pd.Series or pd.DataFrame-like accepted by `self.analytics.skewness`
+            Return history used by `self.analytics.skewness` to produce per-ticker skewness.
 
         Returns
         -------
@@ -2047,25 +2601,24 @@ class PortfolioOptimiser:
 
         Notes
         -----
-        The internal `pa.skewness` returns a Series aligned to tickers; this wrapper
+        The internal `self.analytics.skewness` returns a Series aligned to tickers; this wrapper
         converts it to +1/−1/0 according to the sign.
         """
 
-        skewness = pa.skewness(
+        skewness = self.analytics.skewness(
             r = r
         )
-        idx = skewness.index
         
-        s = skewness.reindex(idx).fillna(0)
+        s = skewness.fillna(0)
         
         skew_cond = np.where(s > 0, 1, np.where(s < 0, -1, 0))
         
-        return pd.Series(skew_cond, index = idx).astype(int)
+        return pd.Series(skew_cond, index = skewness.index).astype(int)
     
     
     def kurtosis_adjustment(
-        self, 
-        r: pd.Series
+        self,
+        r: pd.Series | pd.DataFrame,
     ) -> pd.Series:
         """
         Award +1 when excess tail risk is not pronounced according to kurtosis.
@@ -2081,8 +2634,8 @@ class PortfolioOptimiser:
 
         Parameters
         ----------
-        r : pd.Series or pd.DataFrame-like accepted by `pa.kurtosis`
-            Return history used by `pa.kurtosis` to produce per-ticker kurtosis.
+        r : pd.Series or pd.DataFrame-like accepted by `self.analytics.kurtosis`
+            Return history used by `self.analytics.kurtosis` to produce per-ticker kurtosis.
 
         Returns
         -------
@@ -2095,23 +2648,25 @@ class PortfolioOptimiser:
         excess kurtosis.
         """
 
-        kurtosis = pa.kurtosis(
+        kurtosis = self.analytics.kurtosis(
             r = r
         )
         
-        idx = kurtosis.index
+        k = kurtosis.fillna(0)
+
+        kurt_cond = np.where(k < KURT_NEAR_NORMAL, 1, 0)
         
-        k = kurtosis.reindex(idx).fillna(0)
+        kurt_cond = np.where(k > 5, kurt_cond - 1, kurt_cond)
         
-        kurt_cond = np.where(k < 3.5, 1, 0)
+        kurt_cond = np.where(k > 10, kurt_cond - 1, kurt_cond)
         
-        return pd.Series(kurt_cond, index = idx)
+        return pd.Series(kurt_cond, index = kurtosis.index)
 
 
     def sharpe_adjustment(
-        self, 
-        r: pd.Series, 
-        n: int
+        self,
+        r: pd.Series | pd.DataFrame,
+        n: int,
     ) -> pd.Series:
         """
         Translate the Sharpe ratio into a ternary score using annualisation implied by
@@ -2125,7 +2680,7 @@ class PortfolioOptimiser:
             
         where μ_t and σ_t are mean and standard deviation of periodic returns, annualised consistent 
         with `periods_per_year`, and r_f is the risk-free rate at the same periodicity (as handled by
-        `pa.sharpe_ratio`).
+        `self.analytics.sharpe_ratio`).
 
         Scoring Rule
         ------------
@@ -2140,7 +2695,7 @@ class PortfolioOptimiser:
         Parameters
         ----------
         r : pd.Series or DataFrame
-            Return history used by `pa.sharpe_ratio` (per ticker).
+            Return history used by `self.analytics.sharpe_ratio` (per ticker).
         n : int
             Number of periods per year (e.g., 52 for weekly, 252 for daily).
 
@@ -2150,29 +2705,27 @@ class PortfolioOptimiser:
             Sharpe-based adjustment per ticker.
         """
 
-        sharpe = pa.sharpe_ratio(
+        sharpe = self.analytics.sharpe_ratio(
             r = r, 
             periods_per_year = n
         )
         
-        idx = sharpe.index
-    
-        s = sharpe.reindex(idx).fillna(0)
-    
-        return pd.Series(np.where(s > 1, 1, np.where(s <= 0, -1, 0)), index = idx).astype(int)
+        s = sharpe.fillna(0)
 
+        scores = np.where(
+            s > RISK_RATIO_GOOD,
+            1,
+            np.where(s <= 0, -1, 0),
+        )
+        
+        return pd.Series(scores, index = sharpe.index).astype(int)
+    
 
     def sortino_adjustment(
         self,
-        r: pd.Series,
-        n: int
+        r: pd.Series | pd.DataFrame,
+        n: int,
     ) -> pd.Series:
-        
-        sortino = pa.sortino_ratio(
-            returns = r, 
-            riskfree_rate = config.RF, 
-            periods_per_year = n
-        )
         """
         Translate the Sortino ratio into a ternary score using an annualisation
         consistent with `n`.
@@ -2185,7 +2738,7 @@ class PortfolioOptimiser:
             
         where σ_down,t is the downside standard deviation (computed using only negative 
         deviations from a threshold, typically r_f or 0), annualised consistent with `n`.
-        Implemented via `pa.sortino_ratio`.
+        Implemented via `self.analytics.sortino_ratio`.
 
         Scoring Rule
         ------------
@@ -2200,7 +2753,7 @@ class PortfolioOptimiser:
         Parameters
         ----------
         r : pd.Series or DataFrame
-            Return history used by `pa.sortino_ratio`.
+            Return history used by `self.analytics.sortino_ratio`.
         n : int
             Number of periods per year.
 
@@ -2209,18 +2762,27 @@ class PortfolioOptimiser:
         pd.Series (int)
             Sortino-based adjustment per ticker.
         """
+                
+        sortino = self.analytics.sortino_ratio(
+            returns = r, 
+            riskfree_rate = config.RF, 
+            periods_per_year = n
+        )
         
-        idx = sortino.index
-        
-        s = sortino.reindex(idx).fillna(0)
-        
-        return pd.Series(np.where(s > 1, 1, np.where(s <= 0, -1, 0)), index = idx).astype(int)
+        s = sortino.fillna(0)
+
+        scores = np.where(
+            s > RISK_RATIO_GOOD,
+            1,
+            np.where(s <= 0, -1, 0),
+        )
+        return pd.Series(scores, index = sortino.index).astype(int)
 
 
     def signal_scores_adjustment(
         self, 
         signal_scores: pd.Series,
-        index: pd.Index
+        universe: pd.Index
     ) -> pd.Series:
         """
         Pass through externally-computed technical/quantitative “Signal Scores”.
@@ -2244,7 +2806,7 @@ class PortfolioOptimiser:
             `signal_scores` reindexed to `index` with missing values filled by 0.
         """
 
-        return signal_scores.reindex(index).fillna(0).astype(int)
+        return signal_scores.reindex(universe).fillna(0).astype(int)
 
 
     def alpha_adjustments(
@@ -2254,7 +2816,6 @@ class PortfolioOptimiser:
         comb_ret: pd.Series,
         last_year_ret: pd.Series,
         bench_hist_rets: pd.Series,
-        rf: float,
         periods_per_year: int,
         d_to_e: pd.Series,
         tax: pd.Series
@@ -2280,7 +2841,7 @@ class PortfolioOptimiser:
 
         2) Predicted alpha:
        
-        A library function `pa.jensen_alpha_r2` also returns `pred_alpha` that
+        A library function `self.analytics.jensen_alpha_r2` also returns `pred_alpha` that
         compares the combined expected return (annualised) against the benchmark
         trajectory and fitted β, indicating whether the forecast implies a
         positive/negative alpha versus the market.
@@ -2312,8 +2873,6 @@ class PortfolioOptimiser:
             library can infer an annualised prediction).
         bench_hist_rets : pd.Series
             Benchmark periodic returns aligned with `hist_rets`.
-        rf : float
-            Risk-free rate per period (e.g., per week).
         periods_per_year : int
             Annualisation factor (e.g., 52 for weekly).
 
@@ -2333,14 +2892,48 @@ class PortfolioOptimiser:
         smaller style/quality signals.
         
         """
+        
         ann_hist_ret = (1 + last_year_ret).prod()
         
         
         def one_ticker_alpha(
             tkr
         ):
-            print(tkr)
-            
+            """
+            Estimate realised and forecast-implied Jensen alpha for one ticker.
+
+            Model concept
+            -------------
+            The analytics backend applies a leverage-aware market model of the
+            form:
+
+                r_p,t - r_f,t = alpha + beta_lev * (r_b,t - r_f,t) + epsilon_t.
+
+            The function returns:
+
+            - `alpha_ann`: annualised realised alpha from historical returns.
+            - `pred_alpha`: forecast-implied alpha from the combined expected
+              return relative to the benchmark trajectory and fitted beta.
+
+            Parameters
+            ----------
+            tkr : Hashable
+                Ticker symbol in the estimation universe.
+
+            Returns
+            -------
+            tuple[float, float]
+                (alpha_ann, pred_alpha). If the history is insufficient, both
+                values are returned as NaN and converted to neutral scores by
+                the caller.
+
+            Advantages
+            ----------
+            Separating realised alpha from forecast-implied alpha enables a
+            direct consistency check between historical skill and forward
+            expectations, which improves robustness of the final additive score.
+            """
+                        
             p = hist_rets[tkr].dropna()
             
             b = bench_hist_rets.reindex(p.index).dropna()
@@ -2353,13 +2946,11 @@ class PortfolioOptimiser:
             
             d_to_e_t = d_to_e.loc[tkr]
             
-            print('Combined Returns:', c_r)
-
             if len(p) < 2 or b.empty:
             
                 return (np.nan, np.nan)
 
-            alpha_dict = pa.jensen_alpha_r2(
+            alpha_dict = self.analytics.jensen_alpha_r2(
                 port_rets = p, 
                 bench_rets = b,
                 rf_per_period = config.RF_PER_WEEK,
@@ -2376,10 +2967,6 @@ class PortfolioOptimiser:
             alpha = alpha_dict['alpha_ann']
             
             pred_alpha = alpha_dict['pred_alpha']
-            
-            print('Alpha:', alpha, 'Predicted Alpha:', pred_alpha)
-            
-            print('_________________________________________')
             
             return alpha, pred_alpha
 
@@ -2402,11 +2989,537 @@ class PortfolioOptimiser:
        
         alpha_adj -= (alpha_df['alpha'] < 0).astype(int)
         
-        pred_alpha_adj -= 5 * (alpha_df['pred_alpha'].fillna(0) < 0).astype(int)
+        pred_alpha_adj -= PRED_ALPHA_PENALTY * (alpha_df['pred_alpha'].fillna(0) < 0).astype(int)
         
         return alpha_adj.reindex(hist_rets.columns).fillna(0), pred_alpha_adj.reindex(hist_rets.columns).fillna(0)
-        
     
+    
+    def eps_revision_score(
+        self,
+        eps_rev_7: pd.Series,
+        eps_rev_30: pd.Series,
+        w7: float = 2,
+        w30: float = 1,
+    ) -> pd.Series:
+        """
+        Compute a weighted EPS revision score with clipping.
+        
+        Parameters
+        ----------
+        eps_rev_7 : pd.Series
+            EPS revision over 7 days.
+        eps_rev_30 : pd.Series
+            EPS revision over 30 days.
+        w7 : float, optional
+            Weight for the 7-day revision (default is 2).
+        w30 : float, optional
+            Weight for the 30-day revision (default is 1).
+       
+        Returns
+        -------
+        pd.Series
+            Combined EPS revision score, clipped to [-EPS_REV_CLIP, EPS_REV_CLIP].
+        """
+                
+        score = (eps_rev_7 * w7) + (eps_rev_30 * w30)
+
+        score = score.clip(lower = -EPS_REV_CLIP, upper = EPS_REV_CLIP)
+        
+        return score.fillna(0)
+        
+
+    @staticmethod
+    def _cap_norm(
+        w_arr: np.ndarray,
+        cap: np.ndarray,
+        mask: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """
+        Cap-and-renormalise weights column-wise, respecting per-ticker caps.
+
+        Parameters
+        ----------
+        w_arr : np.ndarray, shape (n_models, n_tickers)
+            Raw weights (columns sum to ~1 before capping).
+        cap : np.ndarray, shape (n_tickers,)
+            Per-ticker maximum weight.
+        mask : np.ndarray, shape (n_models, n_tickers), optional
+            Boolean mask of valid model/ticker cells.
+
+        Returns
+        -------
+        np.ndarray
+            Capped weights with each column summing to (approximately) 1.
+        """
+        
+        final = np.minimum(w_arr, cap[np.newaxis, :])
+
+        if mask is not None:
+            
+            final = np.where(mask, final, 0.0)
+
+        n_models, n_tickers = final.shape
+
+        for j in range(n_tickers):
+            
+            col = final[:, j]
+
+            if mask is not None:
+                
+                active = mask[:, j]
+                
+            else:
+                
+                active = np.ones_like(col, dtype = bool)
+
+            for _ in range(n_models): 
+                
+                s = col.sum()
+                
+                deficit = 1.0 - s
+
+                if deficit <= 1e-8:
+             
+                    break
+
+                room = np.maximum(cap[j] - col, 0.0)
+             
+                if mask is not None:
+             
+                    room = np.where(active, room, 0.0)
+
+                room_sum = room.sum()
+             
+                if room_sum <= 0.0:
+             
+                    break
+
+                delta = deficit * room / room_sum
+             
+                col = np.minimum(col + delta, cap[j])
+
+                if mask is not None:
+             
+                    col = np.where(active, col, 0.0)
+
+            s = col.sum()
+
+            if s > 0.0:
+
+                col /= s
+
+            final[:, j] = col
+
+        return final
+    
+
+    @staticmethod
+    def _apply_group_caps_iterative(
+        w_arr: np.ndarray,                
+        raw_pref: np.ndarray,              
+        cap_per_ticker: np.ndarray,        
+        valid_mask: np.ndarray,             
+        group_constraints: list[tuple[str, list[int], float]],
+        *,
+        tol: float = 1e-10,
+        max_passes: int = 30,
+    ) -> np.ndarray:
+        """
+        Enforce group and subgroup caps for each ticker while preserving
+        per-model cap constraints and near-simplex normalisation.
+
+        Constraint system (per ticker)
+        ------------------------------
+        For model weights w_i and per-model cap c:
+
+            0 <= w_i <= c,
+        
+            sum_i w_i = 1,
+        
+            sum_{i in G_k} w_i <= L_k   for each group k.
+
+        Group sets can overlap. A single projection is therefore insufficient,
+        so this routine iterates constraint enforcement passes until changes are
+        below tolerance or `max_passes` is reached.
+
+        Method summary
+        --------------
+        - Build boolean masks for each group constraint.
+        
+        - For each ticker column:
+        
+          - clip to non-negative weights and per-model cap;
+        
+          - repeatedly enforce each group cap with `_enforce_one_constraint`;
+        
+          - if required, renormalise active weights to sum to one only when the
+            renormalisation itself respects the cap.
+
+        Parameters
+        ----------
+        w_arr : np.ndarray
+            Initial weights with shape (n_models, n_tickers).
+        raw_pref : np.ndarray
+            Preference matrix used as redistribution weights.
+        cap_per_ticker : np.ndarray
+            Per-ticker individual model caps.
+        valid_mask : np.ndarray
+            Boolean validity matrix for model-ticker pairs.
+        group_constraints : list[tuple[str, list[int], float]]
+            Group definitions in the form (name, model indices, cap).
+        tol : float, optional
+            Numerical tolerance for convergence and feasibility checks.
+        max_passes : int, optional
+            Maximum number of full constraint sweeps per ticker.
+
+        Returns
+        -------
+        np.ndarray
+            Weight matrix after iterative feasibility enforcement.
+
+        Key properties:
+      
+        - Never increases any model weight above cap_per_ticker[ticker].
+      
+        - Applies a group cap only when feasible to move mass outside the group.
+      
+        - Uses iterative passes so overlapping caps settle.
+        """
+
+        n_models, n_tickers = w_arr.shape
+    
+        out = w_arr.copy()
+
+        g_masks: list[tuple[str, np.ndarray, float]] = []
+     
+        for gname, gidx, glimit in group_constraints:
+     
+            m = np.zeros(n_models, dtype=bool)
+     
+            if gidx:
+     
+                m[np.asarray(gidx, dtype=int)] = True
+     
+            g_masks.append((gname, m, float(glimit)))
+
+     
+        def _waterfill_add(
+            w: np.ndarray,
+            add_mask: np.ndarray,
+            need: float,
+            cap: float,
+            pref: np.ndarray,
+        ) -> float:
+            """
+            Reallocate a required mass `need` across eligible positions using
+            constrained proportional allocation.
+
+            For eligible indices i with remaining room:
+
+                room_i = cap - w_i,
+
+            a proposed update is:
+
+                delta_i = need * p_i / sum_j p_j,
+
+            where p_i are positive preferences. The update is clipped by room_i:
+
+                w_i <- w_i + min(delta_i, room_i).
+
+            The loop continues until residual need is negligible or capacity is
+            exhausted.
+
+            Parameters
+            ----------
+            w : np.ndarray
+                Mutable ticker-level weight vector.
+            add_mask : np.ndarray
+                Boolean mask identifying recipient positions.
+            need : float
+                Mass that must be added outside a constrained group.
+            cap : float
+                Per-model upper bound for the ticker.
+            pref : np.ndarray
+                Preference vector used for proportional redistribution.
+
+            Returns
+            -------
+            float
+                Residual unallocated mass after capacity-constrained updates.
+            """
+
+            while need > tol:
+
+                idx = np.where(add_mask)[0]
+
+                if idx.size == 0:
+
+                    break
+
+                room = cap - w[idx]
+
+                ok = room > tol
+
+                if not np.any(ok):
+
+                    break
+
+                idx = idx[ok]
+
+                room = room[ok]
+
+                p = pref[idx]
+
+                p = np.where(np.isfinite(p) & (p > 0), p, 1.0)
+
+                p_sum = float(p.sum())
+
+                if p_sum <= tol:
+
+                    p = np.ones_like(p)
+
+                    p_sum = float(p.sum())
+
+                delta = need * (p / p_sum)
+
+                delta = np.minimum(delta, room)
+
+                w[idx] += delta
+
+                need -= float(delta.sum())
+
+                if float(delta.sum()) <= tol:
+
+                    break
+
+            return need
+
+
+        def _enforce_one_constraint(
+            w: np.ndarray,
+            active: np.ndarray,
+            gmask: np.ndarray,
+            limit: float,
+            cap: float,
+            pref: np.ndarray,
+        ) -> np.ndarray:
+            """
+            Enforce a single group cap with feasibility-aware scaling and
+            redistribution.
+
+            Let G be the constrained group and:
+
+                s_in = sum_{i in G} w_i.
+
+            If s_in exceeds `limit`, in-group weights are scaled towards an
+            effective limit:
+
+                limit_eff = max(limit, s_in - room_out),
+
+            where room_out is total available capacity outside G:
+
+                room_out = sum_{i not in G} max(cap - w_i, 0).
+
+            The removed mass is then redistributed outside the group with
+            `_waterfill_add`, preserving non-negativity and individual caps.
+
+            Parameters
+            ----------
+            w : np.ndarray
+                Mutable ticker-level weight vector.
+            active : np.ndarray
+                Active positions permitted to hold weight.
+            gmask : np.ndarray
+                Group membership mask.
+            limit : float
+                Group cap.
+            cap : float
+                Per-model cap for the ticker.
+            pref : np.ndarray
+                Preference vector for redistribution.
+
+            Returns
+            -------
+            np.ndarray
+                Updated weight vector after enforcing the single constraint.
+            """
+          
+            in_mask = active & gmask
+          
+            if not np.any(in_mask):
+          
+                return w
+
+            s_in = float(w[in_mask].sum())
+          
+            if s_in <= limit + tol:
+          
+                return w
+
+            out_mask = active & (~gmask)
+          
+            if not np.any(out_mask):
+          
+                return w
+
+            room_out = np.maximum(cap - w[out_mask], 0.0)
+
+            room_out_sum = float(room_out.sum())
+
+            if room_out_sum <= tol:
+
+                return w
+
+            min_feasible = s_in - room_out_sum
+
+            limit_eff = max(limit, min_feasible)
+
+            if limit_eff >= s_in - tol:
+                
+                return w  
+
+            scale = limit_eff / s_in
+
+            w[in_mask] *= scale
+
+            deficit = s_in - limit_eff
+
+            need = deficit
+
+            need = _waterfill_add(
+                w = w, 
+                add_mask = out_mask,
+                need = need,
+                cap = cap,
+                pref = pref
+            )
+
+            if need > tol:
+
+                idx = np.where(out_mask)[0]
+
+                room = cap - w[idx]
+
+                j = idx[np.argmax(room)] if idx.size else None
+
+                if j is not None and room.max() > tol:
+
+                    add = min(need, float(room.max()))
+
+                    w[j] += add
+
+                    need -= add
+
+            return w
+
+
+        for col in range(n_tickers):
+
+            active = valid_mask[:, col].astype(bool)
+
+            if not np.any(active):
+
+                continue
+
+            cap = float(cap_per_ticker[col])
+
+            w = out[:, col].copy()
+
+            w = np.where(active, w, 0.0)
+
+            w = np.minimum(np.maximum(w, 0.0), cap)
+
+            pref = raw_pref[:, col].copy()
+
+            pref = np.where(np.isfinite(pref) & (pref > 0), pref, 1.0)
+
+            for _ in range(max_passes):
+
+                w_prev = w.copy()
+
+                for _gname, gmask, limit in g_masks:
+
+                    w = _enforce_one_constraint(
+                        w = w, 
+                        active = active, 
+                        gmask = gmask, 
+                        limit = limit, 
+                        cap = cap, 
+                        pref = pref
+                    )
+
+                if np.max(np.abs(w - w_prev)) < 1e-10:
+                  
+                    break
+
+            s = float(w[active].sum())
+
+            if s > 0 and abs(s - 1.0) > 1e-8:
+
+                w_scaled = w.copy()
+
+                w_scaled[active] /= s
+
+                if np.all(w_scaled[active] <= cap + 1e-12):
+
+                    w = w_scaled
+
+            out[:, col] = w
+
+        return out
+
+
+    def _score(
+        self,
+        func: Callable[..., pd.Series],
+        *,
+        index: pd.Index,
+        **kwargs: Any,
+    ) -> pd.Series:
+        """
+        Apply a scoring function and standardise the result onto a specified
+        ticker universe.
+
+        Post-processing map
+        -------------------
+        If `s_raw` is the output of `func(**kwargs)`, the returned series is:
+
+            s_out = astype_int( fillna( reindex(s_raw, index), 0 ) ).
+
+        This enforces:
+
+        - deterministic index alignment;
+     
+        - neutral treatment of missing observations;
+     
+        - integer-valued contributions for additive score aggregation.
+
+        Parameters
+        ----------
+        func : Callable[..., pd.Series]
+            Scoring function to evaluate.
+        index : pd.Index
+            Target index for alignment.
+        **kwargs : Any
+            Keyword arguments forwarded to `func`.
+
+        Returns
+        -------
+        pd.Series
+            Integer score vector aligned to `index`.
+
+        Advantages
+        ----------
+        A single normalisation path removes repetitive alignment code and
+        prevents subtle cross-sectional mismatches when combining many scoring
+        components.
+        """
+        
+        raw = func(**kwargs)
+        
+        return raw.reindex(index).fillna(0).astype(int)
+ 
+ 
     def compute_combination_forecast(
         self,
         region_indicators: Dict[str, pd.Series]
@@ -2571,11 +3684,17 @@ class PortfolioOptimiser:
         -------
         (comb_rets, comb_stds, final_scores, weights, score_breakdown, common_idx)
         where
+       
         - comb_rets : pd.Series
+       
         - comb_stds : pd.Series (SE)
+       
         - final_scores : pd.Series (int)
+       
         - weights : dict[str, pd.Series]  (per-model weight series summing to 1 per ticker)
+       
         - score_breakdown : pd.DataFrame  (each column is an additive component)
+       
         - common_idx : pd.Index (tickers used)
         
         The aligned outputs suitable for export and downstream optimisation.
@@ -2594,13 +3713,9 @@ class PortfolioOptimiser:
 
         rets = [self.models[n]['Returns'] for n in names]
         
-        for n in names:
-            
-            print(n, self.models[n]['Returns'])
-        
         ses = [self.models[n]['SE'] for n in names]
         
-        benchmark_ret, benchmark_weekly_rets, last_year_benchmark_weekly_rets = po.benchmark_rets(
+        _, benchmark_weekly_rets, _ = po.benchmark_rets(
             benchmark = config.benchmark, 
             start = config.FIVE_YEAR_AGO, 
             end = config.TODAY, 
@@ -2612,6 +3727,8 @@ class PortfolioOptimiser:
         a = self.analyst_df
        
         div = a['dividendYield'] / 100
+        
+        mc = a['marketCap']
        
         recommendation = a['recommendationKey']
        
@@ -2660,10 +3777,13 @@ class PortfolioOptimiser:
         shares_issued = a['New Shares Issued']
        
         gross_margin = a['Gross Margin']
+        
+        beta = a['beta']
        
         prev_gm = a['Previous Gross Margin']
        
         at = a['Asset Turnover']
+        
         prev_at = a['Previous Asset Turnover']
        
         eps_1y = a['Avg EPS Estimate']
@@ -2675,6 +3795,14 @@ class PortfolioOptimiser:
         nY = a['numberOfAnalystOpinions']
         
         tax = a['Tax Rate']
+        
+        eps_rev_7 = a['EPS Revision 7D']
+        
+        eps_rev_30 = a['EPS Revision 30D']
+        
+        asset_growth_rate = a['Asset Growth Rate']
+        
+        asset_growth_rate_vol = a['Asset Growth Rate Vol']
 
         ind_pe = region_indicators['PE']
         
@@ -2724,16 +3852,16 @@ class PortfolioOptimiser:
             ind_roa, 
             ind_rvg, 
             ind_eg,
-            tax
+            tax,
+            eps_rev_7,
+            eps_rev_30,
+            asset_growth_rate,
+            asset_growth_rate_vol
         ]
        
-        common_idx = set(all_series[0].index)
-       
-        for s in all_series[1:]:
-            
-            common_idx &= set(s.index)
-       
-        common_idx = sorted(common_idx)
+        common_idx = common_index(
+            series_list = all_series
+        )
 
         rets = [r.reindex(common_idx).fillna(0).clip(lower = config.lbr, upper = config.ubr) for r in rets]
        
@@ -2756,7 +3884,7 @@ class PortfolioOptimiser:
         valid = (
             (~ret_df.isin([-1, 0])) & ret_df.notna()  
         ) & (
-            (se_df > 0) & se_df.notna()              
+            (se_df > 0.02) & se_df.notna()              
         )
         
         model_counts = valid.sum(axis = 1).replace(0, np.nan)
@@ -2771,58 +3899,7 @@ class PortfolioOptimiser:
 
         raw_w = inv_var.div(tot_inv, axis = 0)
 
-
-        def cap_norm(
-            w_arr, 
-            cap, 
-            mask = None
-        ):
-            """
-            w_arr: shape (n_models, n_tickers)
-            cap:   shape (n_tickers,)  # per-ticker maximum weight
-            mask:  shape (n_models, n_tickers)
-            """
-
-            final = np.minimum(w_arr, cap[np.newaxis, :])
-
-            if mask is not None:
-                
-                final = np.where(mask, final, 0.0)
-
-            for _ in range(1000):
-
-                deficit = 1.0 - final.sum(axis = 0)  
-
-                if np.all(deficit <= 1e-8):
-                    
-                    break
-
-                room = np.maximum(cap[np.newaxis, :] - final, 0.0)
-
-                if mask is not None:
-                    
-                    room = np.where(mask, room, 0.0)
-
-                for j, d in enumerate(deficit):
-                  
-                    if d <= 0 or room[:, j].sum() == 0:
-                        
-                        continue
-                  
-                    alloc = room[:, j]
-                   
-                    final[:, j] += d * alloc / alloc.sum()
-                  
-                    final[:, j] = np.minimum(final[:, j], cap[j])
-
-                    if mask is not None:
-                        
-                        final[:, j] = np.where(mask[:, j], final[:, j], 0.0)
-
-            return final
-
-        
-        w_arr = cap_norm(
+        w_arr = self._cap_norm(
             w_arr = raw_w.values.T,          
             cap = cap_per_ticker.values,     
             mask = valid.values.T
@@ -2830,7 +3907,15 @@ class PortfolioOptimiser:
         
         group_hist_names = ['Daily', 'EMA']
        
-        group_iv_names = ['DCF', 'DCFE', 'RI', 'RelVal', 'Gordon Growth Model']
+        group_iv_names = ['DCF', 'DCFE', 'RI', 'RelVal', 'Gordon Growth Model', 'DCF CapIQ', 'FCFE CapIQ', 'RI CapIQ', 'DDM CapIQ']
+        
+        group_dcf_names = ['DCF', 'DCF CapIQ']
+        
+        group_dcfe_names = ['DCFE', 'FCFE CapIQ']
+        
+        group_ri_names = ['RI', 'RI CapIQ']
+        
+        group_ddm_names = ['Gordon Growth Model', 'DDM CapIQ']
        
         group_f_names = ['FF3', 'FF5', 'CAPM', 'FER']
        
@@ -2872,127 +3957,53 @@ class PortfolioOptimiser:
         
         group_ff_idx = [names.index(m) for m in group_ff_names if m in names]
         
-        hist_limit = 0.1
+        group_dcf_idx = [names.index(m) for m in group_dcf_names if m in names]
         
-        iv_limit = 0.3
+        group_ri_idx = [names.index(m) for m in group_ri_names if m in names]
         
-        f_limit = 0.25
+        group_ddm_idx = [names.index(m) for m in group_ddm_names if m in names]
         
-        ml_limit = 0.4
+        group_dcfe_idx = [names.index(m) for m in group_dcfe_names if m in names]
         
-        mc_limit = 0.25
+        group_constraints = [
+            ("HIST", group_hist_idx, HIST_GROUP_LIMIT),
+            ("IV", group_iv_idx, IV_GROUP_LIMIT),
+            ("F", group_f_idx, F_GROUP_LIMIT),
+            ("ML", group_ml_idx, ML_GROUP_LIMIT),
+            ("MC", group_mc_idx, MC_GROUP_LIMIT),
+            ("PROPHET", group_prophet_idx, SUBGROUP_LIMIT),
+            ("LSTM", group_lstm_idx, SUBGROUP_LIMIT),
+            ("GRU", group_gru_idx, SUBGROUP_LIMIT),
+            ("HGB", group_hgb_idx, SUBGROUP_LIMIT),
+            ("SARIMAX", group_sarimax_idx, SUBGROUP_LIMIT),
+            ("FF", group_ff_idx, SUBGROUP_LIMIT),
+            ("DCF", group_dcf_idx, SUBGROUP_LIMIT),
+            ("RI", group_ri_idx, SUBGROUP_LIMIT),
+            ("DDM", group_ddm_idx, SUBGROUP_LIMIT),
+            ("DCFE", group_dcfe_idx, SUBGROUP_LIMIT),
+        ]
         
-        prophet_limit = 0.1
-        
-        lstm_limit = 0.1
-        
-        gru_limit = 0.1
-        
-        hgb_limit = 0.1
-        
-        sarimax_limit = 0.1
-        
-        ff_limit = 0.1
-        
-        
-        def cap_group(
-            col, 
-            group_idx, 
-            limit
-        ):
-        
-            current = w_arr[group_idx, col]
-        
-            if current.sum() > limit:
+        w_arr = self._apply_group_caps_iterative(
+            w_arr = w_arr,
+            raw_pref = raw_w.values.T,
+            cap_per_ticker = cap_per_ticker.values,
+            valid_mask = valid.values.T,
+            group_constraints = group_constraints,
+            max_passes = 30,
+        )
 
-                w_arr[group_idx, col] *= limit / current.sum()
+        col_sums = w_arr.sum(axis = 0)
 
-                others = [i for i in range(w_arr.shape[0]) if i not in group_idx]
+        if np.max(np.abs(col_sums - 1.0)) > 1e-6:
 
-                other_sum = w_arr[others, col].sum()
+            logging.warning("Weight columns not summing to 1 (max dev=%.3e)", np.max(np.abs(col_sums - 1.0)))
 
-                if other_sum > 0:
+        if np.max(w_arr - cap_per_ticker.values[np.newaxis, :]) > 1e-8:
+       
+            logging.warning("Per-model cap violated (max over=%.3e)", np.max(w_arr - cap_per_ticker.values[np.newaxis, :]))
 
-                    w_arr[others, col] *= (1 - limit) / other_sum
-
-            s = w_arr[:, col].sum()
-
-            if s > 0:
-
-                w_arr[:, col] /= s
-                
-
-        for col in range(w_arr.shape[1]):
-            
-            cap_group(
-                col = col,
-                group_idx = group_hist_idx, 
-                limit = hist_limit
-            )
-            
-            cap_group(
-                col = col,
-                group_idx = group_iv_idx, 
-                limit = iv_limit
-            )
-            
-            cap_group(
-                col = col, 
-                group_idx = group_f_idx,        
-                limit = f_limit
-            )
-            
-            cap_group(
-                col = col, 
-                group_idx = group_ml_idx, 
-                limit = ml_limit
-            )
-            
-            cap_group(
-                col = col,
-                group_idx = group_mc_idx,
-                limit = mc_limit
-            )
-            
-            cap_group(
-                col = col, 
-                group_idx = group_prophet_idx,
-                limit = prophet_limit
-            )
-            
-            cap_group(
-                col = col, 
-                group_idx = group_lstm_idx,
-                limit = lstm_limit
-            )
-            
-            cap_group(
-                col = col, 
-                group_idx = group_gru_idx,
-                limit = gru_limit
-            )
-            
-            cap_group(
-                col = col, 
-                group_idx = group_hgb_idx,
-                limit = hgb_limit
-            )
-            
-            cap_group(
-                col = col, 
-                group_idx = group_sarimax_idx,
-                limit = sarimax_limit
-            )
-            
-            cap_group(
-                col = col, 
-                group_idx = group_ff_idx,
-                limit = ff_limit
-            )
-            
         weights = {
-            names[i]: pd.Series(w_arr[i], index = common_idx)
-            for i in range(len(names))
+            names[i]: pd.Series(w_arr[i], index = common_idx)for i in range(len(names))
         }
         
         pred_div_yield = self.dividend_yield.reindex(common_idx)
@@ -3001,50 +4012,48 @@ class PortfolioOptimiser:
         
         yield_std = pred_div_yield['Yield Std'].fillna(0)
 
-        comb_rets = yield_pred.fillna(0)
+        er_bar = pd.Series(0.0, index = common_idx)
 
         for n in names:
             
-            comb_rets += weights[n] * ret_df_clipped[n]
+            er_bar += weights[n] * ret_df_clipped[n]
+
+        comb_rets = yield_pred.fillna(0) + er_bar
 
         w_df = pd.DataFrame(weights)
 
-        within_var = (w_df * model_vars).sum(axis = 1)
+        within_var = (w_df.pow(2) * model_vars).sum(axis = 1)
 
-        between_var = (
-            w_df * (ret_df_clipped.sub(comb_rets, axis = 0) ** 2)
-        ).sum(axis = 1)
+        between_var = (w_df * (ret_df_clipped.sub(er_bar, axis = 0) ** 2)).sum(axis = 1)
+                
+        between_var = between_var.fillna(0.0)
         
         total_var = within_var + between_var + (yield_std ** 2)
 
         comb_stds = np.sqrt(total_var.clip(lower = MIN_STD ** 2, upper = MAX_STD ** 2))
         
-        last_year_ret = weekly_ret.loc[
-            weekly_ret.index >= pd.to_datetime(config.YEAR_AGO), common_idx
+        weekly_ret_5y = self.weekly_ret.loc[
+            self.weekly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO),
+            common_idx,
         ]
-        
-        last_5y_ret = weekly_ret.loc[
-            weekly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO), common_idx
-        ]
-        
-        last_year_period = len(last_year_ret)
-        
+
         base_ccy = getattr(config, "BASE_CCY", "GBP")
         
-        bench_ccy = getattr(config, "BENCHMARK_CCY", "USD") 
+        bench_ccy = getattr(config, "BENCHMARK_CCY", "USD")
 
-
-        last_year_ret_base = r.convert_returns_to_base(
-            ret_df = last_year_ret, 
-            base_ccy = base_ccy, 
-            interval = "1wk"
+        weekly_ret_5y_base = self.ratio_data.convert_returns_to_base(
+            ret_df = weekly_ret_5y,
+            base_ccy = base_ccy,
+            interval = "1wk",
         )
 
-        last_5y_ret_base = r.convert_returns_to_base(
-            ret_df = last_5y_ret, 
-            base_ccy = base_ccy, 
-            interval = "1wk"
-        )
+        last_5y_ret_base = weekly_ret_5y_base
+
+        last_year_ret_base = weekly_ret_5y_base.loc[
+            weekly_ret_5y_base.index >= pd.to_datetime(config.YEAR_AGO)
+        ]
+
+        last_year_period = len(last_year_ret_base)
 
         benchmark_weekly_rets_base = self.convert_series_to_base(
             benchmark_weekly_rets,
@@ -3052,123 +4061,204 @@ class PortfolioOptimiser:
             base_ccy = base_ccy,
             interval = "1wk",
         )
+
+        idx = pd.Index(common_idx)
         
-        short_base = self.short_score(
+        short_base = self._score(
+            func = self.short_score,
+            index = idx,
             shares_short = shares_short, 
             shares_outstanding = shares_outstanding, 
             shares_short_prior = shares_short_prior
-        ).reindex(common_idx).fillna(0)
+        )
         
-        wsb_adj = self.wsb_score(
-            index = pd.Index(common_idx)
-        ).reindex(common_idx).fillna(0)
+        wsb_adj = self._score(
+            func = self.wsb_score, 
+            index = idx,
+            universe = idx
+        )
         
-        eg_adj = self.earnings_growth_score(
+        eg_adj = self._score(
+            func = self.earnings_growth_score,
+            index = idx,
             earnings_growth = earnings_growth, 
             ind_earnings_growth = ind_eg, 
             eps = teps, 
             eps_pred = eps_1y
-        ).reindex(common_idx).fillna(0)
+        )
         
-        rg_adj = self.revenue_growth_score(
+        beta_adj = self._score(
+            func = self.beta_adjustment,
+            index = idx,
+            beta = beta
+        )
+
+        peg_adj = self._score(
+            func = self.peg_ratio_adjustment,
+            index = idx,
+            price = price,
+            forward_eps = feps,
+            earnings_growth = earnings_growth
+        )
+        
+        vol_trend_adj = self._score(
+            func = self.volatility_trend_score,
+            index = idx,
+            daily_rets = last_year_ret_base
+        )
+        
+        rg_adj = self._score(
+            func = self.revenue_growth_score,
+            index = idx,
             rev_growth = rev_growth, 
             ind_rvg = ind_rvg, 
             rev = rev, 
             rev_pred = rev_1y
-        ).reindex(common_idx).fillna(0)
+        )
         
-        roe_adj = self.return_on_equity_score(
+        roe_adj = self._score(
+            func = self.return_on_equity_score,
+            index = idx,
             roe = roe, 
             ind_roe = ind_roe
-        ).reindex(common_idx).fillna(0)
+        )
         
-        roa_adj = self.return_on_assets_score(
+        roa_adj = self._score(
+            func = self.return_on_assets_score,
+            index = idx,
             roa = roa, 
             prev_roa = prev_roa,
             ind_roa = ind_roa
-        ).reindex(common_idx).fillna(0)
+        )
         
-        pb_adj = self.price_to_book_score(
+        pb_adj = self._score(
+            func = self.price_to_book_score,
+            index = idx,
             pb = pb, 
             ind_pb = ind_pb
-        ).reindex(common_idx).fillna(0)
+        )
         
-        eps_adj = self.ep_score(
+        eps_adj = self._score(
+            func = self.ep_score,
+            index = idx,
             trailing_eps = teps, 
             forward_eps = feps, 
             price = price, 
             ind_pe = ind_pe, 
             eps_1y = eps_1y
-        ).reindex(common_idx).fillna(0)
+        )
         
-        up_down_adj = self.upside_downside_score(
+        up_down_adj = self._score(
+            func = self.upside_downside_score,
+            index = idx,
             hist_rets = last_5y_ret_base, 
             bench_hist_rets = benchmark_weekly_rets_base, 
-        ).reindex(common_idx).fillna(0)
+        )
 
-        lower_target_adj = self.lower_target_adjustment(
+        lower_target_adj = self._score(
+            func = self.lower_target_adjustment,
+            index = idx,
             lower_target = lower_target, 
             price = price
-        ).reindex(common_idx).fillna(0)
+        )
         
-        rec_adj = self.recommendation_adjustment(
+        rec_adj = self._score(
+            func = self.recommendation_adjustment,
+            index = idx,
             recommendation = recommendation
-        ).reindex(common_idx).fillna(0)
+        )
         
-        insider_adj = self.insider_purchases_adjustment(
+        insider_adj = self._score(
+            func = self.insider_purchases_adjustment,
+            index = idx,
             insider_purchases = insider_purchases
-        ).reindex(common_idx).fillna(0)
+        )
         
-        net_income_adj = self.net_income_positive_adjustment(
+        net_income_adj = self._score(
+            func = self.net_income_positive_adjustment,
+            index = idx,
             net_income = net_income
-        ).reindex(common_idx).fillna(0)
+        )
         
-        ocf_adj = self.ocf_gt_net_income_adjustment(
+        ocf_adj = self._score(
+            func = self.ocf_gt_net_income_adjustment,
+            index = idx,
             operating_cf = operating_cashflow, 
             net_income = net_income
-        ).reindex(common_idx).fillna(0)
+        )
         
-        ld_adj = self.long_debt_improvement_adjustment(
+        ld_adj = self._score(
+            func = self.long_debt_improvement_adjustment,
+            index = idx,
             prev_long_debt = prev_long_debt,
             long_debt = long_debt
-        ).reindex(common_idx).fillna(0)
+        )
         
-        cr_adj = self.current_ratio_improvement_adjustment(
+        cr_adj = self._score(
+            func = self.current_ratio_improvement_adjustment,
+            index = idx,
             prev_cr = prev_current_ratio, 
             curr_cr = current_ratio
-        ).reindex(common_idx).fillna(0)
+        )
         
-        no_new_shares_adj = self.no_new_shares_adjustment(
+        ags_adj = self._score(
+            func = self.asset_growth_rate_sharpe,
+            index = idx,
+            asset_growth_rate = asset_growth_rate,
+            asset_growth_rate_vol = asset_growth_rate_vol
+        )
+        
+        no_new_shares_adj = self._score(
+            func = self.no_new_shares_adjustment,
+            index = idx,
             shares_issued = shares_issued
-        ).reindex(common_idx).fillna(0)
+        )
         
-        gm_adj = self.gross_margin_improvement_adjustment(
+        de_adj = self._score(
+            func = self.debt_to_equity_adjustment,
+            index = idx,
+            d_to_e = d_to_e
+        )
+        
+        gm_adj = self._score(
+            func = self.gross_margin_improvement_adjustment,
+            index = idx,
             gm = gross_margin,
             prev_gm = prev_gm
-        ).reindex(common_idx).fillna(0)
+        )
         
-        at_adj = self.asset_turnover_improvement_adjustment(
+        at_adj = self._score(
+            func = self.asset_turnover_improvement_adjustment,
+            index = idx,
             at = at,
             prev_at = prev_at
-        ).reindex(common_idx).fillna(0)
+        )
         
-        skew_adj= self.skewness_adjustment(
-            r = last_5y_ret
-        ).reindex(common_idx).fillna(0)
+        skew_adj = self._score(
+            func = self.skewness_adjustment,
+            index = idx,
+            r = last_5y_ret_base
+        )
         
-        kurt_adj = self.kurtosis_adjustment(
-            r = last_5y_ret
-        ).reindex(common_idx).fillna(0)
+        kurt_adj = self._score(
+            func = self.kurtosis_adjustment,
+            index = idx,
+            r = last_5y_ret_base
+        )
         
-        sharpe_adj = self.sharpe_adjustment(
-            r = last_year_ret, 
+        sharpe_adj = self._score(
+            func = self.sharpe_adjustment,
+            index = idx,
+            r = last_year_ret_base, 
             n = last_year_period
-        ).reindex(common_idx).fillna(0)
+        )
         
-        sortino_adj = self.sortino_adjustment(
-            r = last_year_ret, 
+        sortino_adj = self._score(
+            func = self.sortino_adjustment,
+            index = idx,
+            r = last_year_ret_base, 
             n = last_year_period
-        ).reindex(common_idx).fillna(0)
+        )
         
         alpha_adj, pred_alpha_adj = self.alpha_adjustments(
             hist_rets = last_5y_ret_base,
@@ -3176,17 +4266,58 @@ class PortfolioOptimiser:
             comb_ret = comb_rets,
             last_year_ret = last_year_ret_base,
             bench_hist_rets = benchmark_weekly_rets_base,
-            rf = config.RF_PER_WEEK,
             periods_per_year = 52,
             d_to_e = d_to_e,
             tax = tax
+        )
+        
+        eps_rev_score = self._score(
+            func = self.eps_revision_score,
+            index = idx,
+            eps_rev_7 = eps_rev_7,
+            eps_rev_30 = eps_rev_30
+        )
+        
+        gpa_adj = self._score(
+            func = self.gross_profitability_score,
+            index = idx,
+            gross_margin = gross_margin,
+            asset_turnover = at
+        )
+
+        aga_adj = self._score(
+            func = self.asset_growth_anomaly_score,
+            index = idx,
+            asset_growth = asset_growth_rate
+        )
+
+        sh_yield_adj = self._score(
+            func = self.shareholder_yield_score,
+            index = idx,
+            div_yield = div,
+            net_issuance = shares_issued,
+            market_cap = mc
+        )
+
+        accruals_adj = self._score(
+            func = self.accruals_score,
+            index = idx,
+            net_income = net_income,
+            ocf = operating_cashflow,
+            total_revenue = rev,
+            asset_turnover = at
         )
         
         alpha_adj = alpha_adj.reindex(common_idx).fillna(0)
         
         pred_alpha_adj = pred_alpha_adj.reindex(common_idx).fillna(0)
         
-        signal_adj = self.signal_scores_adjustment(self.signal_scores, pd.Index(common_idx)).reindex(common_idx).fillna(0)
+        signal_adj = self._score(
+            func = self.signal_scores_adjustment,
+            index = idx,
+            signal_scores = self.signal_scores, 
+            universe = idx
+        )
         
         score_breakdown = pd.DataFrame({
             'Short Score': short_base,
@@ -3203,34 +4334,287 @@ class PortfolioOptimiser:
             'Insider Purchases': insider_adj,
             'Net Income Positive': net_income_adj,
             'OCF > Net Income': ocf_adj,
+            'Debt-to-Equity': de_adj,
             'Long-Debt Improvement': ld_adj,
             'Current-Ratio Improvement': cr_adj,
+            'Asset-Growth-Rate Sharpe': ags_adj,
+            'Gross Profitability': gpa_adj,
+            'Asset Growth Anomaly': aga_adj,
+            'Shareholder Yield': sh_yield_adj,
+            'Accruals Quality': accruals_adj,
             'No New Shares Issued': no_new_shares_adj,
             'Gross-Margin Improvement': gm_adj,
             'Asset-Turnover Improvement': at_adj,
+            'Beta Adjustment': beta_adj,
+            'PEG Adjustment': peg_adj,
+            'Vol Trend Adjustment': vol_trend_adj,
             'Skewness': skew_adj,
             'Kurtosis': kurt_adj,
             'Sharpe Ratio': sharpe_adj,
             'Sortino Ratio': sortino_adj,
             'Alpha': alpha_adj,
             'Pred Alpha': pred_alpha_adj,
+            'EPS Revision Score': eps_rev_score,
             'Signal Scores': signal_adj,
-        }).reindex(index = common_idx)
+        }).reindex(index = common_idx) 
 
         final_scores = score_breakdown.sum(axis = 1)
-        
-        nY_aligned = np.maximum(nY, 2).reindex(common_idx).fillna(np.inf)
-        
-        mask = final_scores.index != "SGLP.L"
-        
-        final_scores.loc[mask] = final_scores.loc[mask].clip(upper = nY_aligned.loc[mask])
        
         score_breakdown['Final Score'] = final_scores
 
         return comb_rets, comb_stds, final_scores, weights, score_breakdown
 
+
+def safe_region_series(
+    metric_dict: Mapping[Hashable, Mapping[str, Any]],
+    tickers: Sequence[Hashable],
+    key: str = 'Region-Industry',
+    default: float = np.nan,
+) -> pd.Series:
+    """
+    Extract a region/industry baseline field from a nested mapping for a given
+    ordered ticker universe.
+
+    Mapping rule
+    ------------
+    For each ticker t in `tickers`:
+
+        x_t = metric_dict[t][key], if available;
+        x_t = default, otherwise.
+
+    The resulting vector x is returned as a Series indexed in the same order as
+    `tickers`.
+
+    Parameters
+    ----------
+    metric_dict : Mapping[Hashable, Mapping[str, Any]]
+        Nested dictionary keyed first by ticker and then by metric field.
+    tickers : Sequence[Hashable]
+        Target ticker ordering.
+    key : str, optional
+        Field name to retrieve from each ticker-level mapping.
+    default : float, optional
+        Fallback value used when ticker or field is absent.
+
+    Returns
+    -------
+    pd.Series
+        Extracted baseline metric aligned to `tickers`.
+
+    Advantages
+    ----------
+    The helper centralises sparse-dictionary extraction and guarantees stable
+    ordering, which prevents alignment errors in subsequent cross-sectional
+    scoring functions.
+    """
+
+    return pd.Series(
+        [metric_dict.get(t, {}).get(key, default) for t in tickers],
+        index = tickers
+    )
+
+
+def macro_to_weekly_returns(
+    macro_weekly: pd.DataFrame
+) -> pd.DataFrame:
+    """
+    Convert a mixed weekly macro panel (levels, rates, and returns) into a
+    coherent return-like panel using variable-specific transforms.
+
+    Transformation equations
+    -----------------------
+    For a macro series x_t:
+
+    - Known return-like variables:
+
+          r_t = x_t.
+
+    - Rate-like variables:
+
+          r_t = x_t - x_t-1.
+
+    - Remaining level-like variables:
+
+          r_t = (x_t / x_t-1) - 1.
+
+    Rows that are entirely missing after conversion are removed.
+
+    Parameters
+    ----------
+    macro_weekly : pd.DataFrame
+        Weekly macro dataset containing heterogeneous variable types.
+
+    Returns
+    -------
+    pd.DataFrame
+        Converted panel in return-compatible units.
+
+    Modelling rationale
+    -------------------
+    Percentage changes are appropriate for strictly positive index-like levels,
+    whereas differencing is more meaningful for quoted rates and yields.
+    Combining both rules preserves economic interpretation while producing
+    numerically consistent inputs for covariance targets.
+    """
+
+    if macro_weekly is None or macro_weekly.empty:
+        return macro_weekly
+
+    df = macro_weekly.copy()
+
+    already_returns = {
+        "CL=F", "GC=F", "HG=F", "^VIX",
+        "US_GDP", "US_Consumer_Sentiment", "US_Wages",
+    }
+
+    rate_like = {
+        "^TNX", "^IRX", "Inflation", "US_Unemployment_Rate",
+    }
+
+    rets = df.pct_change()
+
+    for col in already_returns.intersection(df.columns):
+  
+        rets[col] = df[col]
+
+    for col in rate_like.intersection(df.columns):
     
-def main():
+        rets[col] = df[col].diff()
+
+    return rets.dropna(how = "all")
+    
+
+def common_index(
+    series_list: Sequence[pd.Series]
+) -> pd.Index:
+    """
+    Compute the sorted intersection of index labels across multiple Series.
+
+    Mathematical definition
+    -----------------------
+    For index sets I_1, I_2, ..., I_n from `series_list`, the function returns:
+
+        I_common = I_1 intersect I_2 intersect ... intersect I_n,
+
+    sorted in ascending order.
+
+    Parameters
+    ----------
+    series_list : Sequence[pd.Series]
+        Input series whose shared support is required.
+
+    Returns
+    -------
+    pd.Index
+        Sorted common index. If no input series are supplied, an empty index is
+        returned.
+
+    Advantages
+    ----------
+    Enforcing a strict common support avoids silent broadcasting and missing-
+    data artefacts when constructing combined forecasts and additive scores.
+    """
+    
+    if not series_list:
+    
+        return pd.Index([])
+    
+    idx = series_list[0].index
+    
+    for s in series_list[1:]:
+    
+        idx = idx.intersection(s.index)
+    
+    return idx.sort_values()
+
+    
+def build_fx_factor_returns(
+    ratio_data: RatioData,
+    tickers: Sequence[str],
+    weekly_index: pd.DatetimeIndex,
+    base_ccy: str,
+) -> pd.DataFrame | None:
+    """
+    Build weekly FX factor returns for non-base currencies represented in the
+    asset universe.
+
+    Construction method
+    -------------------
+    1. Infer ticker currencies from `ratio_data`.
+   
+    2. Request local-to-base FX price series for each currency.
+    
+    3. Convert each price series to weekly returns:
+
+           r_fx,c,t = (P_c,t / P_c,t-1) - 1.
+
+    4. Store each series in a factor column named `FX_<CCY>`.
+
+    Parameters
+    ----------
+    ratio_data : RatioData
+        Data source providing ticker-currency mapping and FX converter series.
+    tickers : Sequence[str]
+        Asset universe from which currencies are inferred.
+    weekly_index : pd.DatetimeIndex
+        Target weekly index for factor alignment.
+    base_ccy : str
+        Base currency code.
+
+    Returns
+    -------
+    pd.DataFrame | None
+        FX factor return matrix indexed by `weekly_index`, or `None` if inputs
+        are unavailable or conversion fails.
+
+    Advantages
+    ----------
+    Explicit FX factors isolate currency co-movement from local return
+    dynamics, improving factor-model coverage in multi-currency covariance
+    estimation.
+    """
+
+    try:
+ 
+        col_ccy = ratio_data._ticker_ccy(pd.Index(tickers)).fillna(base_ccy)
+ 
+    except Exception:
+ 
+        return None
+
+    try:
+ 
+        fx_by_ccy = ratio_data._fx_converters_by_ccy(
+            ccys = col_ccy,
+            base_ccy = base_ccy,
+            interval = "1wk",
+            index = weekly_index,
+        )
+ 
+    except Exception:
+ 
+        return None
+
+    fx_rets = {}
+
+    for ccy, fx_price in fx_by_ccy.items():
+
+        if ccy == base_ccy:
+ 
+            continue
+
+        s = fx_price.pct_change().reindex(weekly_index).fillna(0.0)
+
+        fx_rets[f"FX_{ccy}"] = s
+
+    if not fx_rets:
+ 
+        return None
+
+    return pd.DataFrame(fx_rets, index = weekly_index)
+
+
+def main() -> None:
     """
     Orchestrate the end-to-end pipeline: load inputs, compute combined forecasts,
     build covariance, assemble export tables, and write to Excel.
@@ -3288,7 +4672,9 @@ def main():
     Outputs
     -------
     - Excel file `config.PORTFOLIO_FILE` with:
+    
         * 'Combination Forecast'
+    
         * 'Score Breakdown'
 
     Logging
@@ -3305,22 +4691,73 @@ def main():
     convex weights and applies a PSD correction (see its own docstring).
     """
     
+    logging.basicConfig(
+        level = logging.INFO,
+        format = "%(asctime)s - %(levelname)s - %(message)s",
+    )    
+    
     logging.info('Loading data...')
+    
+    ratio_data = RatioData()
     
     optimiser = PortfolioOptimiser(
         excel_file = config.FORECAST_FILE, 
-        ratio_data = r
+        ratio_data = ratio_data
     )
 
-    metrics = r.dicts()
+    sector_map = None
+  
+    industry_map = None
+  
+    if hasattr(optimiser, "analyst_df"):
+  
+        if "Sector" in optimiser.analyst_df.columns:
+  
+            sector_map = optimiser.analyst_df["Sector"]
+  
+        if "Industry" in optimiser.analyst_df.columns:
+  
+            industry_map = optimiser.analyst_df["Industry"]
+
+    metrics = ratio_data.dicts()
+    
+    tickers = optimiser.tickers
+    
+    daily_close = ratio_data.close
+    
+    daily_open = ratio_data.open
+    
+    macro_weekly = ratio_data.macro_data
+    
+    daily_ret = ratio_data.daily_rets
+    
+    weekly_ret = ratio_data.weekly_rets
     
     region_ind = {
-        'PE': pd.Series([metrics['PE'][t]['Region-Industry'] for t in optimiser.tickers], index = optimiser.tickers),
-        'PB': pd.Series([metrics['PB'][t]['Region-Industry'] for t in optimiser.tickers], index = optimiser.tickers),
-        'ROE': pd.Series([metrics['ROE'][t]['Region-Industry'] for t in optimiser.tickers], index = optimiser.tickers),
-        'ROA': pd.Series([metrics['ROA'][t]['Region-Industry'] for t in optimiser.tickers], index = optimiser.tickers),
-        'RevG': pd.Series([metrics['rev1y'][t]['Region-Industry'] for t in optimiser.tickers], index = optimiser.tickers),
-        'EarningsG': pd.Series([metrics['eps1y'][t]['Region-Industry'] for t in optimiser.tickers], index = optimiser.tickers)
+        'PE': safe_region_series(
+            metric_dict = metrics['PE'],        
+            tickers = tickers
+        ),
+        'PB': safe_region_series(
+            metric_dict = metrics['PB'],        
+            tickers = tickers
+        ),
+        'ROE': safe_region_series(
+            metric_dict = metrics['ROE'],        
+            tickers = tickers
+        ),
+        'ROA': safe_region_series(
+            metric_dict = metrics['ROA'],        
+            tickers = tickers
+        ),
+        'RevG': safe_region_series(
+            metric_dict = metrics['rev1y'],    
+            tickers = tickers
+        ),
+        'EarningsG': safe_region_series(
+            metric_dict = metrics['eps1y'],    
+            tickers = tickers
+        ),
     }
 
     logging.info('Computing combination forecast...')
@@ -3330,61 +4767,168 @@ def main():
             region_indicators = region_ind
         )
     )
+
+    cov_idx = comb_rets.index
+
+    for t in tickers:
+        
+        print(f'{t}:    ', comb_rets[t])
     
-    print(comb_rets)
+    daily_close_5y = daily_close.loc[
+        daily_close.index >= pd.to_datetime(config.FIVE_YEAR_AGO),
+        cov_idx,
+    ]
     
-    daily_ret_5y = daily_ret.loc[daily_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
+    daily_open_5y = daily_open.loc[
+        daily_open.index >= pd.to_datetime(config.FIVE_YEAR_AGO),
+        cov_idx,
+    ]
+    
+    macro_weekly_5y = macro_weekly.loc[
+        macro_weekly.index >= pd.to_datetime(config.FIVE_YEAR_AGO),
+        :,
+    ].astype("float32").copy()
+
+    daily_ret_5y = daily_ret.loc[
+        daily_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO),
+        cov_idx,
+    ]
   
-    weekly_ret_5y = weekly_ret.loc[weekly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
+    weekly_ret_5y = weekly_ret.loc[
+        weekly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO),
+        cov_idx,
+    ]
   
-    monthly_ret_5y = monthly_ret.loc[monthly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)]
+    monthly_ret = daily_close_5y.resample('ME').last().pct_change().dropna()
     
-    factor_weekly, index_weekly, ind_weekly, sec_weekly = r.factor_index_ind_sec_weekly_rets(
+    monthly_ret_5y = monthly_ret.loc[
+        monthly_ret.index >= pd.to_datetime(config.FIVE_YEAR_AGO)
+    ]
+    
+    factor_weekly, index_weekly, ind_weekly, sec_weekly = ratio_data.factor_index_ind_sec_weekly_rets(
         merge = False
     )
     
-    base_ccy = getattr(config, "BASE_CCY", "GBP")
-
-    daily_ret_5y_base = r.convert_returns_to_base(
+    other_tickers = ['CL=F', 'GC=F', 'HG=F', '^VIX']
+    
+    macro_weekly_rets = macro_to_weekly_returns(
+        macro_weekly = macro_weekly_5y
+    )
+    
+    macro_cols = [c for c in other_tickers if c in macro_weekly_rets.columns]
+    
+    macro_ret = macro_weekly_rets[macro_cols] if macro_cols else pd.DataFrame(index = macro_weekly_rets.index)
+        
+    base_ccy = getattr(config, "BASE_CCY", "USD")
+    
+    daily_ret_5y_base = ratio_data.convert_returns_to_base(
         ret_df = daily_ret_5y,
+        base_ccy = base_ccy,
+        interval = "1d",
+    )
+    
+    macro_ret_base = ratio_data.convert_returns_to_base(
+        ret_df = macro_ret,
+        base_ccy = base_ccy,
+        interval = "1wk",
+    )
+        
+    if macro_cols:
+        macro_weekly_rets.loc[:, macro_cols] = macro_ret_base
+    
+    daily_close_5y_base = ratio_data.convert_prices_to_base(
+        price_df = daily_close_5y,
         base_ccy = base_ccy,
         interval = "1d"
     )
     
-    weekly_ret_5y_base = r.convert_returns_to_base(
+    daily_open_5y_base = ratio_data.convert_prices_to_base(
+        price_df = daily_open_5y,
+        base_ccy = base_ccy,
+        interval = "1d"
+    )
+    
+    weekly_ret_5y_base = ratio_data.convert_returns_to_base(
         ret_df = weekly_ret_5y,
         base_ccy = base_ccy,
         interval = "1wk"
     )
     
-    monthly_ret_5y_base = r.convert_returns_to_base(
+    monthly_ret_5y_base = ratio_data.convert_returns_to_base(
         ret_df = monthly_ret_5y,
         base_ccy = base_ccy,
         interval = "1mo"
     )
+
+    fund_exposures_weekly = None
     
-    factor_weekly_base = r.convert_returns_to_base(
+    if getattr(config, "COV_USE_FUND_FACTORS", True):
+
+        try:
+
+            fdata = FinancialForecastData(tickers = list(comb_rets.index), quiet = True)
+
+            weekly_prices = ratio_data.weekly_close.reindex(
+                index = weekly_ret_5y_base.index
+            ).reindex(columns = comb_rets.index)
+          
+            shares_out = getattr(ratio_data, "shares_outstanding", pd.Series(index = comb_rets.index, dtype = float))
+            
+            fund_exposures_weekly = fdata.build_pit_fundamental_exposures_weekly(
+                tickers = list(comb_rets.index),
+                weekly_index = weekly_ret_5y_base.index,
+                weekly_prices = weekly_prices,
+                shares_outstanding = shares_out,
+                report_lag_days = getattr(config, "FUND_REPORT_LAG_DAYS", 90),
+                price_lag_weeks = getattr(config, "FUND_PRICE_LAG_WEEKS", 1),
+                winsor_p = getattr(config, "FUND_WINSOR_P", (0.05, 0.95)),
+                robust_scale = getattr(config, "FUND_ROBUST_SCALE", "mad"),
+                min_coverage = getattr(config, "FUND_MIN_COVERAGE", 0.6),
+            )
+     
+        except Exception as exc:
+     
+            logging.warning("Failed to build PIT fundamental exposures: %s", exc)
+
+    fx_factors_weekly = build_fx_factor_returns(
+        ratio_data = ratio_data,
+        tickers = comb_rets.index,
+        weekly_index = weekly_ret_5y_base.index,
+        base_ccy = base_ccy,
+    )
+    
+    factor_weekly_base = ratio_data.convert_returns_to_base(
         ret_df = factor_weekly, 
         base_ccy = base_ccy,
         interval = "1wk"
     )
     
-    index_weekly_base = r.convert_returns_to_base(
+    index_weekly_base = ratio_data.convert_returns_to_base(
         ret_df = index_weekly,
         base_ccy = base_ccy,
         interval = "1wk"
     )
     
-    ind_weekly_base = r.convert_returns_to_base(
+    ind_weekly_base = ratio_data.convert_returns_to_base(
         ret_df = ind_weekly,
         base_ccy = base_ccy, 
         interval = "1wk"
     )
     
-    sec_weekly_base = r.convert_returns_to_base(
+    sec_weekly_base = ratio_data.convert_returns_to_base(
         ret_df = sec_weekly,
         base_ccy = base_ccy, 
         interval = "1wk"
+    )
+    
+    print('Building covariance matrix...')
+
+    solve_method = getattr(config, "COV_SOLVE_METHOD", "cvxpy")
+
+    macro_factors_weekly = (
+        macro_weekly_rets
+        if (macro_weekly_rets is not None and not macro_weekly_rets.empty)
+        else None
     )
 
     cov = shrinkage_covariance(
@@ -3397,8 +4941,34 @@ def main():
         index_returns_weekly = index_weekly_base,
         industry_returns_weekly = ind_weekly_base,
         sector_returns_weekly = sec_weekly_base,
-        use_excess_ff = False
+        macro_factors_weekly = macro_factors_weekly,
+        fx_factors_weekly = fx_factors_weekly,
+        fund_exposures_weekly = fund_exposures_weekly,
+        sector_map = sector_map,
+        industry_map = industry_map,
+        daily_open_5y = daily_open_5y_base,
+        daily_close_5y = daily_close_5y_base,
+        use_excess_ff = False,
+        use_log_returns = getattr(config, "COV_USE_LOG_RETURNS", True),
+        use_oas = getattr(config, "COV_USE_OAS", True),
+        use_block_prior = getattr(config, "COV_USE_BLOCK_PRIOR", True),
+        use_regime_ewma = getattr(config, "COV_USE_REGIME_EWMA", True),
+        use_glasso = getattr(config, "COV_USE_GLOSSO", True),
+        use_fund_factors = getattr(config, "COV_USE_FUND_FACTORS", True),
+        use_fx_factors = getattr(config, "COV_USE_FX_FACTORS", True),
+        use_factor_term_structure = getattr(config, "COV_USE_TERM_STRUCTURE", False),
+        solve_method = solve_method,
     )
+
+    cov_path = config.BASE_DIR / f"cov_matrix_{config.TODAY}.pkl"
+  
+    try:
+  
+        cov.to_pickle(cov_path)
+  
+    except Exception as exc:
+  
+        logging.warning("Failed to save covariance to %s: %s", cov_path, exc)
 
     var = pd.Series(np.diag(cov), index = cov.index)
     
@@ -3411,7 +4981,32 @@ def main():
     bull = (comb_rets + 1.96 * std).clip(config.lbr, config.ubr)
   
     bear = (comb_rets - 1.96 * std).clip(config.lbr, config.ubr)
+    
+    margin_safety = 1.96 * std / np.sqrt(252)
+    
+    month_ago = pd.to_datetime(config.TODAY) - pd.DateOffset(months=3)
 
+    last_month_daily_ret_base = daily_ret_5y_base.loc[
+        daily_ret_5y_base.index >= month_ago,
+        comb_rets.index,
+    ]
+
+    alpha = 0.05  
+    
+    hist_var_daily = last_month_daily_ret_base.quantile(alpha, axis = 0)
+
+    tail_mask = last_month_daily_ret_base.le(hist_var_daily, axis = "columns")
+    
+    tail_losses = last_month_daily_ret_base.where(tail_mask)
+
+    hist_etl_daily = tail_losses.mean(axis = 0, skipna=True)
+
+    hist_etl_margin = (-hist_etl_daily).clip(lower = 0.0)
+
+    margin_safety = hist_etl_margin.reindex(comb_rets.index).fillna(0.0)
+  
+    safe_returns = comb_rets - margin_safety
+    
     df = pd.DataFrame({
             'Ticker': idx,
             'Current Price': price,
@@ -3419,11 +5014,12 @@ def main():
             'Low Price': np.round(price * (bear + 1), 2),
             'High Price': np.round(price * (bull + 1), 2),
             'Returns': comb_rets,
+            'Safe Returns': safe_returns,
             'Low Returns': bear,
             'High Returns': bull,
             'SE': comb_stds,
             'Volatility': std,
-        }, index = idx).set_index('Ticker')
+    }, index = idx).set_index('Ticker')
     
     for name, w in weights.items():
         
@@ -3441,7 +5037,7 @@ def main():
     
     sheets_to_upload = {
         'Combination Forecast': df,
-        'Score Breakdown': score_breakdown
+        'Score Breakdown': score_breakdown,
     }
     
     export_results(
