@@ -90,6 +90,8 @@ def export_results(
             high_col = header_map.get('High Price')
             
             ret_col = header_map.get('Returns')
+            
+            safe_ret_col = header_map.get('Safe Returns')
            
             low_ret_col = header_map.get('Low Returns')
            
@@ -120,6 +122,18 @@ def export_results(
                 
                 ws.conditional_formatting.add(
                     f"{ret_col}2:{ret_col}{max_row}",
+                    CellIsRule(operator = 'greaterThan', formula = ['0'], fill = green_fill)
+                )
+                
+            if safe_ret_col:
+                
+                ws.conditional_formatting.add(
+                    f"{safe_ret_col}2:{safe_ret_col}{max_row}",
+                    CellIsRule(operator = 'lessThan', formula = ['0'], fill = red_fill)
+                )
+                
+                ws.conditional_formatting.add(
+                    f"{safe_ret_col}2:{safe_ret_col}{max_row}",
                     CellIsRule(operator = 'greaterThan', formula = ['0'], fill = green_fill)
                 )
             
