@@ -236,6 +236,7 @@ Units and data hygiene
 This module is provided for analytical illustration only and does not constitute investment advice.
 """
 
+
 import numpy as np
 import pandas as pd
 import numpy.typing as npt
@@ -243,11 +244,11 @@ import logging
 
 from data_processing.financial_forecast_data import FinancialForecastData
 import config
+ 
 
+df_opts = {'future.no_silent_downcasting': True} 
 
-df_opts = {'future.no_silent_downcasting': True}
-
-for opt, val in df_opts.items():
+for opt, val in df_opts.items():  
     
     pd.set_option(opt, val)
 
@@ -301,7 +302,9 @@ def bvps(
     Notes
     -----
     • This is the standard clean-surplus relation in per-share terms.
+
     • Inputs are cast to float to avoid dtype surprises.
+
     • No clipping or bounds are imposed here; caller should enforce realism if needed.
     """
     
@@ -318,7 +321,9 @@ def growth(
     Compute the company-specific growth rate used for terminal residual-income logic.
 
     The function returns a growth proxy g:
+     
       • If ROE < 0 (loss-making), fall back to the industry/region growth `ind_g`.
+    
       • Otherwise, use retention-based growth:
             g = ROE × (1 - payout_ratio)
         where payout_ratio defaults to 0 if missing.
@@ -342,6 +347,7 @@ def growth(
     Notes
     -----
     • When payout_ratio is NaN, it is set to 0 (i.e., full retention).
+   
     • This is a simplified fundamental identity that ties growth to reinvested
       earnings via ROE.
     """
@@ -371,12 +377,18 @@ def calc_div_growth(
 
     Steps:
     1) Coerce to float, back/forward fill for small gaps, keep strictly positive values.
+  
     2) Compute period-over-period growth rates:
+  
            r_t = (Div_t / Div_{t-1}) - 1
        (implemented via pct_change()).
+  
     3) Compute the geometric mean growth via logs:
+  
            g = exp( mean( log(1 + r_t) ) ) - 1
+  
     4) Clip to a reasonable range to avoid absurd tails:
+  
            g ∈ [-0.8, 5.0]
 
     Parameters
@@ -403,13 +415,13 @@ def calc_div_growth(
     
     div = div.where(div > 0)
     
-    pct = div.pct_change().dropna()
-    
+    pct = div.pct_change(fill_method = None).dropna()
+     
     if pct.empty:
         
         return 0.0
     
-    g = np.exp(np.nanmean(np.log1p(pct).mean())) - 1.0
+    g = float(np.exp(np.nanmean(np.log1p(pct))) - 1.0)
     
     return float(np.clip(g, -0.8, 5))
 
@@ -423,6 +435,7 @@ def build_dps_vector(
     Build a vector of forecast dividends per share (DPS) across a multi-year horizon.
 
     Assumes a constant growth model for dividends:
+    
         DPS_t = DPS_0 × (1 + g_div)^t,    for t = 0, 1, ..., years-1
 
     Parameters
@@ -458,7 +471,9 @@ def build_eps_grid(
 
     Let T = number of valid forecast periods (rows in `valid`).
     For each period t, let {L_t, A_t, H_t} be (low_eps, avg_eps, high_eps).
+   
     The function constructs all 3^T paths:
+   
         ε = [ε_0, ε_1, ..., ε_{T-1}]  with ε_t ∈ {L_t, A_t, H_t}
 
     Implementation uses `np.meshgrid` to form the Cartesian product, then reshapes
@@ -481,14 +496,22 @@ def build_eps_grid(
       (e.g., by forecast probabilities), handle that downstream.
     """
         
-    eps_cols = ['low_eps', 'avg_eps', 'high_eps']
+    low = valid['low_eps'].to_numpy(dtype = float)
     
-    opts = [valid[c].to_numpy(dtype=float) for c in eps_cols]
-    
-    m = np.meshgrid(*opts, indexing = 'xy') 
-    
-    eps_grid = np.stack(m, axis = -1).reshape(-1, len(valid))
-    
+    avg = valid['avg_eps'].to_numpy(dtype = float)
+   
+    high = valid['high_eps'].to_numpy(dtype = float)
+   
+    T = len(valid)
+
+    opts = np.stack([low, avg, high], axis=1) 
+
+    idx = np.stack(np.meshgrid(*([np.arange(3)] * T), indexing = 'ij'), axis=-1).reshape(-1, T)
+
+    rows = np.arange(T)
+
+    eps_grid = opts[rows[None, :], idx].squeeze() 
+
     return eps_grid
 
 
@@ -501,8 +524,11 @@ def build_discount_factor_vector(
     Construct per-period discount factors from a (possibly irregular) forecast index.
 
     For each forecast date τ_t (taken from `valid.index`), compute the time-to-cash in days:
+  
         days_t = (τ_t - today_ts)  in days
+  
     Then the discount factor under a flat cost of equity `coe_t` is:
+  
         disc_t = (1 + coe_t)^{ - days_t / 365 }
 
     Parameters
@@ -522,7 +548,9 @@ def build_discount_factor_vector(
     Notes
     -----
     • If the forecast index is not a regular yearly grid, the exponent uses fractional years.
+   
     • Assumes simple annual compounding with 365-day convention.
+   
     • Ensure `valid.index` is timezone-naive or consistently localized prior to calling.
     """
 
@@ -536,18 +564,23 @@ def build_discount_factor_vector(
 def build_prev_bvps_vector(
     bvps_0: np.ndarray,
     eps_grid: np.ndarray,
-    dps_vec: npt.NDArray[np.float64],
+    dps_mat3: npt.NDArray[np.float64],
     combos: int
 ) -> np.ndarray:
     """
     Build the matrix of 'previous' BVPS along each EPS path, used in residual income terms.
 
     For path i and period t≥1, the 'previous' book value is:
+   
         BVPS_{t}^{prev}(i) = BVPS_0 + sum_{k=0}^{t-1} ( EPS_k(i) - DPS_k )
-    and BVPS_{0}^{prev}(i) = BVPS_0.
+   
+    and
+    
+        BVPS_{0}^{prev}(i) = BVPS_0.
 
     This function returns a matrix BVPS_prev of shape (combos, T) where:
       • BVPS_prev[i, 0]      = BVPS_0
+     
       • BVPS_prev[i, t>0]    = BVPS_0 + cumulative sum_{k=0}^{t-1}(EPS_k(i) - DPS_k)
 
     Parameters
@@ -572,16 +605,21 @@ def build_prev_bvps_vector(
     • This is consistent with the clean-surplus relation in per-share terms.
     """
         
-    delta = eps_grid - dps_vec[None, :]
-   
-    cs = np.cumsum(delta, axis = 1)
-   
-    BVPS_prev = np.hstack([
-        np.full((combos, 1), bvps_0),
-        bvps_0 + cs[:, :-1]
-    ])
+    combos, T = eps_grid.shape
+  
+    S = dps_mat3.shape[0]
+
+    dps_bc = np.broadcast_to(dps_mat3[:, None, :], (S, combos, T))
+
+    delta = eps_grid[None, :, :] - dps_bc
     
-    return BVPS_prev
+    cs = np.cumsum(delta, axis = 2) 
+
+    bvps0_col = np.full((S, combos, 1), float(bvps_0))
+    
+    bvps_prev = np.concatenate([bvps0_col, bvps0_col + cs[:, :, :-1]], axis = 2)
+    
+    return bvps_prev
 
 
 def notna(
@@ -687,9 +725,15 @@ def build_tv_mat(
     Notes
     -----
     • The RI terminal follows a standard continuing-value expression for residual income:
+   
           TV_RI = ( RI_{T+1} ) / (coe - g ) × disc_T
-      where RI_{T+1} = EPS_{T+1} - coe × BVPS_{T}^{book}.
+   
+      where 
+      
+        RI_{T+1} = EPS_{T+1} - coe × BVPS_{T}^{book}.
+    
     • The P/B terminals  capitalise BVPS_{T}^{book} with a multiple and discount it.
+    
     • This implementation divides SE_term by sqrt(n_terms) to reflect combining multiple
       candidate terminals.
     """
@@ -763,7 +807,8 @@ def total_ri_preds(
     ind_g,
     ind_g_ri,
     ind_pb,
-    shares_out
+    shares_out,
+    dy_tuple = None
 ):
     """
     Compute the distribution of present values from residual-income (RI) valuation
@@ -772,57 +817,92 @@ def total_ri_preds(
     Pipeline & Equations
     --------------------
     1) Inputs & coercions:
+      
        • Extract BVPS_0, price_book (P/B), cast coe_t to float if provided.
+      
        • Build `valid` forecast frame with columns:
            {low_eps, avg_eps, high_eps, num_analysts}
          ensuring datetime index and an analysts floor of 1.0.
 
     2) Dividend model:
+      
        • Estimate long-run dividend growth g_div = calc_div_growth(div_series).
+      
        • Baseline dividend per share DPS_0:
             DPS_0 = mean(Div) / Shares_Out
          (or 0 if shares_out is missing/nonpositive).
+      
        • Build DPS vector for T periods:
+      
             DPS_t = DPS_0 × (1 + g_div)^t
 
     3) EPS path enumeration:
+      
        • For each year t with options {L_t, A_t, H_t}, build all paths:
+            
             ε ∈ ℝ^{3^T × T}, ε_{i,t} ∈ {L_t, A_t, H_t}
 
     4) Book value propagation along each path:
+      
        • Previous BVPS before recognising EPS_t:
+      
             BVPS_{t}^{prev}(i) = BVPS_0 + ∑_{k=0}^{t-1} ( ε_{i,k} - DPS_k )
+      
          Construct BVPS_prev ∈ ℝ^{3^T × T}.
 
     5) Discount factors:
+      
        • For forecast date τ_t, days_t = (τ_t - today) in days, then:
+      
             disc_t = (1 + coe_t)^{ - days_t / 365 }
+      
          Collect disc ∈ ℝ^{T}.
 
     6) Residual income (per period, per path):
+      
        • RI_{i,t} = ( ε_{i,t} - coe_t × BVPS_{i,t}^{prev} ) × disc_t
+      
        • Sum over horizon:
+      
             RI_sum_i = ∑_{t=0}^{T-1} RI_{i,t}
 
     7) Terminal value candidates (per path):
-       • Let g = growth(kpis, ind_g) and EPS_{T+1}(i) = ε_{i,T-1} × (1 + g).
+      
+       • Let 
+       
+            g = growth(kpis, ind_g) 
+            
+            EPS_{T+1}(i) = ε_{i,T-1} × (1 + g).
+      
        • term_raw_i = EPS_{T+1}(i) - coe_t × BVPS_{i,T-1}^{prev}.
+      
        • Call `build_tv_mat` to assemble discounted terminal candidates:
+        
             term_disc_mat ∈ ℝ^{3^T × n_terms}, se_term ∈ ℝ
+        
          (RI terminals gated on denominators coe_t - g and coe_t - ind_g_ri,
           plus P/B terminals when available).
 
     8) Total present value distribution:
+       
        • base_ri_i = BVPS_0 + RI_sum_i
+       
        • total_RI_mat = base_ri[:, None] + term_disc_mat
+       
        • Flatten to a 1-D vector, drop NaNs:
+       
             total_RI = vec(total_RI_mat) ∈ ℝ^{3^T × n_terms}
 
     9) Standard error (SE):
+       
        • Period-by-period uncertainty from RI terms:
+       
             σ_t = std( RI_{:,t}, ddof=1 )
+       
             SE_t = σ_t / sqrt( n_t ), with n_t = max(num_analysts_t, 1)
+       
        • Combine by quadrature and include terminal-block contribution:
+       
             SE = sqrt( ∑_{t=0}^{T-1} SE_t^2  +  se_term^2 )
 
     Parameters
@@ -857,16 +937,23 @@ def total_ri_preds(
     Shapes
     ------
     • T = number of forecast periods after filtering ('valid' rows).
+  
     • combos = 3**T = number of EPS paths.
+  
     • eps_grid : (combos, T), BVPS_prev : (combos, T), disc : (T,)
+  
     • term_disc_mat : (combos, n_terms), total_RI_mat : (combos, n_terms)
 
     Notes
     -----
     • The RI framework values equity via:
+   
           V_0 = BVPS_0 + Σ_{t=0}^{T-1} [ (EPS_t - coe × BVPS_{t}^{prev}) × disc_t ] + TV
+   
       with different specifications for the continuing value TV.
+  
     • This implementation enumerates all low/avg/high EPS paths.
+  
     • The SE composition assumes independence across years for the by-year term; if serial
       correlation is material, consider a delta method with a full covariance or bootstrap.
     """
@@ -920,14 +1007,14 @@ def total_ri_preds(
 
     div = fin_df['Div'].abs().fillna(0)
     
-    if shares_out:
-   
+    if shares_out is not None and np.isfinite(shares_out) and shares_out > 0:
+        
         dps = float(div.mean()) / float(shares_out)
-    
+        
     else:
         
         dps = 0.0
-   
+        
     div_growth = calc_div_growth(
         div = div
     )
@@ -943,11 +1030,39 @@ def total_ri_preds(
         div_growth = div_growth,
         years = years
     )
+    
+    if dy_tuple is not None:
+      
+        y_avg, y_p10, y_p90 = dy_tuple
+
+        if (y_avg is not None and np.isfinite(y_avg) and y_avg > 0):
+        
+            y_avg_eff = y_avg  
+            
+        else:
+            
+            y_avg_eff = 1.0
+        
+        scale_avg = 1.0
+        
+        scale_p10 = float(y_p10) / y_avg_eff if np.isfinite(y_p10) else 1.0
+        
+        scale_p90 = float(y_p90) / y_avg_eff if np.isfinite(y_p90) else 1.0
+        
+        dps_mat3 = np.vstack([
+            scale_avg * dps_vec,
+            scale_p10 * dps_vec,
+            scale_p90 * dps_vec
+        ])
+        
+    else:
+
+        dps_mat3 = dps_vec[None, :] 
 
     BVPS_prev = build_prev_bvps_vector(
         bvps_0 = bvps_0, 
         eps_grid = eps_grid, 
-        dps_vec = dps_vec,
+        dps_mat3 = dps_mat3,
         combos = combos
     )
 
@@ -956,41 +1071,72 @@ def total_ri_preds(
         valid = valid
     )
 
-    ri_terms = (eps_grid - coe_t * BVPS_prev) * disc1d[None, :]
+    ri_terms = (eps_grid[None, :, :] - coe_t * BVPS_prev) * disc1d[None, None, :]
    
-    ri_sum = ri_terms.sum(axis = 1)
+    ri_sum = ri_terms.sum(axis = 2)
 
     last_eps = eps_grid[:, -1]
-   
-    last_bvps = BVPS_prev[:, -1]
-   
+      
     eps_tp1 = last_eps * (1 + g)
    
-    term_raw = eps_tp1 - coe_t * last_bvps
+    term_blocks = []   
+    
+    se_terms = []   
 
-    term_disc_mat, se_term = build_tv_mat(
-        coe_t = coe_t,
-        g_comp = g,
-        ind_g_ri = ind_g_ri,
-        ind_pb = ind_pb,
-        price_book = price_book,
-        term_raw = term_raw,
-        last_bvps = last_bvps,
-        na_m1 = na[-1],
-        disc1d = disc1d
-    )
-
+    for s in range(BVPS_prev.shape[0]):
+        
+        last_bvps = BVPS_prev[s, :, -1]           
+       
+        term_raw = eps_tp1 - coe_t * last_bvps    
+       
+        term_disc_mat, se_term = build_tv_mat(
+            coe_t = coe_t,
+            g_comp = g,
+            ind_g_ri = ind_g_ri,
+            ind_pb = ind_pb,
+            price_book = price_book,
+            term_raw = term_raw,
+            last_bvps = last_bvps,
+            na_m1 = na[-1],
+            disc1d = disc1d
+        )
+        term_blocks.append(term_disc_mat)    
+        
+        se_terms.append(se_term)
+            
+    se_term = float(np.sqrt(np.sum(np.square(se_terms))))
+        
     base_ri = bvps_0 + ri_sum
    
-    total_RI_mat = base_ri[:, None] + term_disc_mat
-   
-    total_RI = pd.Series(total_RI_mat.ravel()).dropna()
+    totals = []
+    
+    for s, term_disc_mat_s in enumerate(term_blocks):
+    
+        base_s = base_ri[s, :]                           
+    
+        total_RI_mat_s = base_s[:, None] + term_disc_mat_s  
+    
+        totals.append(total_RI_mat_s.ravel())
 
-    stds_by_year = np.nanstd(ri_terms, axis = 0, ddof = 1)
+    total_RI = pd.Series(np.concatenate(totals)).dropna()
+
+    S, combos, T = BVPS_prev.shape
+    
+    N = S * combos
    
-    ses_by_year = stds_by_year / np.sqrt(na)
+    stds_by_year = np.empty(T, dtype = float)
    
-    se = np.sqrt((ses_by_year ** 2).sum() + se_term ** 2)
+    for t in range(T):
+   
+        x = ri_terms[:, :, t].ravel()
+   
+        ddof = 1 if x.size > 1 else 0
+   
+        stds_by_year[t] = np.nanstd(x, ddof = ddof)
+   
+    ses_by_year = stds_by_year / np.sqrt(na)  
+   
+    se = float(np.sqrt(np.sum(ses_by_year ** 2) + se_term ** 2))
 
     return total_RI, se
 
@@ -1002,24 +1148,39 @@ def main():
     Steps
     -----
     1) Load inputs:
+      
        • Ticker list, latest prices, shares outstanding from `macro.r`.
+      
        • Cost of equity series (COE) from Excel (sheet 'COE').
+      
        • Lower/upper price clamps (lb/ub) from config × latest prices.
+      
        • Dictionaries for Region-Industry growth (`eps1y_5`) and P/B (`PB`).
 
     2) For each ticker:
+      
        • Validate presence of financials, forecasts, KPIs, COE.
+      
        • Extract Region-Industry growth and P/B where available.
+      
        • Call `total_ri_preds` to obtain the present-value distribution and SE.
+      
        • Clip prices to [lb, ub], then compute:
+      
             low  = max(min(price_dist), 0)
+      
             avg  = max(mean(price_dist), 0)
+      
             high = max(max(price_dist), 0)
+      
             return = max(avg / last_price - 1, 0)
+      
        • Log a one-line summary.
 
     3) Export:
+      
        • Assemble a DataFrame with Low/Avg/High/SE per ticker.
+      
        • Write to Excel (sheet 'RI'), replacing if it exists.
 
     Outputs
@@ -1031,7 +1192,9 @@ def main():
     Notes
     -----
     • Missing inputs for a ticker trigger a skip with zeros recorded.
+  
     • Price clipping prevents extreme terminals from dominating the reported stats.
+  
     • Logging level is INFO; switch to DEBUG upstream for more granular diagnostics.
     """
         
@@ -1046,6 +1209,14 @@ def main():
         sheet_name = 'COE',
         index_col = 0, 
         usecols = ['Ticker', 'COE'], 
+        engine = 'openpyxl'
+    )
+    
+    div_yield = pd.read_excel(
+        config.FORECAST_FILE, 
+        sheet_name = 'Div Yield Pred',
+        index_col = 0, 
+        usecols = ['Ticker', 'Payout Mean', 'Payout 10%', 'Payout 90%'], 
         engine = 'openpyxl'
     )
 
@@ -1070,7 +1241,7 @@ def main():
     se_dict = {}
 
     for ticker in tickers:
-       
+               
         fin_df = fdata.annuals.get(ticker)
        
         forecast_df = fdata.forecast.get(ticker)
@@ -1113,6 +1284,16 @@ def main():
         
         shares_out = shares_outstanding.get(ticker, np.nan)
         
+        yrow = div_yield.loc[ticker] if ticker in div_yield.index else None
+        
+        if yrow is not None:
+            
+            div_tpl = (float(yrow['Payout Mean']), float(yrow['Payout 10%']), float(yrow['Payout 90%'])) 
+            
+        else:
+            
+            div_tpl = None
+        
         total_RI, se = total_ri_preds(
             kpis = kpis,
             fin_df = fin_df,
@@ -1122,6 +1303,7 @@ def main():
             ind_g_ri = ind_g_ri,
             ind_pb = ind_pb,
             shares_out = shares_out,
+            dy_tuple = div_tpl
         )
 
         prices_all = np.clip(total_RI.to_numpy(), lb[ticker], ub[ticker])
