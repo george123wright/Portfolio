@@ -41,7 +41,7 @@ around convex subproblems and first-order methods:
    
    - DSR(w) = SR_ann(w) / SE{SR_week(w)} − E[max_i Z_i] where Z_i ~ N(0,1).
    
-   - ASR(w) ≈ SR(w) · [1 + (γ₃ SR)/6 + ((γ₄ − 3) SR²)/24], with γ₃, γ₄ sample
+   - ASR(w) ≈ SR(w) · [1 + (γ₃ SR)/6 - ((γ₄ − 3) SR²)/24], with γ₃, γ₄ sample
      skewness and kurtosis from recent weekly returns.
 
 CCP composite portfolios (overview)
@@ -80,6 +80,10 @@ parts and (optionally) sector risk-contribution caps. Modelling distinctions:
                   backtracking on the true nonlinear objective. No proximity penalties; sector
                   and risk-contribution caps are enforced through linearised constraints..
 
+- `comb_port12` : Sortino + MDP + BL Sharpe + DSR + ASR + UPM/LPM + Up/Down.
+                  Uses the same CCP/Armijo framework with calibrated term scaling and
+                  fail-fast Up/Down coefficient construction when benchmark support is missing.
+
 Constraints and modelling
 -------------------------
 All optimisers use a common feasible set:
@@ -110,7 +114,9 @@ nearest-PSD projections if required.
 External references
 -------------------
 - Dinkelbach (1967): Nonlinear fractional programming.
+
 - Rockafellar & Uryasev (2000): Optimisation of Conditional Value-at-Risk.
+
 - Black & Litterman (1992): Global portfolio optimisation.
 """
 
@@ -123,9 +129,9 @@ from typing import Tuple, Dict, List, Optional
 from scipy.stats import norm
 from scipy.integrate import quad
 
-import portfolio_grad3 as g
-from black_litterman_model import black_litterman
-from cov_functions7 import _nearest_psd_preserve_diag
+import portfolio_grad as g
+from functions.black_litterman_model import black_litterman
+from cov_functions import _nearest_psd_preserve_diag
 import config
 
 
@@ -333,7 +339,53 @@ class PortfolioOptimiser:
         
         self.random_state = int(random_state)
         
-        self.sample_size = sample_size
+        profile = str(getattr(config, "OPT_PROFILE", "exact")).strip().lower()
+        
+        self.opt_profile = profile if profile in {"exact", "fast"} else "exact"
+        
+        cfg_sample_size = getattr(config, "OPT_CALIB_SAMPLE_SIZE", None)
+        
+        if cfg_sample_size is not None:
+            
+            resolved_sample_size = int(cfg_sample_size)
+        
+        elif self.opt_profile == "fast" and int(sample_size) == 5000:
+            
+            resolved_sample_size = 1000
+        
+        else:
+            
+            resolved_sample_size = int(sample_size)
+        
+        self.sample_size = max(1, resolved_sample_size)
+        
+        cfg_dsr_subsample = getattr(config, "OPT_CALIB_DSR_SUBSAMPLE", None)
+        
+        if cfg_dsr_subsample is not None:
+            
+            self.opt_calib_dsr_subsample = max(1, int(cfg_dsr_subsample))
+        
+        elif self.opt_profile == "fast":
+            
+            self.opt_calib_dsr_subsample = 256
+        
+        else:
+            
+            self.opt_calib_dsr_subsample = None
+        
+        cfg_seed_limit = getattr(config, "OPT_SEED_LIMIT", None)
+        
+        if cfg_seed_limit is not None:
+            
+            self.opt_seed_limit = max(1, int(cfg_seed_limit))
+        
+        elif self.opt_profile == "fast":
+            
+            self.opt_seed_limit = 4
+        
+        else:
+            
+            self.opt_seed_limit = None
         
         self.cvar_level_pct = float(cvar_level_pct)
         
@@ -353,6 +405,19 @@ class PortfolioOptimiser:
             def _canon_tkr(
                 x: str
             ) -> str:
+                """
+                Canonicalise ticker case and surrounding whitespace.
+
+                Parameters
+                ----------
+                x : str
+                    Raw ticker token.
+
+                Returns
+                -------
+                str
+                    Upper-case ticker with leading/trailing whitespace removed.
+                """
                 
                 return x.upper().strip()
 
@@ -373,6 +438,25 @@ class PortfolioOptimiser:
             def _canon_index(
                 obj
             ):
+                """
+                Re-map ticker-labelled objects to canonical ticker symbols.
+
+                The function supports Series and DataFrames:
+                - Series: remaps the index.
+                - DataFrame: remaps column labels.
+                Any ticker not present in the precomputed mapping is canonicalised
+                on the fly through ``_canon_tkr``.
+
+                Parameters
+                ----------
+                obj : Any
+                    Input object containing ticker labels.
+
+                Returns
+                -------
+                Any
+                    Re-labelled object of the same structural type, or ``None``.
+                """
                 
                 if obj is None: 
                 
@@ -463,11 +547,11 @@ class PortfolioOptimiser:
 
         self._weekly_ret_1y = self._reindex_df_cols(
             df = weekly_ret_1y
-        ).dropna(how = "any")
+        )
         
         self._last_5y = self._reindex_df_cols(
             df = last_5_year_weekly_rets
-        ).dropna(how = "any")
+        )
         
         self._benchmark_weekly = self._align_bench(
             bench = benchmark_weekly_ret
@@ -639,7 +723,17 @@ class PortfolioOptimiser:
         self
     ) -> List[str]:
         """
-        List[str]: canonical ticker order used throughout optimisation and reporting.
+        Canonical ticker ordering used by every vector and matrix operation.
+
+        The optimiser treats this list as the reference basis for the weight vector
+        ``w`` and all aligned arrays. If ``w[i]`` denotes a position, then index
+        ``i`` always refers to ``universe[i]`` across expected returns, covariances,
+        score vectors, historical return matrices, and output reporting.
+
+        Returns
+        -------
+        list[str]
+            Universe tickers in the unique, validated, optimisation order.
         """
 
         return self._universe
@@ -650,7 +744,15 @@ class PortfolioOptimiser:
         self
     ) -> int:
         """
-        int: number of assets in the current universe.
+        Portfolio dimension ``N``.
+
+        ``N`` is the size of the decision vector ``w in R^N`` and therefore the
+        number of columns expected in every aligned data matrix.
+
+        Returns
+        -------
+        int
+            Number of assets in the current universe.
         """
 
         return len(self._universe)
@@ -672,7 +774,15 @@ class PortfolioOptimiser:
         self
     ) -> np.ndarray:
         """
-        np.ndarray (n,): asset score vector s aligned to the universe (float).
+        Score vector aligned to ``universe``.
+
+        This returns the cross-sectional signal vector ``s`` used in score-based
+        objectives such as ``Score/CVaR(w) = (s^T w) / CVaR_alpha(w)``.
+
+        Returns
+        -------
+        np.ndarray
+            One-dimensional array of shape ``(N,)`` containing float scores.
         """
 
         return self._scores.to_numpy(dtype = float)
@@ -823,7 +933,14 @@ class PortfolioOptimiser:
         self
     ) -> int:      
         """
-        int: number of weekly observations in the 1-year history.
+        Number of observations in the 1-year weekly history matrix.
+
+        If ``R1`` has shape ``(T1, N)``, this property returns ``T1``.
+
+        Returns
+        -------
+        int
+            Weekly sample length for 1-year calculations.
         """
 
         return self.R1.shape[0]
@@ -834,7 +951,15 @@ class PortfolioOptimiser:
         self
     ) -> float:
         """
-        float: √T₁, used to RMS-normalise weekly sums and standard errors.
+        Square-root sample-size factor for the 1-year window.
+
+        ``sqrtT1 = sqrt(T1)`` appears in root-mean-square normalisations such as
+        tracking error ``||a||_2 / sqrt(T1)`` and downside deviation scaling.
+
+        Returns
+        -------
+        float
+            ``sqrt(T1)``.
         """
 
         return float(np.sqrt(self.T1))
@@ -845,7 +970,15 @@ class PortfolioOptimiser:
         self
     ) -> float:
         """
-        float: √T₅, used to RMS-normalise 5-year tracking error.
+        Square-root sample-size factor for the 5-year window.
+
+        ``sqrtT5 = sqrt(T5)`` is used in long-horizon RMS quantities, notably
+        ``TE_5y(w) = ||a_5||_2 / sqrt(T5)``.
+
+        Returns
+        -------
+        float
+            ``sqrt(T5)``.
         """
 
         return float(np.sqrt(self.T5))    
@@ -856,7 +989,14 @@ class PortfolioOptimiser:
         self
     ) -> int:
         """
-        int: number of weekly observations in the 5-year history (after pruning/alignment).
+        Number of observations in the 5-year aligned weekly history.
+
+        If ``R5`` has shape ``(T5, N)``, this property returns ``T5``.
+
+        Returns
+        -------
+        int
+            Weekly sample length for long-horizon objectives.
         """
 
         return self._R5_b_te[0].shape[0]
@@ -867,7 +1007,16 @@ class PortfolioOptimiser:
         self
     ) -> float:
         """
-        Annual risk-free rate used in Sharpe-type numerators.
+        Annual risk-free rate used in annual excess-return numerators.
+
+        This scalar enters terms such as
+        ``Sharpe(w) = (mu^T w - rf_ann) / sigma(w)``
+        and analogous Black-Litterman Sharpe variants.
+
+        Returns
+        -------
+        float
+            Annual risk-free rate from constructor input or configuration fallback.
         """ 
         
         if self._rf_annual is not None: 
@@ -882,7 +1031,17 @@ class PortfolioOptimiser:
         self
     ) -> float:
         """
-        Weekly risk-free rate used in Sortino/IR numerators or benchmark fallback.
+        Weekly risk-free or target rate used by weekly-horizon terms.
+
+        This value is used as:
+        - the Sortino target ``tau`` in downside deviations;
+        - a fallback benchmark level when no benchmark series is provided;
+        - a per-period reference in UPM/LPM and related downside utilities.
+
+        Returns
+        -------
+        float
+            Weekly rate from constructor input or configuration fallback.
         """ 
 
         if self._rf_week is not None: 
@@ -897,7 +1056,15 @@ class PortfolioOptimiser:
         self
     ) -> float:
         """
-        Square-root of 52; used to annualise weekly standard deviations.
+        Annualisation factor for weekly standard deviations.
+
+        Under standard square-root-of-time scaling, annualised volatility is
+        ``sigma_ann = sigma_week * sqrt(52)``.
+
+        Returns
+        -------
+        float
+            ``sqrt(52.0)``.
         """  
 
         return float(np.sqrt(52.0))
@@ -958,7 +1125,16 @@ class PortfolioOptimiser:
         self
     ) -> np.ndarray:
         """
-        np.ndarray (n,T₅): transpose of the 5-year weekly returns matrix.
+        Transpose of the aligned 5-year weekly return matrix.
+
+        If ``R5`` has shape ``(T5, N)``, this property returns ``R5T`` with
+        shape ``(N, T5)``. It avoids repeated transpositions inside gradient
+        expressions such as ``R5T @ a``.
+
+        Returns
+        -------
+        np.ndarray
+            Matrix of shape ``(N, T5)``.
         """
 
         return self._R5_b_te[0].T
@@ -1082,6 +1258,18 @@ class PortfolioOptimiser:
     def _cvar_level(
         self
     ) -> float:
+        """
+        Tail probability level ``alpha`` used in CVaR objectives.
+
+        The constructor stores ``cvar_level_pct`` in percentage points. This
+        property converts it to unit scale:
+        ``alpha = cvar_level_pct / 100``.
+
+        Returns
+        -------
+        float
+            CVaR tail level in ``(0, 1)`` units.
+        """
         
         return self.cvar_level_pct / 100.0
     
@@ -1109,7 +1297,15 @@ class PortfolioOptimiser:
         self
     ) -> np.ndarray:
         """
-        np.ndarray (n,): cached maximum Sortino solution (1-year downside), coerced and normalised.
+        Cached maximum Sortino portfolio in array form.
+
+        The returned vector solves the internal Sortino optimiser and is then
+        coerced to the current universe ordering and feasibility conventions.
+
+        Returns
+        -------
+        np.ndarray
+            Weight vector of shape ``(N,)``.
         """
         
         w_so = self.sortino()
@@ -1127,7 +1323,15 @@ class PortfolioOptimiser:
         self
     ) -> np.ndarray:
         """
-        np.ndarray (n,): cached 5-year Information Ratio solution, coerced and normalised.
+        Cached maximum information-ratio portfolio.
+
+        This corresponds to the long-horizon tracking objective
+        ``IR(w) = mean(active) / TE`` using the configured benchmark alignment.
+
+        Returns
+        -------
+        np.ndarray
+            Weight vector of shape ``(N,)``.
         """
 
         w_mir = self.MIR()
@@ -1164,7 +1368,15 @@ class PortfolioOptimiser:
         self
     ) -> np.ndarray:
         """
-        np.ndarray (n,): cached Score/CVaR portfolio (RU formulation), coerced and normalised.
+        Cached Score-over-CVaR portfolio.
+
+        This portfolio maximises a score-to-tail-risk ratio using a
+        Rockafellar-Uryasev style CVaR representation.
+
+        Returns
+        -------
+        np.ndarray
+            Weight vector of shape ``(N,)``.
         """
 
         w_msp = self.msp()
@@ -1177,13 +1389,46 @@ class PortfolioOptimiser:
         return w_msp_arr
     
     @functools.cached_property
+    def _mdp(
+        self
+    ) -> np.ndarray:
+        """
+        Cached maximum diversification portfolio.
+
+        The objective is the diversification ratio form implemented by
+        ``max_diversification``. Resulting weights are coerced to optimiser
+        conventions and cached for reuse.
+
+        Returns
+        -------
+        np.ndarray
+            Weight vector of shape ``(N,)``.
+        """
+
+        w_mdp = self.max_diversification()
+        
+        w_msp_arr = self._coerce_weights(
+            w = w_mdp, 
+            name = "w_mdp"
+        ).to_numpy()
+        
+        return w_msp_arr    
+    
+
+    @functools.cached_property
     def _asr(
         self
     ) -> np.ndarray:
         """
-        np.ndarray (n,): 
-        
-            cached maximum Adjusted Sharpe solution, coerced and normalised.
+        Cached adjusted-Sharpe optimiser output.
+
+        The adjusted Sharpe term augments standard Sharpe with higher-moment
+        corrections based on skewness and kurtosis of realised weekly returns.
+
+        Returns
+        -------
+        np.ndarray
+            Weight vector of shape ``(N,)``.
         """
         
         w_as = self.optimise_adjusted_sharpe()
@@ -1201,9 +1446,15 @@ class PortfolioOptimiser:
         self
     ) -> np.ndarray:
         """
-        np.ndarray (n,): 
-        
-            cached maximum Deflated Sharpe solution, coerced and normalised.
+        Cached deflated-Sharpe optimiser output.
+
+        Deflated Sharpe accounts for multiple-testing bias through a penalty based
+        on the expected maximum of standard normal draws.
+
+        Returns
+        -------
+        np.ndarray
+            Weight vector of shape ``(N,)``.
         """
         
         w_ds = self.optimise_deflated_sharpe()
@@ -1221,9 +1472,15 @@ class PortfolioOptimiser:
         self
     ) -> np.ndarray:
         """
-        np.ndarray (n,):
-        
-            cached maximum ULPM solution, coerced and normalised.
+        Cached UPM/LPM utility optimiser output.
+
+        The utility is based on upside partial moments minus downside partial
+        moments, solved with smoothed gradients and CCP updates.
+
+        Returns
+        -------
+        np.ndarray
+            Weight vector of shape ``(N,)``.
         """
         
         w_ul = self.upm_lpm_port()
@@ -1235,7 +1492,262 @@ class PortfolioOptimiser:
         
         return w_ul_arr
         
+
+    @functools.cached_property
+    def _udrp(
+        self
+    ) -> np.ndarray:
+        """
+        np.ndarray (n,):
+        
+            cached maximum upside downside capture ratio solution, coerced and normalised.
+        """
+        
+        w_udr = self.upside_downside_capture_port()
+        
+        w_udr_arr = self._coerce_weights(
+            w = w_udr, 
+            name = "w_udr"
+        ).to_numpy()
+        
+        return w_udr_arr
     
+    
+    def _as_weight_series(
+        self,
+        w: np.ndarray,
+        name: str
+    ) -> pd.Series:
+        """
+        Convert a weight vector into an index-aligned labelled series.
+
+        Parameters
+        ----------
+        w : np.ndarray
+            Candidate weight vector expected to have length ``N``.
+        name : str
+            Output series name used in reporting bundles.
+
+        Returns
+        -------
+        pd.Series
+            Series indexed by ``self.universe`` with dtype float.
+
+        Raises
+        ------
+        ValueError
+            If the supplied vector length is not equal to ``N``.
+        """
+        
+        arr = np.asarray(w, float).ravel()
+        
+        if arr.size != self.n:
+            
+            raise ValueError(f"{name} must have length {self.n}, got {arr.size}")
+        
+        return pd.Series(arr, index = self.universe, name = name)
+    
+    
+    @functools.cached_property
+    def _base_portfolios_cached(
+        self
+    ) -> Dict[str, object]:
+        """
+        Build and cache canonical base solutions used across composite optimisers.
+
+        The cache contains precomputed portfolios such as MSR, Sortino, MIR, MSP,
+        MDP, BL, DSR, ASR, UPM/LPM, and Up/Down capture, all aligned to the current
+        universe. Reusing this bundle avoids repeated expensive solves and keeps
+        composite initialisation deterministic.
+
+        Returns
+        -------
+        dict[str, object]
+            Mapping of portfolio labels to ``pd.Series`` or tuple structures for BL.
+        """
+        
+        w_bl_arr, mu_bl_arr, sigma_bl = self._bl
+        
+        return {
+            "MSR": self._as_weight_series(
+                w = self._msr,
+                name = "MSR"
+            ),
+            "Sortino": self._as_weight_series(
+                w = self._sortino,
+                name = "Sortino"
+            ),
+            "MIR": self._as_weight_series(
+                w = self._mir,
+                name = "MIR"
+            ),
+            "MSP": self._as_weight_series(
+                w = self._msp,
+                name = "MSP"
+            ),
+            "MDP": self._as_weight_series(
+                w = self._mdp,
+                name = "MDP"
+            ),
+            "BL": (
+                self._as_weight_series(w_bl_arr, "BL"),
+                pd.Series(mu_bl_arr, index = self.universe, name = "mu_bl"),
+                sigma_bl.copy()
+            ),
+            "DSR": self._as_weight_series(
+                w = self._dsr,
+                name = "Deflated_MSR"
+            ),
+            "ASR": self._as_weight_series(
+                w = self._asr,
+                name = "Adjusted_MSR"
+            ),
+            "ULPM": self._as_weight_series(
+                w = self._ulpm,
+                name = "UPM-LPM"
+            ),
+            "UDRP": self._as_weight_series(
+                w = self._udrp,
+                name = "Upside/Downside"
+            ),
+        }
+    
+    
+    def get_base_portfolios_cached(
+        self
+    ) -> Dict[str, object]:
+        """
+        Return a defensive copy of the cached base-portfolio bundle.
+
+        The internal cache is immutable by convention; this accessor copies Series,
+        DataFrames, tuple elements, and arrays so callers cannot mutate optimiser
+        state by side effect.
+
+        Returns
+        -------
+        dict[str, object]
+            Deep-ish copied mapping of base portfolio artefacts.
+        """
+        
+        cached = self._base_portfolios_cached
+        
+        out: Dict[str, object] = {}
+        
+        for key, value in cached.items():
+            
+            if isinstance(value, pd.Series):
+                
+                out[key] = value.copy()
+            
+            elif isinstance(value, pd.DataFrame):
+                
+                out[key] = value.copy()
+            
+            elif isinstance(value, tuple):
+                
+                copied = []
+                
+                for item in value:
+                    
+                    if isinstance(item, (pd.Series, pd.DataFrame)):
+                        
+                        copied.append(item.copy())
+                    
+                    else:
+                        
+                        copied.append(np.array(item, copy = True) if isinstance(item, np.ndarray) else item)
+                
+                out[key] = tuple(copied)
+            
+            else:
+                
+                out[key] = value
+        
+        return out
+    
+    
+    def _seed_proxy_score(
+        self,
+        w: np.ndarray
+    ) -> float:
+        """
+        Fast proxy score used to rank and trim initial seeds.
+
+        The proxy is a standard Sharpe-like ratio:
+        ``proxy(w) = (mu^T w - rf_ann) / max(sqrt(w^T Sigma w), denom_floor)``.
+        Invalid, non-finite, or dimension-mismatched candidates are assigned
+        ``-inf`` so they are removed by ranking.
+
+        Parameters
+        ----------
+        w : np.ndarray
+            Candidate weight vector.
+
+        Returns
+        -------
+        float
+            Proxy quality score for seed selection.
+        """
+        
+        w = np.asarray(w, float).ravel()
+        
+        if w.size != self.n or not np.all(np.isfinite(w)):
+            
+            return -np.inf
+        
+        Σw = self.Σ @ w
+        
+        vol = float(np.sqrt(max(float(w @ Σw), self._denom_floor)))
+        
+        return float((self.er_arr @ w - self.rf_ann) / max(vol, self._denom_floor))
+    
+    
+    def _prune_seed_list(
+        self,
+        seeds: List[np.ndarray]
+    ) -> List[np.ndarray]:
+        """
+        Limit the number of initial seeds while preserving strongest candidates.
+
+        If ``opt_seed_limit`` is active, seeds are ranked by
+        :meth:`_seed_proxy_score` and the highest-scoring vectors are retained.
+        Original order is used as a deterministic tie-break.
+
+        Parameters
+        ----------
+        seeds : list[np.ndarray]
+            Candidate initial portfolios.
+
+        Returns
+        -------
+        list[np.ndarray]
+            Possibly reduced list of copied, one-dimensional float vectors.
+        """
+        
+        limit = self.opt_seed_limit
+        
+        if limit is None:
+            
+            return [np.asarray(w, float).ravel().copy() for w in seeds]
+        
+        if len(seeds) <= limit:
+            
+            return [np.asarray(w, float).ravel().copy() for w in seeds]
+        
+        ranked = [
+            (self._seed_proxy_score(
+                w = w
+            ), i, np.asarray(w, float).ravel().copy())
+            for i, w in enumerate(seeds)
+        ]
+        
+        ranked = [x for x in ranked if np.isfinite(x[0])]
+        
+        ranked.sort(key = lambda t: (-t[0], t[1]))
+        
+        return [w for _, _, w in ranked[:limit]]
+            
+            
     def _initials(
         self
     ) -> np.ndarray:
@@ -1271,8 +1783,10 @@ class PortfolioOptimiser:
             if a.ndim == 1 and a.size == self.n and np.all(np.isfinite(a)):
     
                 seeds.append(a)
-    
-        return seeds
+        
+        return self._prune_seed_list(
+            seeds = seeds
+        )
     
     
     @functools.cached_property
@@ -1419,9 +1933,15 @@ class PortfolioOptimiser:
                 w <= ub,
                 A_caps @ w <= caps
             ]
-           
-            prob = cp.Problem(cp.Maximize(cp.sum(w)), cons)
           
+            print("A_caps @ lb", A_caps @ lb)
+          
+            for sector, indices in self.sec_idxs.items():
+          
+                print(f"  Sector {sector}: sum(lb) = {lb[indices].sum():.4f}")
+                                               
+            prob = cp.Problem(cp.Maximize(cp.sum(w)), cons)
+            
             if not self._solve(prob) or prob.value is None or prob.value < 1 - 1e-6:
              
                 raise ValueError("Caps/boxes infeasible after gating; loosen caps or gating.")
@@ -1481,54 +2001,95 @@ class PortfolioOptimiser:
 
 
     def _solve(
-        self, 
-        prob: cp.Problem
+        self,
+        prob: cp.Problem,
     ) -> bool:
         """
-        Robust CVXPY solve helper: tries multiple solvers with warm-starts and tolerances; caches last successful choice.
+        Robust CVXPY solve helper.
+
+        - Tries MOSEK first (if available), then other solvers.
+      
+        - Uses warm starts so repeated solves on the same variables are fast.
+      
+        - Caches the last successful solver+options in `self._solver_hint`.
+      
+        - Returns True iff we got an (approximately) optimal solution.
+      
         """
 
-        order = []
-    
-        if self._solver_hint is not None:
-    
-            order.append(self._solver_hint)
+        default_order: list[dict] = []
 
-        order += [
-            dict(solver = cp.CLARABEL, warm_start = True),
-            dict(solver=cp.ECOS, feastol = 1e-7, reltol = 1e-7, abstol = 1e-7, max_iters = 3000, warm_start = True),
-            dict(solver = cp.SCS, eps = 5e-4, max_iters = 20000, acceleration_lookback = 20, warm_start = True),
+        if hasattr(cp, "MOSEK"):
+          
+            default_order.append(
+                dict(
+                    solver = cp.MOSEK,
+                    warm_start = True,
+                )
+            )
+
+        default_order += [
             dict(solver = cp.OSQP, warm_start = True),
+            dict(solver = cp.CLARABEL, warm_start = True),
+            dict(
+                solver = cp.ECOS,
+                feastol = 1e-7,
+                reltol = 1e-7,
+                abstol = 1e-7,
+                max_iters = 3000,
+                warm_start = True,
+            ),
+            dict(
+                solver = cp.SCS,
+                eps = 5e-4,
+                max_iters = 20_000,
+                acceleration_lookback = 20,
+                warm_start = True,
+            ),
         ]
 
-        tried = set()
-       
+        order: list[dict] = []
+        
+        if self._solver_hint is not None:
+        
+            order.append(self._solver_hint)
+
+        for k in default_order:
+
+            if self._solver_hint is None or k.get("solver") != self._solver_hint.get("solver"):
+
+                order.append(k)
+
+        tried: set = set()
+
         for kwargs in order:
        
             key = kwargs.get("solver")
        
-            if key in tried: 
-                
+            if key in tried:
+       
                 continue
-           
+       
             tried.add(key)
-           
+
             try:
-           
+       
                 prob.solve(**kwargs)
-           
+       
             except cp.error.SolverError:
-           
+
                 continue
-           
-            if prob.status in ("optimal", "optimal_inaccurate"):
-           
-                self._solver_hint = kwargs  
-           
+
+            status = prob.status
+
+            if status in ("optimal", "optimal_inaccurate") and prob.value is not None:
+
+                self._solver_hint = kwargs
+
                 return True
-        
+
         return False
-    
+
 
     def _prune_history(
         self, 
@@ -1536,15 +2097,16 @@ class PortfolioOptimiser:
         min_cov: float = 0.8
     ) -> pd.DataFrame:
         """
-        Row-prune a returns DataFrame to achieve at least `min_cov` non-missing coverage per row; fill remaining NaNs with 0.
+        Row-prune a returns DataFrame to achieve at least `min_cov` non-missing 
+        coverage per row; fill remaining NaNs with 0.
         """
-    
+       
         need = int(np.ceil(min_cov * df.shape[1]))
-    
+       
         keep = df.notna().sum(axis = 1) >= need
-    
+       
         out = df.loc[keep].copy()
-    
+       
         return out.fillna(0.0)
 
 
@@ -1580,13 +2142,11 @@ class PortfolioOptimiser:
         lo[i] = min_k w_k[i],  hi[i] = max_k w_k[i]
         """
         
-        #W = np.vstack([self._msr, self._sortino, self._mir, self._bl[0], self._msp, self._asr, self._dsr, self._ulpm])
-        
-        #W = np.vstack([self._msr, self._sortino, self._bl[0], self._asr])
+        W = np.vstack([self._msr, self._sortino, self._mir, self._bl[0], self._msp, self._asr, self._dsr, self._ulpm, self._mdp, self._udrp])
+               
+        lo = W.min(axis = 0)
        
-        lo = 0 #W.min(axis = 0)
-       
-        hi = 1 #W.max(axis = 0)
+        hi = W.max(axis = 0)
 
         eps = 1e-12
        
@@ -1761,8 +2321,16 @@ class PortfolioOptimiser:
                 D = np.diag(np.asarray(m, float))
         
                 M = D @ Sigma @ D
+                
+                M = 0.5 * (M + M.T)
+                
+                active_idx = np.where(np.asarray(m, float) > 0.5)[0]
+                
+                if active_idx.size > 0:
+                    
+                    M[np.ix_(active_idx, active_idx)] += 1e-8 * np.eye(active_idx.size)
         
-                M_s_dict[s] = 0.5 * (M + M.T)  
+                M_s_dict[s] =  M
 
             grad_param = cp.Parameter(n, name = "grad_sig2")    
            
@@ -1771,19 +2339,35 @@ class PortfolioOptimiser:
             for s, M_s in M_s_dict.items():
            
                 alpha_s = float(sector_alpha.get(s, 1.0))
-           
-                lhs = cp.quad_form(w_var, M_s)
+                           
+                lhs = cp.quad_form(w_var, cp.psd_wrap(M_s))
            
                 rhs = alpha_s * (off_param + grad_param @ w_var)
            
-                cons.append(lhs <= rhs)
+                cons.append(lhs <= rhs + 1e-8)
 
 
             def update_ccp(
                 w_t: np.ndarray
             ) -> None:
                 """
-                Update linearisation at current iterate w_t.
+                Refresh affine majoriser parameters for sector risk-cap CCP constraints.
+
+                Let ``sigma2(w) = w^T Sigma w``. At the current iterate ``w_t``, the
+                first-order expansion is:
+
+                ``sigma2(w) <= off + grad^T w``,
+
+                where ``grad = (Sigma + Sigma^T) w_t`` and
+                ``off = sigma2(w_t) - grad^T w_t``.
+
+                This method updates ``grad_param`` and ``off_param`` used by the
+                convex subproblem constraints ``w^T M_s w <= alpha_s * (off + grad^T w)``.
+
+                Parameters
+                ----------
+                w_t : np.ndarray
+                    Current CCP iterate.
                 """
                 
                 w_t = np.asarray(w_t, float).reshape(-1)
@@ -1807,8 +2391,8 @@ class PortfolioOptimiser:
         μ: np.ndarray,
         A: np.ndarray,
         rf: float,
-        tol: float = 1e-12,
-        max_iter: int = 1000,
+        tol: float = 1e-10,
+        max_iter: int = 3000,
     ) -> np.ndarray:
         """
         Maximum Sharpe via Dinkelbach’s transform over the long-only feasible set.
@@ -1884,7 +2468,7 @@ class PortfolioOptimiser:
             
             ret_v = float(μ @ w_val) - rf
             
-            vol_v = max(float(np.linalg.norm(A @ w_val)), self._denom_floor)
+            vol_v = max(float(np.linalg.norm(A @ w_val)), self._denom_floor,)
             
             if abs(ret_v - lam * vol_v) < tol:
             
@@ -1897,8 +2481,8 @@ class PortfolioOptimiser:
 
     def msr(
         self,
-        tol: float = 1e-12,
-        max_iter: int = 1000,
+        tol: float = 1e-6,
+        max_iter: int = 3000,
     ) -> pd.Series:
         """
         Maximum Sharpe ratio portfolio.
@@ -1938,8 +2522,8 @@ class PortfolioOptimiser:
 
     def sortino(
         self,
-        tol: float = 1e-12,
-        max_iter: int = 1000,
+        tol: float = 1e-6,
+        max_iter: int = 2000,
         riskfree_rate: Optional[float] = None,
     ) -> pd.Series:
         """
@@ -2046,6 +2630,7 @@ class PortfolioOptimiser:
             
             cons += [
                 u >= rf_week - port_week, 
+                u >= 0
             ]
             
             prob = cp.Problem(obj, cons)
@@ -2076,7 +2661,7 @@ class PortfolioOptimiser:
     def MIR(
         self,
         tol: float = 1e-12,
-        max_iter: int = 1000,
+        max_iter: int = 2000,
     ) -> pd.Series:
         """
         Maximum Information Ratio (1y or 5y version chosen elsewhere).
@@ -2233,7 +2818,7 @@ class PortfolioOptimiser:
             self,
             *,
             tol: float = 1e-10,
-            max_iter: int = 1000,
+            max_iter: int = 2000,
             single_port_cap: bool = False
         ) -> pd.Series:
         """
@@ -2345,7 +2930,7 @@ class PortfolioOptimiser:
     def msp(
         self,
         tol: float = 1e-12,
-        max_iter: int = 1000,
+        max_iter: int = 2000,
     ) -> pd.Series:
         """
         Score-over-CVaR (Rockafellar–Uryasev form) via Dinkelbach.
@@ -2593,7 +3178,17 @@ class PortfolioOptimiser:
         self
     ):
         """
-        Weekly version of `_denom_floor` obtained by dividing by sqrt(52).
+        Weekly-scale denominator safeguard derived from the annual floor.
+
+        Many objectives mix annual and weekly statistics. This property converts
+        the annual floor ``denom_floor_ann`` into a weekly floor using
+        ``denom_floor_week = denom_floor_ann / sqrt(52)`` so denominator clipping
+        remains scale-consistent.
+
+        Returns
+        -------
+        float
+            Weekly denominator floor.
         """  
 
         return self._denom_floor / self.sqrt52
@@ -2722,8 +3317,8 @@ class PortfolioOptimiser:
         self,
         delta: float = 2.5,
         tau: float = 0.02,
-        tol: float = 1e-12,
-        max_iter: int = 1000,
+        tol: float = 1e-8,
+        max_iter: int = 2000,
     ) -> tuple[pd.Series, pd.Series, pd.DataFrame]:
         """
         Black–Litterman posterior MSR portfolio.
@@ -2755,7 +3350,7 @@ class PortfolioOptimiser:
         """
         
         self._assert_alignment()
-
+        
         if self._mu_bl is not None and self._sigma_bl is not None:
 
             mu_bl = self._mu_bl
@@ -2815,7 +3410,10 @@ class PortfolioOptimiser:
             )
             
             mu_bl = mu_bl.reindex(tickers)
-          
+            
+            max_mu_ticker = mu_bl.idxmax()
+            print('max BL mu:', mu_bl.max(), 'ticker:', max_mu_ticker)
+            
             sigma_bl = sigma_bl.reindex(index = self.universe, columns = self.universe)
             
             if (mu_bl.isna().any()) or (sigma_bl.isna().any().any()):
@@ -2829,13 +3427,11 @@ class PortfolioOptimiser:
         μ = mu_bl.to_numpy()
         
         Ab = self.Ab
-        
-        rf = float(self.rf_ann)
 
         w = self._dinkelbach_sharpe_max(
             μ = μ, 
             A = Ab, 
-            rf = rf,
+            rf = 0,
             tol = tol, 
             max_iter = max_iter,
         )
@@ -3032,7 +3628,7 @@ class PortfolioOptimiser:
             DSR(w) and its gradient.
         """
 
-        T = self.T1
+        T = int(R_weekly.shape[0])
         
         one = np.ones(T)
 
@@ -3044,9 +3640,9 @@ class PortfolioOptimiser:
        
         z = r - mu_samp
        
-        s2 = float(np.dot(z, z) / max(T - 1, 1))
+        s2 = float(np.dot(z, z) / max(T, 1))
        
-        sigma_w = np.sqrt(max(s2, eps))  
+        sigma_w = np.sqrt(max(s2, eps))
 
         z2 = z ** 2
       
@@ -3062,7 +3658,7 @@ class PortfolioOptimiser:
 
         dmu_samp = (R_weekly.T @ one) / T
 
-        ds2 = (2.0 / max(T - 1, 1)) * (R_weekly.T @ z - T * mu_samp * dmu_samp)
+        ds2 = (2.0 / max(T, 1)) * (R_weekly.T @ z)
 
         dsigma_w = ds2 / (2.0 * max(sigma_w, eps))
 
@@ -3117,7 +3713,7 @@ class PortfolioOptimiser:
         Sigma_ann: np.ndarray | None = None,  
         N_strategies: int = 1000,
         starts: list[np.ndarray] | None = None,
-        max_iter: int = 1000,
+        max_iter: int = 2000,
         step0: float = 1.0,
         tol: float = 1e-12,
     ):
@@ -3152,7 +3748,7 @@ class PortfolioOptimiser:
             Best DSR weights over the starts.
         """
 
-        Rw = self.R1 if R_weekly is None else R_weekly
+        Rw = self.R5 if R_weekly is None else R_weekly
         
         rf_week = self.rf_week
         
@@ -3287,7 +3883,7 @@ class PortfolioOptimiser:
 
         A second-order adjustment (Cornish–Fisher / Edgeworth style) yields
        
-            ASR(w) = SR(w) * [ 1 + (γ_3 SR(w))/6 + ((γ_4 − 3) SR(w)²)/24 ].
+            ASR(w) = SR(w) * [ 1 + (γ_3 SR(w))/6 - ((γ_4 − 3) SR(w)²)/24 ].
 
         Batch notation
         --------------
@@ -3350,15 +3946,14 @@ class PortfolioOptimiser:
             Scalar ASR values per portfolio.
         """
 
+        R  = self.R5
         
-        R = self.R1          
+        RT = self.R5T
         
-        RT = self.R1T        
-        
-        T = self.T1
-        
+        T  = self.T5
+
         one = np.ones(T)
-        
+            
         WcT = W_chunk.T  
 
         Rw = R @ WcT              
@@ -3371,7 +3966,7 @@ class PortfolioOptimiser:
        
         Z3 = Z2 * Z
 
-        s2 = Z2.sum(axis = 0) / max(T - 1, 1)             
+        s2 = Z2.mean(axis=0)         
        
         sigma_w = np.sqrt(np.maximum(s2, eps))               
        
@@ -3384,10 +3979,8 @@ class PortfolioOptimiser:
         kurt = m4 / (sigma_w ** 4 + eps)                   
 
         dmu = (RT @ one) / T                               
-
-        RTZ = RT @ Z      
                                             
-        ds2 = (2.0 / max(T - 1, 1)) * (RTZ - (dmu[:, None] * (T * mu[None, :])))
+        ds2 = (2.0 / max(T, 1)) * (RT @ Z)
 
         dsigma_w = ds2 / (2.0 * np.maximum(sigma_w[None, :], eps))
 
@@ -3423,17 +4016,20 @@ class PortfolioOptimiser:
 
         dSR = (np.maximum(sigma_ann[None, :], eps) * dE - E[None, :] * dsigma) / (np.maximum(sigma_ann[None, :], eps) ** 2)
        
-        s0 = E / np.maximum(sigma_ann, eps)                    
-        
-        g1 = 1.0 + (skew * s0) / 6.0 + ((kurt - 3.0) * (s0 ** 2)) / 24.0
-       
-        C1 = 1.0 + (skew * s0) / 3.0 + ((kurt - 3.0) * (s0 ** 2)) / 8.0
+        s0 = E / np.maximum(sigma_ann, eps)
 
-        dASR = C1[None, :] * dSR + (s0[None, :] ** 2) * (dskew / 6.0) + (s0[None, :] ** 3) * (dkurt / 24.0)  
+        g1 = 1.0 + (skew * s0) / 6.0 - ((kurt - 3.0) * (s0 ** 2)) / 24.0
 
-        norms = np.sqrt(np.sum(dASR * dASR, axis = 0))    
-       
-        ASR_vals = s0 * g1 
+        C1 = 1.0 + (skew * s0) / 3.0 - ((kurt - 3.0) * (s0 ** 2)) / 8.0
+
+        dASR = (
+            C1[None, :] * dSR
+            + (s0[None, :] ** 2) * (dskew / 6.0)
+            - (s0[None, :] ** 3) * (dkurt / 24.0)
+        )
+
+        norms = np.sqrt(np.sum(dASR * dASR, axis=0))
+        ASR_vals = s0 * g1
        
         return norms, dASR, ASR_vals
 
@@ -3467,7 +4063,7 @@ class PortfolioOptimiser:
     def optimise_adjusted_sharpe(
         self,
         starts: list[np.ndarray] | None = None,
-        max_iter: int = 1000,
+        max_iter: int = 2000,
         step0: float = 1.0,
         tol: float = 1e-12,
     ) -> pd.Series:
@@ -3477,7 +4073,7 @@ class PortfolioOptimiser:
         Objective
         ---------
       
-            ASR(w) = SR(w) * [ 1 + (γ_3 SR(w))/6 + ((γ_4 − 3) SR(w)²)/24 ],
+            ASR(w) = SR(w) * [ 1 + (γ_3 SR(w))/6 - ((γ_4 − 3) SR(w)²)/24 ],
         
         where:
         
@@ -3705,7 +4301,44 @@ class PortfolioOptimiser:
         use_intercept: bool = True
     ) -> tuple[np.ndarray, float]:
         """
-        Return (c, denom) such that β(mask)(w) = (cᵀ w) / denom.
+        Construct linear coefficients for conditional beta calculations.
+
+        For masked observations (for example upside or downside benchmark weeks),
+        this routine returns ``(c, denom)`` so that beta is expressed as:
+
+        ``beta(w) = (c^T w) / denom``.
+
+        With demeaning (``use_intercept=True``):
+      
+        - ``c_j = mean((R_j - mean(R_j)) * (b - mean(b)))``;
+      
+        - ``denom = mean((b - mean(b))^2)``.
+
+        Without demeaning:
+      
+        - ``c_j = mean(R_j * b)``;
+      
+        - ``denom = mean(b^2)``.
+
+        The denominator is floored by ``eps`` for numerical stability.
+
+        Parameters
+        ----------
+        mask : np.ndarray
+            Boolean mask selecting observations.
+        b : np.ndarray
+            Benchmark series.
+        eps : float
+            Positive floor for denominator stability.
+        R : np.ndarray
+            Asset return matrix with shape ``(T, N)``.
+        use_intercept : bool, default True
+            Whether to demean benchmark and returns before covariance estimation.
+
+        Returns
+        -------
+        tuple[np.ndarray, float]
+            Vector ``c`` and scalar ``denom`` in ``beta(w) = (c^T w) / denom``.
         """
         
         b_sub = b[mask]
@@ -3741,29 +4374,30 @@ class PortfolioOptimiser:
         beta_smooth: float = 50.0
     ):
         """
-        Return a closure (w, _ctx, work) -> (value, grad) for UPM−LPM.
-       
-        This builds a closure computing
-        
-            F(w) = α·UPM_p(w) − β·LPM_q(w) 
-        
-        with softplus smoothing.
-        
-        This builds a closure computing
-        
-            F(w) = α·UPM_p(w) − β·LPM_q(w), with
-          
-            UPM_p(w) = T^{-1} ∑ softplus_β(y_t)^p, y_t = r_t(w) − τ,
-          
-            LPM_q(w) = T^{-1} ∑ softplus_β(−y_t)^q, τ = self.rf_week.
+        Build a differentiable UPM-minus-LPM objective/gradient closure.
+
+        For weekly portfolio returns ``r_t(w) = R_t w`` and target ``tau``, define
+        the smoothed positive-part function ``sp_beta(x) = log(1 + exp(beta*x))/beta``.
+        The returned closure evaluates:
+
+        ``F(w) = alpha_upm * UPM_p(w) - beta_lpm * LPM_q(w)``,
+
+        with
+
+        ``UPM_p(w) = (1/T) * sum_t sp_beta(r_t(w) - tau)^p``,
+
+        ``LPM_q(w) = (1/T) * sum_t sp_beta(tau - r_t(w))^q``.
+
+        The gradient is obtained via chain rule with
+        ``d sp_beta(x) / dx = sigmoid(beta*x)``.
         
         Returns
         -------
         callable
-            (w, ctx, work) -> (value, gradient)
+            Function ``f(w, ctx, work) -> (value, gradient)``.
         """
 
-        R = self.R1
+        R = self.R5
         
         T = float(R.shape[0])
       
@@ -3772,6 +4406,12 @@ class PortfolioOptimiser:
             def _zero(
                 w, *_
             ): 
+                """
+                Degenerate fallback closure when no return history is available.
+
+                Returns a zero objective and a zero gradient with the same shape as
+                the supplied weight vector.
+                """
                
                 return 0.0, np.zeros_like(np.asarray(w, float).ravel())
             
@@ -3786,6 +4426,19 @@ class PortfolioOptimiser:
             w, 
             *_
         ):
+            """
+            Evaluate smoothed UPM-LPM utility and gradient at a candidate weight vector.
+
+            Parameters
+            ----------
+            w : array-like
+                Portfolio weights.
+
+            Returns
+            -------
+            tuple[float, np.ndarray]
+                Utility value ``F(w)`` and gradient ``grad F(w)``.
+            """
             
             w = np.asarray(w, float).ravel()
             
@@ -3852,7 +4505,7 @@ class PortfolioOptimiser:
 
         Construction
         ------------
-        Using the same 1y weekly window and benchmark as your U/DC optimiser:
+        Using the same 5y weekly window and benchmark as your U/DC optimiser:
          
             • Split rows into U = {t : b_t > 0} and D = {t : b_t < 0}
          
@@ -3872,7 +4525,7 @@ class PortfolioOptimiser:
 
             return np.zeros(self.n, dtype = float)
 
-        R_df = self._weekly_ret_1y.reindex(columns = self.universe)
+        R_df = self._last_5y.reindex(columns = self.universe)
         
         df = R_df.join(bench.rename("b"), how = "inner").dropna(how = "any")
         
@@ -3912,13 +4565,84 @@ class PortfolioOptimiser:
         
         b = self._benchmark_weekly
       
-        df = self._weekly_ret_1y.join(b.rename("b"), how = "inner").dropna()
+        df = self._last_5y.join(b.rename("b"), how = "inner").dropna()
       
         up = (df["b"] > 0).sum()
         
         dn = (df["b"] < 0).sum()
       
         return np.asarray(gamma, dtype = float)
+
+
+    def _udc_linear_strict(
+        self,
+        *,
+        tradeoff: float = 1.0,
+        use_intercept: bool = True,
+        eps: float = 1e-12
+    ) -> np.ndarray:
+        """
+        Strict U/DC linear coefficient for composite objectives.
+
+        Returns γ such that:
+            UDC(w) = γ^T w = β_up(w) - tradeoff * β_dn(w)
+
+        Unlike `_udc_linear`, this method is fail-fast: it raises RuntimeError
+        when benchmark data is missing or the 5y overlap has no up/down rows.
+        """
+    
+        bench = self._benchmark_weekly
+    
+        if bench is None:
+    
+            raise RuntimeError(
+                "comb_port12: benchmark_weekly_ret was not provided for Up/Down term."
+            )
+
+        R_df = self._last_5y.reindex(columns = self.universe)
+    
+        df = R_df.join(bench.rename("b"), how = "inner").dropna(how = "any")
+    
+        if df.empty:
+    
+            raise RuntimeError(
+                "comb_port12: no common weekly history with benchmark for Up/Down term."
+            )
+
+        b = df["b"].to_numpy(dtype = float)
+    
+        R = df.drop(columns = ["b"]).to_numpy(dtype = float)
+
+        up_mask = b > 0.0
+    
+        dn_mask = b < 0.0
+    
+        if up_mask.sum() == 0 or dn_mask.sum() == 0:
+    
+            raise RuntimeError(
+                "comb_port12: insufficient upside or downside observations for Up/Down term."
+            )
+
+        c_up, var_up = self._slope_coeffs(
+            mask = up_mask,
+            b = b,
+            eps = eps,
+            R = R,
+            use_intercept = use_intercept,
+        )
+      
+        c_dn, var_dn = self._slope_coeffs(
+            mask = dn_mask,
+            b = b,
+            eps = eps,
+            R = R,
+            use_intercept = use_intercept,
+        )
+       
+        gamma = (c_up / var_up) - float(max(tradeoff, 0.0)) * (c_dn / var_dn)
+       
+        return np.asarray(gamma, dtype = float)
+
 
     def upm_lpm_port(
         self,
@@ -3930,7 +4654,7 @@ class PortfolioOptimiser:
         target: float | None = None,
         smooth_beta: float = 50.0,
         prox_kappa: float = 1.0,
-        max_iter: int = 1000,
+        max_iter: int = 2000,
         tol: float = 1e-8,
     ) -> pd.Series:
         """
@@ -3982,7 +4706,7 @@ class PortfolioOptimiser:
 
         Alignment
         ---------
-        • Uses weekly data `self.R1` (T×n) aligned to `self.universe`.
+        • Uses weekly data `self.R5` (T×n) aligned to `self.universe`.
         
         • Target τ (weekly) defaults to `self.rf_week` unless `target` is given.
         
@@ -4021,7 +4745,7 @@ class PortfolioOptimiser:
         convexity properties of UPM/LPM in portfolio weights.  [Refs below]
         """
 
-        R = self.R1           
+        R = self.R5           
         
         T, n = R.shape
         
@@ -4037,6 +4761,23 @@ class PortfolioOptimiser:
         def upm_lpm_val_grad(
             w: np.ndarray
         ):
+            """
+            Local objective/gradient for the UPM-LPM CCP loop.
+
+            This closure mirrors :meth:`_ulpm_val_grad` for the specific local
+            calibration parameters used by :meth:`upm_lpm_port`, returning the
+            current smoothed utility value and first derivative.
+
+            Parameters
+            ----------
+            w : np.ndarray
+                Portfolio weights.
+
+            Returns
+            -------
+            tuple[float, np.ndarray]
+                Smoothed utility and gradient at ``w``.
+            """
            
             w = np.asarray(w, float).reshape(-1)
            
@@ -4250,7 +4991,7 @@ class PortfolioOptimiser:
         Notes
         -----
         • Requires a non-empty `benchmark_weekly_ret` provided to the optimiser; if absent
-          or no up/down observations exist in the 1y window, a RuntimeError is raised.
+          or no up/down observations exist in the 5y window, a RuntimeError is raised.
        
         • Computation uses the raw 5y weekly panel (before NumPy conversion) to ensure
           date-alignment with the benchmark.
@@ -4266,7 +5007,7 @@ class PortfolioOptimiser:
                 "upside_downside_capture: benchmark_weekly_ret was not provided."
             )
 
-        R_df = self._weekly_ret_1y.reindex(columns = self.universe)
+        R_df = self._last_5y.reindex(columns = self.universe)
         
         df = R_df.join(bench.rename("b"), how = "inner").dropna(how = "any")
        
@@ -4285,7 +5026,7 @@ class PortfolioOptimiser:
         if up_mask.sum() == 0 or dn_mask.sum() == 0:
             
             raise RuntimeError(
-                "upside_downside_capture: insufficient upside or downside observations in the 1y window."
+                "upside_downside_capture: insufficient upside or downside observations in the 5y window."
             )
 
         c_up, var_up = self._slope_coeffs(
@@ -4388,6 +5129,7 @@ class PortfolioOptimiser:
         Numerical safeguards
         --------------------
         - Quadratic forms and denominators are floored by `_denom_floor` / eps to avoid division by 0.
+       
         - All computations are purely on candidate mixes; feasibility holds as each mix is a convex
         combination of feasible bases.
 
@@ -4691,7 +5433,7 @@ class PortfolioOptimiser:
 
         rng = np.random.default_rng(self.random_state)
 
-        W_base = np.vstack([self._msr, self._sortino, w_mir, w_bl, self._msp])
+        W_base = np.vstack([self._msr, self._sortino, w_mir, w_bl, self._msp, self._asr, self._dsr, self._ulpm, self._mdp, self._udrp])
 
         A_mix = self._lhs_dirichlet1(
             m = self.sample_size,
@@ -4804,11 +5546,31 @@ class PortfolioOptimiser:
         sum_A_dsr = 0.0
         
         sum_A_ulpm = 0.0
+        
+        EmaxZ = expected_max_std_normal(
+            N = max(1, N_strategies)
+        )
+        
+        dsr_subsample = self.opt_calib_dsr_subsample
 
 
         def process_chunk(
             W_chunk
         ):
+            """
+            Accumulate chunk-level averages of component gradient norms.
+
+            For each candidate weight row in ``W_chunk``, this routine evaluates
+            gradients for Sharpe, Sortino, BL Sharpe, IR(1y), IR(5y), Score/CVaR,
+            MDP, DSR, and UPM/LPM components, then adds their ``L2`` norms to
+            running sums. It also accumulates L1/L2 distance denominators used to
+            normalise proximity penalties against MIR/MSP anchors.
+
+            Parameters
+            ----------
+            W_chunk : np.ndarray
+                Matrix of candidate portfolios with shape ``(K_chunk, N)``.
+            """
         
             nonlocal cnt, sum_A_s, sum_A_so, sum_A_bl, sum_A_ir1, sum_A_ir5, sum_A_sc, sum_A_asr, sum_A_mdp, sum_A_dsr, sum_A_ulpm
         
@@ -4953,24 +5715,36 @@ class PortfolioOptimiser:
             G_mdp = (sigma_vec[None, :] / D[:, None]) - ((N / (D ** 3))[:, None] * SigmaW)
 
             sum_A_mdp += float(np.linalg.norm(G_mdp, axis = 1).sum())
-
-            EmaxZ = expected_max_std_normal(
-                N = max(1, N_strategies)
-            )
             
-            for w_row in W_chunk:
-               
+            if dsr_subsample is None or dsr_subsample >= k:
+                
+                dsr_idx = np.arange(k)
+            
+            else:
+                
+                m = max(1, min(int(dsr_subsample), k))
+                
+                dsr_idx = np.unique(np.floor(np.linspace(0, k - 1, num = m)).astype(int))
+            
+            dsr_chunk = 0.0
+            
+            for i_row in dsr_idx:
+                
                 _, g_dsr = self.dsr_objective_and_grad(
                     R_weekly = R1,
                     rf_week = rf_w, 
-                    w = w_row,
+                    w = W_chunk[i_row],
                     EmaxZ = EmaxZ,
                     er_ann_vec = er, 
                     rf_ann = rf_a,
                     Sigma_ann = Σ
                 )
                 
-                sum_A_dsr += float(np.linalg.norm(g_dsr))
+                dsr_chunk += float(np.linalg.norm(g_dsr))
+            
+            scale = float(k) / float(max(1, dsr_idx.size))
+            
+            sum_A_dsr += scale * dsr_chunk
 
             Y = (R1 @ W_chunk.T).T - rf_w
             
@@ -5074,6 +5848,20 @@ class PortfolioOptimiser:
         def process_pen_chunk(
             W_chunk
         ):
+            """
+            Accumulate chunk-level magnitudes for penalty-gradient calibrations.
+
+            The routine computes average gradient norms for:
+            - MIR/MSP proximity penalties in L1 and L2 geometries;
+            - BL proximity penalties in L1 and L2 geometries.
+            These statistics are used to scale penalty terms so they are
+            commensurate with reward-term gradient pushes.
+
+            Parameters
+            ----------
+            W_chunk : np.ndarray
+                Matrix of candidate portfolios with shape ``(K_chunk, N)``.
+            """
         
             nonlocal sum_pen_mir_msp_l1, sum_pen_mir_msp_l2, sum_pen_bl_l1, sum_pen_bl_l2, cnt2
         
@@ -5973,6 +6761,7 @@ class PortfolioOptimiser:
         large; the ε floor mitigates this. The subsequent Armijo line search
         provides an additional safeguard by accepting steps only when the true
         nonlinear composite increases sufficiently.
+      
         • Calibrated scales are **contextual** to the data, constraints, and
         sampling set S. They should be recomputed if those change materially.
         """
@@ -6230,7 +7019,160 @@ class PortfolioOptimiser:
 
         return (scale_sh, scale_so, scale_bl,scale_dsr, scale_asr, scale_ulpm, scale_udc)
     
-    
+
+    def _calibrate_scales_comb12(
+        self,
+        gamma: tuple,
+        eps: float = 1e-12
+    ):
+        """
+        Calibrate component scales κ_i for comb_port12 to equalise
+        average gradient magnitudes across components.
+
+        Components: SO, MDP, BL, DSR, ASR, ULPM, UDC.
+        """
+
+        vals = self._W_rand_vals
+
+        A_so = vals["A_so"]
+        A_mdp = vals.get("A_mdp", 1.0)
+        A_bl = vals["A_bl"]
+        A_dsr = vals.get("A_dsr", 1.0)
+        A_asr = vals["A_asr"]
+        A_ulpm = vals.get("A_ulpm", 1.0)
+        A_udc = vals.get("A_udc", 1.0)
+
+        (γ_so, γ_mdp, γ_bl, γ_dsr, γ_asr, γ_ulpm, γ_udc) = gamma
+
+        target = np.mean([
+            γ_so * A_so,
+            γ_mdp * A_mdp,
+            γ_bl * A_bl,
+            γ_dsr * A_dsr,
+            γ_asr * A_asr,
+            γ_ulpm * A_ulpm,
+            γ_udc * A_udc,
+        ])
+
+        scale_so = self._safe_scale(
+            target = target,
+            weight = γ_so,
+            avg_norm = A_so,
+            eps = eps
+        )
+        scale_mdp = self._safe_scale(
+            target = target,
+            weight = γ_mdp,
+            avg_norm = A_mdp,
+            eps = eps
+        )
+        scale_bl = self._safe_scale(
+            target = target,
+            weight = γ_bl,
+            avg_norm = A_bl,
+            eps = eps
+        )
+        scale_dsr = self._safe_scale(
+            target = target,
+            weight = γ_dsr,
+            avg_norm = A_dsr,
+            eps = eps
+        )
+        scale_asr = self._safe_scale(
+            target = target,
+            weight = γ_asr,
+            avg_norm = A_asr,
+            eps = eps
+        )
+        scale_ulpm = self._safe_scale(
+            target = target,
+            weight = γ_ulpm,
+            avg_norm = A_ulpm,
+            eps = eps
+        )
+        scale_udc = self._safe_scale(
+            target = target,
+            weight = γ_udc,
+            avg_norm = A_udc,
+            eps = eps
+        )
+
+        return (scale_so, scale_mdp, scale_bl, scale_dsr, scale_asr, scale_ulpm, scale_udc)
+
+
+    def _calibrate_scales_comb13(
+        self,
+        gamma: tuple,
+        eps: float = 1e-12
+    ):
+        """
+        Calibrate component scales κ_i for comb_port13 to equalise
+        average gradient magnitudes across components.
+
+        Components: SO, BL, DSR, ASR, ULPM, UDC.
+        """
+
+        vals = self._W_rand_vals
+
+        A_so = vals["A_so"]
+        A_bl = vals["A_bl"]
+        A_dsr = vals.get("A_dsr", 1.0)
+        A_asr = vals["A_asr"]
+        A_ulpm = vals.get("A_ulpm", 1.0)
+        A_udc = vals.get("A_udc", 1.0)
+
+        (γ_so, γ_bl, γ_dsr, γ_asr, γ_ulpm, γ_udc) = gamma
+
+        target = np.mean([
+            γ_so * A_so,
+            γ_bl * A_bl,
+            γ_dsr * A_dsr,
+            γ_asr * A_asr,
+            γ_ulpm * A_ulpm,
+            γ_udc * A_udc,
+        ])
+
+        scale_so = self._safe_scale(
+            target = target,
+            weight = γ_so,
+            avg_norm = A_so,
+            eps = eps
+        )
+
+        scale_bl = self._safe_scale(
+            target = target,
+            weight = γ_bl,
+            avg_norm = A_bl,
+            eps = eps
+        )
+        scale_dsr = self._safe_scale(
+            target = target,
+            weight = γ_dsr,
+            avg_norm = A_dsr,
+            eps = eps
+        )
+        scale_asr = self._safe_scale(
+            target = target,
+            weight = γ_asr,
+            avg_norm = A_asr,
+            eps = eps
+        )
+        scale_ulpm = self._safe_scale(
+            target = target,
+            weight = γ_ulpm,
+            avg_norm = A_ulpm,
+            eps = eps
+        )
+        scale_udc = self._safe_scale(
+            target = target,
+            weight = γ_udc,
+            avg_norm = A_udc,
+            eps = eps
+        )
+
+        return (scale_so, scale_bl, scale_dsr, scale_asr, scale_ulpm, scale_udc)
+
+
     def _coerce_weights(
         self, 
         w: Optional[pd.Series], 
@@ -6351,7 +7293,7 @@ class PortfolioOptimiser:
         self,
         gamma: tuple = (1.0, 1.0, 1.0, 1.0, 1.0),
         max_iter: int = 1000,
-        tol: float = 1e-12,
+        tol: float = 1e-8,
     ) -> pd.Series:
         """
         Convex–concave procedure (CCP) optimiser for a composite **reward** built from:
@@ -6533,6 +7475,13 @@ class PortfolioOptimiser:
             _ctx: g.GradCtx,
             work: g.Work | None = None
         ):
+            """
+            Evaluate Black-Litterman Sharpe value/gradient at ``w``.
+
+            The wrapper redirects to ``g.sharpe_val_grad`` with BL posterior inputs
+            ``(mu_bl, Sigma_bl)`` so the composite engine can treat BL Sharpe as a
+            standard component in the weighted sum.
+            """
         
             return g.sharpe_val_grad(
                 w = w, 
@@ -6566,6 +7515,23 @@ class PortfolioOptimiser:
         def _from_initial(
             w0: np.ndarray
         ) -> tuple[np.ndarray, float, dict[str, float]]:
+            """
+            Run CCP iterations from one initial portfolio and return scored output.
+
+            At each step the routine computes the composite gradient at the current
+            iterate, solves the convex surrogate subproblem, updates the iterate,
+            then evaluates the final nonlinear score and diagnostic gradient pushes.
+
+            Parameters
+            ----------
+            w0 : np.ndarray
+                Initial feasible weight vector.
+
+            Returns
+            -------
+            tuple[np.ndarray, float, dict[str, float]]
+                Final weights, composite score, and per-term push diagnostics.
+            """
         
             w = w0.copy()
         
@@ -6676,7 +7642,7 @@ class PortfolioOptimiser:
         self,
         gamma: tuple = (1.0, 1.0, 1.0, 1.0, 1.0),
         max_iter: int = 1000,
-        tol: float = 1e-12,
+        tol: float = 1e-8,
     ) -> pd.Series:
         """
         Convex–concave procedure (CCP) optimiser for a composite **reward** built from:
@@ -6873,6 +7839,12 @@ class PortfolioOptimiser:
             _ctx, 
             work = None
         ):
+            """
+            Evaluate BL Sharpe term for the current candidate portfolio.
+
+            This helper supplies ``(value, gradient)`` for
+            ``S_BL(w) = (mu_bl^T w - rf_ann) / sqrt(w^T Sigma_bl w)``.
+            """
         
             return g.sharpe_val_grad(
                 w = w,
@@ -6919,6 +7891,23 @@ class PortfolioOptimiser:
         def _from_initial(
             w0: np.ndarray
         ):
+            """
+            Execute one CCP trajectory for ``comb_port1`` from a supplied seed.
+
+            The routine iterates linearise-and-solve updates, then computes a final
+            exact-RU Score/CVaR contribution and term-level gradient diagnostics for
+            model comparison across initialisations.
+
+            Parameters
+            ----------
+            w0 : np.ndarray
+                Seed portfolio.
+
+            Returns
+            -------
+            tuple[np.ndarray, float, dict[str, float]]
+                Final weights, scalar score, and push diagnostics.
+            """
         
             w = w0.copy()
         
@@ -7059,7 +8048,7 @@ class PortfolioOptimiser:
         self,
         gamma: tuple = (1.0, 1.0, 1.0, 1.0, 1.0),
         max_iter: int = 1000,
-        tol: float = 1e-12,
+        tol: float = 1e-8,
         huber_delta_l1: float = 1e-4,
     ) -> pd.Series:
         """
@@ -7161,6 +8150,11 @@ class PortfolioOptimiser:
             _ctx,
             work = None
         ):
+            """
+            Evaluate BL Sharpe value/gradient for the L1-penalised composite.
+
+            This is the BL-posterior analogue of the standard Sharpe component.
+            """
            
             return g.sharpe_val_grad(
                 w = w, 
@@ -7204,6 +8198,23 @@ class PortfolioOptimiser:
         def _from_initial(
             w0: np.ndarray
         ):
+            """
+            Solve the ``comb_port2`` CCP updates from a single seed.
+
+            The subproblem keeps Huber-smoothed L1 proximity penalties explicit and
+            linearises reward terms only. The routine returns the final candidate,
+            nonlinear score, and scaled gradient-norm diagnostics.
+
+            Parameters
+            ----------
+            w0 : np.ndarray
+                Seed portfolio.
+
+            Returns
+            -------
+            tuple[np.ndarray, float, dict[str, float]]
+                Final portfolio, score, and diagnostics.
+            """
         
             w = w0.copy()
         
@@ -7491,6 +8502,23 @@ class PortfolioOptimiser:
         def _from_initial(
             w0: np.ndarray
         ):
+            """
+            Run Armijo-enhanced CCP updates for ``comb_port3`` from one seed.
+
+            Each iteration solves a convex surrogate with BL-L2 proximity, then
+            applies backtracking line search on the true smoothed objective to
+            ensure sufficient ascent before accepting the step.
+
+            Parameters
+            ----------
+            w0 : np.ndarray
+                Initial feasible portfolio.
+
+            Returns
+            -------
+            tuple[np.ndarray, float, dict[str, float]]
+                Final weights, final objective score, and term push diagnostics.
+            """
         
             w = w0.copy()
         
@@ -7874,6 +8902,24 @@ class PortfolioOptimiser:
         def _from_initial(
             w0: np.ndarray
         ):
+            """
+            Run one ``comb_port4`` CCP trajectory with sector-risk-cap updates.
+
+            The routine alternates between:
+            1) updating the linearised sector risk-cap parameters;
+            2) solving the convex surrogate with BL-L1 proximity;
+            3) Armijo backtracking on the full smoothed objective.
+
+            Parameters
+            ----------
+            w0 : np.ndarray
+                Initial feasible portfolio.
+
+            Returns
+            -------
+            tuple[np.ndarray, float, dict[str, float]]
+                Final candidate, score, and diagnostics.
+            """
         
             w = w0.copy()
            
@@ -8363,6 +9409,13 @@ class PortfolioOptimiser:
             _ctx, 
             work = None
         ):
+            """
+            Evaluate the BL posterior Sharpe component used by ``comb_port5``.
+
+            Formula:
+            ``S_bl(w) = (mu_bl^T w - rf_ann) / sqrt(w^T Sigma_bl w)``,
+            with gradient obtained from the standard Sharpe quotient rule.
+            """
         
             return g.sharpe_val_grad(
                 w = w,
@@ -8390,6 +9443,12 @@ class PortfolioOptimiser:
             _ctx: g.GradCtx,
             work: g.Work | None = None
         ):
+            """
+            Evaluate adjusted Sharpe value/gradient using internal higher-moment model.
+
+            The implementation delegates to ``_asr_val_grad_single`` so the main
+            composite interface remains compatible with ``g.compose``.
+            """
         
             return self._asr_val_grad_single(
                 w = w
@@ -8422,6 +9481,23 @@ class PortfolioOptimiser:
         def _from_initial(
             w0: np.ndarray
         ):
+            """
+            Execute CCP iterations for ``comb_port5`` from one initial point.
+
+            The inner loop uses linearised composite ascent without Armijo, then
+            computes exact-RU final SC scoring and returns per-term gradient push
+            diagnostics for model selection across seeds.
+
+            Parameters
+            ----------
+            w0 : np.ndarray
+                Initial portfolio.
+
+            Returns
+            -------
+            tuple[np.ndarray, float, dict[str, float]]
+                Final weights, score, and diagnostics.
+            """
         
             w = w0.copy()
         
@@ -8797,6 +9873,12 @@ class PortfolioOptimiser:
             _ctx: g.GradCtx,
             work: g. Work | None = None
         ):
+            """
+            Evaluate adjusted Sharpe under the single-portfolio higher-moment model.
+
+            The returned pair is ``(ASR(w), grad ASR(w))`` where ASR augments
+            classical Sharpe using skewness and kurtosis corrections.
+            """
         
             return self._asr_val_grad_single(
                 w = w
@@ -8830,6 +9912,22 @@ class PortfolioOptimiser:
         def _from_initial(
             w0: np.ndarray
         ):
+            """
+            Run Armijo-validated CCP updates for ``comb_port6`` from one seed.
+
+            The step combines a convex surrogate solve (with BL-L2 proximity) and
+            backtracking acceptance on the true nonlinear objective.
+
+            Parameters
+            ----------
+            w0 : np.ndarray
+                Initial feasible weight vector.
+
+            Returns
+            -------
+            tuple[np.ndarray, float, dict[str, float]]
+                Final portfolio, score, and diagnostics.
+            """
         
             w = w0.copy()
         
@@ -9277,6 +10375,12 @@ class PortfolioOptimiser:
             _ctx: g.GradCtx,
             work: g.Work | None = None
         ):
+            """
+            Evaluate adjusted Sharpe under the internal higher-moment formulation.
+
+            Returns both value and first derivative for inclusion in the
+            CCP-composed objective used by ``comb_port7``.
+            """
         
             return self._asr_val_grad_single(
                 w = w
@@ -9314,6 +10418,23 @@ class PortfolioOptimiser:
         def _from_initial(
             w0: np.ndarray
         ):
+            """
+            Run one ``comb_port7`` CCP trajectory with sector risk-cap updates.
+
+            The method updates linearised sector-risk constraints at each iterate,
+            solves the convex surrogate with BL-L1 proximity, and applies Armijo
+            backtracking on the full nonlinear objective.
+
+            Parameters
+            ----------
+            w0 : np.ndarray
+                Initial feasible portfolio.
+
+            Returns
+            -------
+            tuple[np.ndarray, float, dict[str, float]]
+                Final candidate, score, and diagnostics.
+            """
         
             w = w0.copy()
         
@@ -9555,7 +10676,7 @@ class PortfolioOptimiser:
     def comb_port8(
             self,
             gamma: tuple | None = (1.0, 1.0, 1.0, 1.0, 1.0),  
-            max_iter: int = 2000,
+            max_iter: int = 1000,
         ) -> pd.Series:
         """
         Maximise a **scaled composite of five reward ratios**—Sharpe, Sortino,
@@ -9804,6 +10925,12 @@ class PortfolioOptimiser:
             _ctx,
             work = None
         ):
+            """
+            Evaluate BL posterior Sharpe value and gradient for ``comb_port8``.
+
+            This wrapper keeps BL-specific parameters isolated while preserving the
+            common ``(w, ctx, work)`` component signature used by ``g.compose``.
+            """
            
             return g.sharpe_val_grad(
                 w = w,
@@ -9817,6 +10944,12 @@ class PortfolioOptimiser:
             _ctx, 
             work = None
         ):
+            """
+            Evaluate adjusted Sharpe value and gradient for ``comb_port8``.
+
+            The routine delegates to ``_asr_val_grad_single`` to compute
+            higher-moment-adjusted risk-adjusted return and derivative.
+            """
             
             return self._asr_val_grad_single(
                 w = w
@@ -9849,6 +10982,19 @@ class PortfolioOptimiser:
         def _from_initial(
             w0: np.ndarray
         ):
+            """
+            Run one Armijo-backed CCP trajectory for ``comb_port8``.
+
+            Parameters
+            ----------
+            w0 : np.ndarray
+                Initial feasible weights.
+
+            Returns
+            -------
+            tuple[np.ndarray, float, dict[str, float]]
+                Final portfolio, final score, and gradient-push diagnostics.
+            """
         
             w = w0.copy()
         
@@ -10051,217 +11197,63 @@ class PortfolioOptimiser:
     def comb_port9(
             self,
             gamma: tuple | None = (1.0, 1.0, 1.0, 1.0, 1.0),  
-            max_iter: int = 2000,
+            max_iter: int = 1000,
         ) -> pd.Series:
         """
-        Maximise a **scaled composite of five reward ratios**—Sharpe, Sortino,
-        Black–Litterman Sharpe, Score/CVaR, and Adjusted Sharpe—over a convex
-        feasible set using a CCP-style majorise–minimise loop with Armijo
-        backtracking. **No penalty term** is included.
+        Maximise the five-term reward composite used by ``comb_port8`` plus
+        explicit diversification controls.
 
-        Overview
-        --------
-        The optimiser solves:
+        Core reward
+        -----------
+        ``comb_port9`` keeps the same primary reward as ``comb_port8``:
 
-            maximise_w  F(w)
-            
-            subject to  w ∈ W
+        ``R(w) = c_sh * Sharpe(w)
+              + c_so * Sortino(w)
+              + c_bl * BLSharpe(w)
+              + c_sc * ScoreOverCVaR(w)
+              + c_asr * ASR(w)``,
 
-        where W encodes portfolio constraints (e.g., long-only, budget, sector caps,
-        risk-contribution caps) and
+        with calibrated coefficients ``c_i = gamma_i * scale_i``.
 
-            F(w) = γ_SH κ_SH · S(w) + γ_SO κ_SO · SO(w) + γ_BL κ_BL · S_BL(w) + γ_SC κ_SC · SC(w) + γ_ASR κ_ASR · ASR(w).
+        Diversification augmentation
+        ----------------------------
+        Three additional smooth terms are included:
 
-        The scalar weights γ_• are user-controlled importance multipliers, while
-        κ_• are **auto-calibrated scales** returned by
-        `_calibrate_scales_s_so_bl_sc_asr`, chosen to equalise average gradient
-        magnitudes of the components so that no single term dominates purely due to
-        units or natural curvature.
+        1) HHI penalty:
+        ``HHI(w) = sum_i w_i^2`` with gradient ``2w``.
 
-        Notation and Inputs
+        2) Cardinality-inclusion bonus:
+        smooth approximation to the count of positions above ``w_min`` using
+        a logistic/softplus transform.
+
+        3) Entropy bonus:
+        ``H(w) = -sum_i w_i * log(w_i + eps)`` (optionally normalised by ``log(N)``).
+
+        The total objective is:
+
+        ``F(w) = R(w) - gamma_hhi * HHI(w)
+                     + gamma_card * Card(w)
+                     + gamma_ent * Entropy(w)``.
+
+        Optimisation scheme
         -------------------
-        Let:
-       
-        • μ  ∈ ℝ^n  be the vector of expected (annualised) asset returns.
-       
-        • Σ  ∈ ℝ^{n×n} be the (annualised) asset return covariance matrix.
-       
-        • rf_ann  be the annual risk-free rate; rf_week the per-period target for
-            Sortino (e.g., weekly risk-free).
-       
-        • R₁ ∈ ℝ^{T×n} be the matrix of per-period (e.g., weekly) asset returns.
-       
-        • w ∈ ℝ^n, w ≥ 0, 1ᵀ w = 1 unless otherwise configured.
-       
-        • (μ_BL, Σ_BL) be the Black–Litterman posterior mean and covariance.
-       
-        • s ∈ ℝ^n be the asset-level “Score” vector used by the custom ratio.
+        A CCP surrogate is solved each iteration, with linearised non-convex risk
+        caps refreshed through ``rc_update(w_t)``. Armijo backtracking is then
+        applied to the true nonlinear ``F`` before accepting the update.
 
-        Component Ratios
-        ----------------
-        1) Sharpe ratio (annualised):
+        Advantages
+        ----------
+        - Retains the reward quality of ``comb_port8``.
        
-            S(w) = (μ_p − rf_ann) / σ_p,
+        - Adds explicit control of concentration (HHI), breadth (cardinality), and
+          distributional spread (entropy), reducing extreme concentration artefacts.
        
-        where μ_p = wᵀ μ and σ_p = sqrt(wᵀ Σ w). Its gradient is
-       
-            ∇S(w) = μ / σ_p − S(w) · (Σ w) / σ_p².
-       
-        This follows from ∇μ_p = μ and ∇σ_p = (Σ w) / σ_p.
-
-        2) Sortino ratio with downside deviation computed from R₁ and target τ = rf_week:
-       
-            SO(w) = (μ̄_p − τ) / σ_d(w),
-       
-        where μ̄_p = mean_t [ wᵀ R_t ] and
-       
-            σ_d(w) = sqrt( (1/T) ∑_t { min(0, wᵀ R_t − τ) }² ).
-       
-        Writing g_t(w) = min(0, r_t − τ) with r_t = wᵀ R_t, downside variance is
-       
-            DV(w) = (1/T) ∑_t g_t(w)²,   σ_d(w) = sqrt(DV(w)).
-       
-        Using a smooth approximation to the hinge at r_t = τ, the gradient is
-       
-            ∇SO(w) = [ σ_d(w)·∇μ̄_p − (μ̄_p − τ)·∇σ_d(w) ] / σ_d(w)²,
-       
-        with ∇μ̄_p = mean_t [ R_t ] and
-       
-            ∇σ_d(w) = (1 / (2 σ_d(w))) · ∇DV(w),
-       
-            ∇DV(w) = (2/T) ∑_t g_t(w) · ∇g_t(w) ≈ (2/T) ∑_t g_t(w)·π_t(w)·R_t,
-       
-        where π_t(w) is the smooth “indicator” derivative arising from the
-        chosen approximation (implemented inside `sortino_val_grad_from`).
-
-        3) Black–Litterman Sharpe (posterior Sharpe):
-       
-            S_BL(w) = (wᵀ μ_BL − rf_ann) / sqrt(wᵀ Σ_BL w),
-       
-        with gradient identical in form to Sharpe but using (μ_BL, Σ_BL).
-
-        4) Custom Score/CVaR ratio (risk-adjusted score):
-       
-            SC(w) = (sᵀ w) / CVaR_α(w),
-       
-        where CVaR_α is portfolio Conditional Value-at-Risk at tail level α for
-        the (loss) distribution induced by R₁. Using the Rockafellar–Uryasev (RU)
-        representation for sample losses ℓ_t(w) = − wᵀ R_t,
-       
-            CVaR_α(w) = min_z  z + (1 / ((1−α) T)) ∑_t max(0, ℓ_t(w) − z).
-       
-        At the optimum z*, a (sub)gradient in w is
-       
-            ∇CVaR_α(w) = (1 / ((1−α) T)) ∑_{t : ℓ_t(w) > z*} ∇ℓ_t(w)
-            
-                       = − (1 / ((1−α) T)) ∑_{t : ℓ_t(w) > z*} R_t.
-        
-        A smooth variant of the hinge (e.g., softplus) is used in code to obtain
-        differentiability everywhere. The quotient rule gives
-        
-            ∇SC(w) = [ CVaR_α(w) · s − (sᵀ w) · ∇CVaR_α(w) ] / CVaR_α(w)².
-
-        5) Adjusted Sharpe (skew/kurtosis correction):
-        A common form (Pezier–White) adjusts Sharpe by higher moments of the
-        portfolio return distribution:
-           
-            ASR(w) = S(w) · [ 1 + (γ₃(w) / 6) S(w) − ((κ(w) − 3) / 24) S(w)² − (γ₃(w)² / 36) S(w)³ ].
-            
-        Here γ₃(w) and κ(w) denote portfolio skewness and kurtosis, computed from
-        r_t(w) = wᵀ R_t. The gradient follows by the chain rule:
-          
-            ∇ASR = (∂ASR/∂S) ∇S + (∂ASR/∂γ₃) ∇γ₃ + (∂ASR/∂κ) ∇κ,
-       
-        where
-       
-            ∂ASR/∂S = 1 + 2 a S + 3 b S² + 4 c S³,
-       
-            ∂ASR/∂γ₃ = S²/6 − (γ₃ S⁴)/18,
-       
-            ∂ASR/∂κ = − S³ / 24,
-       
-        with 
-        
-            a = γ₃/6, 
-            
-            b = −(κ−3)/24, 
-            
-            c = −γ₃²/36. 
-            
-        The exact variant used is encapsulated in `_asr_val_grad_single`.
-
-        Scaling and Composite Gradient
-        ------------------------------
-        To avoid scale-induced dominance, **component scales κ_•** are calibrated
-        once per run from random feasible portfolios (see
-        `_calibrate_scales_s_so_bl_sc_asr`). Denoting component values V_i(w) and
-        gradients g_i(w), the working composite for linearisation is
-
-            f_lin(w) = ∑_i γ_i κ_i V_i(w),
-
-        with gradient
-         
-            g(w) = ∑_i γ_i κ_i g_i(w).
-
-        Optimisation Method (CCP + Armijo)
-        ----------------------------------
-        The algorithm alternates the following steps until convergence (or
-        `max_iter`):
-
-        1) **Linearise the objective at current w_k.** Compute g_k = g(w_k).
-
-        2) **Solve the convex surrogate.** Over the convex feasible region W (with
-        any non-convex risk-contribution constraints replaced by their current
-        linearisation), solve:
-          
-            maximise_w  g_kᵀ w   subject to w ∈ W,
-        
-        which is equivalent to minimising −g_kᵀ w (as implemented). This is a
-        standard CCP (convex–concave procedure) / majorise–minimise step.
-
-        3) **Line search (Armijo backtracking).** Let ŵ be the surrogate solution
-        and d_k = ŵ − w_k. Choose a step size η ∈ (0, 1] by backtracking until
-        the sufficient increase condition holds for the **true** nonlinear
-        composite:
-        
-            F(w_k + η d_k) ≥ F(w_k) + c · η · ∥d_k∥²,
-        
-        with c ∈ (0, 1) (here c = 1e−4). Update w_{k+1} = w_k + η d_k.
-
-        4) **Stopping.** Stop when ∥d_k∥ is below a tolerance or η becomes very
-        small, indicating no productive ascent direction remains.
-
-        Feasibility and Constraints
-        ---------------------------
-        The `build_constraints` routine contributes:
-       
-        • budget and non-negativity (long-only) constraints if configured;
-       
-        • sector exposure or **risk-contribution caps** enforced via linear
-            approximations around w_k (and refreshed every iteration);
-       
-        • any single-name or group caps already present in the class.
+        - Keeps all terms smooth enough for stable first-order CCP updates.
 
         Returns
         -------
         pd.Series
-            The best portfolio weights among the seeds explored, labelled
-            `"comb_port8"`.
-
-        Notes and Practicalities
-        ------------------------
-        • Component gradients are computed by dedicated helpers (`gradients.py`)
-        that include smoothing of non-differentiable points (e.g., Sortino and
-        RU-CVaR). This ensures stable linearisation and monotone line-search.
-       
-        • The BL Sharpe term injects posterior mean–variance information and acts
-        as a statistical regulariser **through reward alignment** rather than
-        via explicit proximity penalties.
-       
-        • The auto-scaling κ_• is crucial: Sharpe and Sortino share similar units,
-        while Score/CVaR and ASR can have very different numerical ranges. The
-        calibration equalises typical gradient magnitudes so the γ_• weights
-        genuinely reflect user preference rather than scale artefacts.
+            Best feasible weight vector across seeds, named ``"comb_port9"``.
         """
 
         self._assert_alignment()
@@ -10323,6 +11315,11 @@ class PortfolioOptimiser:
             _ctx,
             work = None
         ):
+            """
+            Evaluate BL posterior Sharpe value and gradient for ``comb_port9``.
+
+            The term contributes mean-variance reward under BL posterior beliefs.
+            """
            
             return g.sharpe_val_grad(
                 w = w,
@@ -10336,6 +11333,12 @@ class PortfolioOptimiser:
             _ctx, 
             work = None
         ):
+            """
+            Evaluate adjusted Sharpe value and gradient for ``comb_port9``.
+
+            This term rewards higher-moment-favourable return profiles and is
+            combined with diversification auxiliaries in the total objective.
+            """
             
             return self._asr_val_grad_single(
                 w = w
@@ -10347,6 +11350,11 @@ class PortfolioOptimiser:
             _ctx = None, 
             work = None
         ):
+            """
+            Herfindahl-Hirschman concentration metric and gradient.
+
+            ``HHI(w) = sum_i w_i^2`` and ``grad HHI(w) = 2 w``.
+            """
 
             val = float(np.dot(w, w))
             
@@ -10472,6 +11480,11 @@ class PortfolioOptimiser:
             _ctx,
             work = None
         ):
+            """
+            Compute concentration penalty primitive for composition.
+
+            Returns ``(HHI(w), grad HHI(w))`` where ``HHI(w) = sum_i w_i^2``.
+            """
 
             return _hhi_val_grad(
                 w = w
@@ -10483,6 +11496,12 @@ class PortfolioOptimiser:
             _ctx, 
             work = None
         ):
+            """
+            Evaluate smooth inclusion/cardinality bonus and gradient.
+
+            The bonus approximates the number (or excess mass) of positions above
+            a configurable minimum meaningful weight threshold.
+            """
 
             return _cardinality_val_grad(
                 w = w, 
@@ -10497,6 +11516,12 @@ class PortfolioOptimiser:
             _ctx, 
             work = None
         ):
+            """
+            Evaluate entropy diversification bonus and gradient.
+
+            The term uses ``-sum_i w_i log(w_i + eps)`` (optionally normalised) to
+            reward breadth and discourage over-concentrated allocations.
+            """
 
             return _entropy_val_grad(
                 w = w, 
@@ -10535,10 +11560,36 @@ class PortfolioOptimiser:
         def _from_initial(
             w0: np.ndarray
         ):
+            """
+            Run one Armijo-backed CCP path for ``comb_port9``.
+
+            This version extends ``comb_port8`` with diversification terms
+            (HHI penalty, smooth cardinality bonus, entropy bonus) in both the
+            surrogate gradient and true-value backtracking checks.
+
+            Parameters
+            ----------
+            w0 : np.ndarray
+                Initial feasible weights.
+
+            Returns
+            -------
+            tuple[np.ndarray, float, dict[str, float]]
+                Final candidate, score, and diagnostics.
+            """
             
             def _div_values(
                 w
             ):
+                """
+                Evaluate the three diversification auxiliaries at ``w``.
+
+                Returns
+                -------
+                tuple[float, float, float]
+                    ``(HHI, cardinality_bonus, entropy_bonus)``.
+                """
+                
                 hhi_v, _ = hhi_val_grad(
                     w = w, 
                     _ctx = None,
@@ -10787,14 +11838,105 @@ class PortfolioOptimiser:
         N_strategies: int = 1000
     ) -> pd.Series:
         """
-        Like `comb_port9`, but the (maximised) objective is the scaled sum of:
+        Optimise an eight-term composite reward under shared feasibility constraints.
 
-            Sharpe + Sortino + MDP + BL Sharpe + DSR + ASR + UPM/LPM + U/DC
+        Objective
+        ---------
+        The method maximises
 
-        Feasible set and CCP/Armijo flow are identical to `comb_port9`
-        (budget, long-only, group caps, sector risk-contrib caps; no “single
-        portfolio tube”). Diversity terms (HHI penalty, cardinality/entropy
-        bonus) are retained as in comb_port9.
+        ``F(w) = c_sh * Sharpe(w)
+               + c_so * Sortino(w)
+               + c_mdp * MDP(w)
+               + c_bl * BLSharpe(w)
+               + c_dsr * DSR(w)
+               + c_asr * ASR(w)
+               + c_ulpm * ULPM(w)
+               + c_udc * UDC(w)``,
+
+        where each coefficient ``c_i`` equals ``gamma_i * scale_i`` and the scales
+        are estimated by ``_calibrate_scales_comb10`` to equalise typical gradient
+        magnitudes across components.
+
+        Component definitions
+        ---------------------
+        1) ``Sharpe(w) = (mu^T w - rf_ann) / sqrt(w^T Sigma w)``.
+       
+        2) ``Sortino(w)`` uses one-year weekly downside deviation relative to
+           ``rf_week`` and annualises by ``sqrt(52)``.
+       
+        3) ``MDP(w)`` is the diversification-ratio objective
+           ``(sigma_diag^T w) / sqrt(w^T Sigma w)``.
+       
+        4) ``BLSharpe(w)`` is Sharpe with BL posterior ``(mu_bl, Sigma_bl)``.
+       
+        5) ``DSR(w)`` is deflated Sharpe, approximating multiple-testing correction
+           through ``E[max Z_i]`` with ``N_strategies`` standard-normal trials.
+       
+        6) ``ASR(w)`` is adjusted Sharpe with skewness/kurtosis correction.
+       
+        7) ``ULPM(w)`` is smoothed upside-minus-downside partial-moment utility:
+           ``alpha * UPM_p(w) - beta * LPM_q(w)``.
+       
+        8) ``UDC(w)`` is linear in weights after precomputation:
+           ``UDC(w) = gamma_udc^T w``, representing upside beta minus downside beta.
+
+        Optimisation method
+        -------------------
+        The routine applies a CCP-style majorise-minimise loop with a proximal
+        convex subproblem:
+
+        ``min_w  -g_t^T w + 0.5 * kappa * ||w - w_t||_2^2``,
+
+        subject to:
+       
+        - budget, long-only, box, and group-cap constraints from ``build_constraints``;
+       
+        - linearised sector risk-contribution caps updated each iteration by
+          ``rc_update(w_t)``.
+
+        After solving the convex surrogate, Armijo backtracking is performed on
+        the true nonlinear composite ``F`` using:
+
+        ``F(w + eta d) >= F(w) + c * eta * (grad^T d)``.
+
+        Modelling rationale and advantages
+        ----------------------------------
+        - Mean-variance efficiency (Sharpe, BL Sharpe) is combined with downside
+          control (Sortino), structural diversification (MDP), and higher-moment/
+          selection-bias controls (ASR, DSR).
+     
+        - ULPM provides explicit asymmetric preference for upside versus downside.
+     
+        - UDC introduces regime-aware benchmark sensitivity via upside/downside beta
+          asymmetry, which can improve behaviour in directional regimes.
+     
+        - Scale calibration reduces unit-driven dominance so ``gamma`` settings act
+          as genuine preference weights.
+
+        Parameters
+        ----------
+        gamma : tuple[float, ...] | None
+            Eight user weights ordered as
+            ``(SH, SO, MDP, BL, DSR, ASR, ULPM, UDC)``.
+        upm_p, lpm_q : int
+            Orders of upside/downside partial moments.
+        upm_alpha, lpm_beta : float
+            Relative utility weights for UPM and LPM terms.
+        ulpm_beta_smooth : float
+            Softplus slope for ULPM smoothing.
+        udc_tradeoff : float
+            Weight applied to downside beta in UDC construction.
+        use_udc_intercept : bool
+            Whether to use demeaned covariance slopes in UDC beta estimation.
+        max_iter : int
+            Maximum iterations per initial seed.
+        N_strategies : int
+            Effective strategy count used in the DSR deflation term.
+
+        Returns
+        -------
+        pd.Series
+            Best feasible weight vector across initial seeds, named ``"comb_port10"``.
         """
 
         self._assert_alignment()
@@ -10839,6 +11981,12 @@ class PortfolioOptimiser:
             _ctx = None,
             work = None
         ):
+            """
+            Evaluate BL posterior Sharpe value and gradient.
+
+            This term applies the Sharpe quotient to posterior moments
+            ``(mu_bl, Sigma_bl)`` within the ``comb_port10`` composite.
+            """
             
             return g.sharpe_val_grad(
                 w = w,
@@ -10859,9 +12007,15 @@ class PortfolioOptimiser:
             _ctx = None, 
             work = None
         ):
+            """
+            Deflated Sharpe objective and gradient at ``w``.
+
+            The implementation delegates to ``dsr_objective_and_grad`` using the
+            precomputed ``EmaxZ`` term and annual covariance inputs.
+            """
             
             return self.dsr_objective_and_grad(
-                R_weekly = self.R1,
+                R_weekly = self.R5,
                 rf_week = self.rf_week,
                 w = np.asarray(w, float).ravel(),
                 EmaxZ = EmaxZ,
@@ -10876,6 +12030,12 @@ class PortfolioOptimiser:
             _ctx = None, 
             work = None
         ):
+            """
+            Evaluate adjusted Sharpe objective and derivative at ``w``.
+
+            The value includes skewness/kurtosis corrections and therefore provides
+            a higher-moment-sensitive alternative to classical Sharpe.
+            """
             
             return self._asr_val_grad_single(
                 w = w
@@ -10901,6 +12061,12 @@ class PortfolioOptimiser:
             _ctx = None, 
             work = None
         ):
+            """
+            Linear Up/Down capture proxy and gradient.
+
+            After precomputation, ``UDC(w) = gamma_udc^T w`` and
+            ``grad UDC(w) = gamma_udc``.
+            """
           
             w = np.asarray(w, float).ravel()
           
@@ -10912,6 +12078,12 @@ class PortfolioOptimiser:
             _ctx = None, 
             work = None
         ):
+            """
+            Evaluate maximum diversification-ratio objective and gradient.
+
+            The objective has form ``(sigma_diag^T w) / sqrt(w^T Sigma w)`` and
+            promotes allocation to imperfectly correlated assets.
+            """
             
             return g._mdp_val_grad(
                 w = w,
@@ -10987,6 +12159,13 @@ class PortfolioOptimiser:
         def _true_value(
             w
         ):
+            """
+            Evaluate the full nonlinear composite objective at ``w``.
+
+            This function is used by Armijo acceptance checks and final seed
+            comparison. It applies exactly the same scaled component weights as the
+            optimisation objective.
+            """
            
             work_eval = g.Work()
            
@@ -11147,14 +12326,74 @@ class PortfolioOptimiser:
         N_strategies: int = 1000
     ) -> pd.Series:
         """
-        Like `comb_port9`, but the (maximised) objective is the scaled sum of:
+        Optimise a seven-term composite without an explicit MDP component.
 
-            Sharpe + Sortino + BL Sharpe + DSR + ASR + UPM/LPM + U/DC
+        Objective
+        ---------
+        The method maximises
 
-        Feasible set and CCP/Armijo flow are identical to `comb_port9`
-        (budget, long-only, group caps, sector risk-contrib caps; no “single
-        portfolio tube”). Diversity terms (HHI penalty, cardinality/entropy
-        bonus) are retained as in comb_port9.
+        ``F(w) = c_sh * Sharpe(w)
+               + c_so * Sortino(w)
+               + c_bl * BLSharpe(w)
+               + c_dsr * DSR(w)
+               + c_asr * ASR(w)
+               + c_ulpm * ULPM(w)
+               + c_udc * UDC(w)``,
+
+        with ``c_i = gamma_i * scale_i`` and scales estimated by
+        ``_calibrate_scales_comb11``.
+
+        Compared with :meth:`comb_port10`, this specification removes the
+        diversification-ratio term and therefore concentrates on classical and
+        higher-moment reward terms, tail deflation, asymmetric partial moments,
+        and upside/downside beta asymmetry.
+
+        Algorithm
+        ---------
+        The optimiser uses a CCP-style proximal surrogate:
+
+        ``min_w  -g_t^T w + 0.5 * kappa * ||w - w_t||_2^2``,
+
+        with feasibility constraints from ``build_constraints`` and iterative
+        updates of linearised sector risk-cap parameters via ``rc_update(w_t)``.
+        A backtracking Armijo test is then applied to the true objective:
+
+        ``F(w + eta d) >= F(w) + c * eta * (grad^T d)``.
+
+        Modelling advantages
+        --------------------
+        - Combines mean-variance efficiency, downside efficiency, and BL posterior
+          structure without forcing proximity penalties.
+      
+        - DSR and ASR jointly mitigate over-selection bias and reward favourable
+          higher-moment return geometry.
+      
+        - ULPM and UDC encode asymmetric payoff preference and regime-sensitive
+          benchmark behaviour.
+
+        Parameters
+        ----------
+        gamma : tuple[float, ...] | None
+            Seven weights ordered as ``(SH, SO, BL, DSR, ASR, ULPM, UDC)``.
+        upm_p, lpm_q : int
+            Orders of the upside/downside partial moments.
+        upm_alpha, lpm_beta : float
+            Relative ULPM component weights.
+        ulpm_beta_smooth : float
+            Softplus slope for ULPM smoothing.
+        udc_tradeoff : float
+            Downside-beta penalty multiplier in UDC construction.
+        use_udc_intercept : bool
+            Whether demeaned slope estimation is used for UDC coefficients.
+        max_iter : int
+            Maximum iterations per initial seed.
+        N_strategies : int
+            Effective strategy count used in the DSR deflation term.
+
+        Returns
+        -------
+        pd.Series
+            Best feasible portfolio across seeds, named ``"comb_port11"``.
         """
         
         self._assert_alignment()
@@ -11200,6 +12439,12 @@ class PortfolioOptimiser:
             _ctx = None, 
             work = None
         ):
+            """
+            Evaluate BL posterior Sharpe term for ``comb_port11``.
+
+            Returns value and gradient with respect to weights under posterior
+            moments ``(mu_bl, Sigma_bl)``.
+            """
             
             return g.sharpe_val_grad(
                 w = w, 
@@ -11216,9 +12461,15 @@ class PortfolioOptimiser:
             _ctx = None,
             work = None
         ):
+            """
+            Evaluate deflated Sharpe value and gradient for ``comb_port11``.
+
+            The objective adjusts Sharpe for selection bias via the expected
+            maximum normal draw term derived from ``N_strategies``.
+            """
            
             return self.dsr_objective_and_grad(
-                R_weekly = self.R1,
+                R_weekly = self.R5,
                 rf_week = self.rf_week,
                 w = np.asarray(w, float).ravel(),
                 EmaxZ = EmaxZ,
@@ -11233,6 +12484,11 @@ class PortfolioOptimiser:
             _ctx = None,
             work = None
         ):
+            """
+            Evaluate adjusted Sharpe value and gradient for ``comb_port11``.
+
+            This wrapper injects higher-moment-aware risk-adjusted performance.
+            """
         
             return self._asr_val_grad_single(
                 w = w
@@ -11258,6 +12514,12 @@ class PortfolioOptimiser:
             _ctx = None, 
             work = None
         ):
+            """
+            Evaluate linear Up/Down capture proxy and constant gradient.
+
+            After coefficient construction, ``UDC(w) = gamma_udc^T w`` and
+            ``grad UDC = gamma_udc``.
+            """
         
             w = np.asarray(w, float).ravel()
         
@@ -11329,6 +12591,12 @@ class PortfolioOptimiser:
         def _true_value(
             w
         ):
+            """
+            Evaluate the full scaled seven-component nonlinear objective.
+
+            This value is used for Armijo acceptance and final seed ranking in
+            ``comb_port11``.
+            """
            
             work_eval = g.Work()
            
@@ -11415,7 +12683,7 @@ class PortfolioOptimiser:
 
                 if (not self._solve(prob)) or (w_var.value is None):
 
-                    raise RuntimeError("comb_port1: convex subproblem failed to solve.")
+                    raise RuntimeError("comb_port11: convex subproblem failed to solve.")
 
                 direction = w_var.value - w
 
@@ -11466,3 +12734,944 @@ class PortfolioOptimiser:
             raise RuntimeError("comb_port11: no feasible solution found.")
         
         return pd.Series(best_w, index = self.universe, name = "comb_port11")
+
+
+    def comb_port12(
+        self,
+        gamma: tuple | None = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+        *,
+        upm_p: int = 1,
+        lpm_q: int = 2,
+        upm_alpha: float = 1.0,
+        lpm_beta: float = 1.0,
+        ulpm_beta_smooth: float = 50.0,
+        udc_tradeoff: float = 1.0,
+        use_udc_intercept: bool = True,
+        max_iter: int = 2000,
+        N_strategies: int = 1000
+    ) -> pd.Series:
+        """
+        Optimise a seven-term composite emphasising downside-aware and structural signals.
+
+        Objective
+        ---------
+        This method maximises
+
+        ``F(w) = c_so * Sortino(w)
+               + c_mdp * MDP(w)
+               + c_bl * BLSharpe(w)
+               + c_dsr * DSR(w)
+               + c_asr * ASR(w)
+               + c_ulpm * ULPM(w)
+               + c_udc * UDC(w)``,
+
+        where ``c_i = gamma_i * scale_i`` and scales are produced by
+        ``_calibrate_scales_comb12``.
+
+        Distinguishing modelling choice
+        -------------------------------
+        Unlike the earlier composites, this variant deliberately omits the direct
+        classical Sharpe term and instead relies on:
+      
+        - downside-aware efficiency (Sortino),
+      
+        - diversification ratio structure (MDP),
+      
+        - BL posterior risk-adjusted return (BL Sharpe),
+      
+        - higher-moment and multiple-testing robustness (ASR, DSR),
+      
+        - asymmetric partial moments (ULPM),
+      
+        - regime-asymmetric benchmark slope behaviour (UDC).
+
+        UDC strictness
+        --------------
+        ``comb_port12`` uses ``_udc_linear_strict`` rather than the permissive UDC
+        builder. This is fail-fast: missing benchmark overlap, or missing upside/
+        downside benchmark samples, raises an explicit runtime error instead of
+        silently substituting zeros. The result is stronger model integrity.
+
+        Algorithm
+        ---------
+        A proximal CCP subproblem is solved each iteration:
+
+        ``min_w  -g_t^T w + 0.5 * kappa * ||w - w_t||_2^2``,
+
+        under common feasibility constraints and iteratively updated linearised
+        sector risk-contribution caps. Armijo backtracking accepts steps only when
+        the true nonlinear objective increases sufficiently:
+
+        ``F(w + eta d) >= F(w) + c * eta * (grad^T d)``.
+
+        Advantages
+        ----------
+        - Improves robustness in adverse regimes by prioritising downside and tail
+          diagnostics over plain mean-variance reward.
+    
+        - Keeps diversification discipline through MDP and sector-risk constraints.
+    
+        - Uses strict UDC construction to avoid silent model degradation when
+          benchmark information is incomplete.
+
+        Parameters
+        ----------
+        gamma : tuple[float, ...] | None
+            Seven weights ordered as ``(SO, MDP, BL, DSR, ASR, ULPM, UDC)``.
+        upm_p, lpm_q : int
+            ULPM partial-moment orders.
+        upm_alpha, lpm_beta : float
+            ULPM reward/downside multipliers.
+        ulpm_beta_smooth : float
+            Softplus slope for ULPM smoothing.
+        udc_tradeoff : float
+            Downside-beta multiplier in UDC.
+        use_udc_intercept : bool
+            Whether demeaned slope estimation is used for UDC coefficients.
+        max_iter : int
+            Maximum iterations per seed.
+        N_strategies : int
+            Effective strategy count for DSR deflation.
+
+        Returns
+        -------
+        pd.Series
+            Best feasible portfolio across seed candidates, named ``"comb_port12"``.
+        """
+     
+        self._assert_alignment()
+
+        if gamma is None:
+     
+            gamma = (1.0,) * 7
+
+        if len(gamma) != 7:
+     
+            raise ValueError("gamma must be a length-7 tuple: (SO, MDP, BL, DSR, ASR, ULPM, UDC)")
+
+        γ_so, γ_mdp, γ_bl, γ_dsr, γ_asr, γ_ulpm, γ_udc = gamma
+
+        ctx_grad = g.GradCtx(
+            mu = self.er_arr,
+            Sigma = self.Σ,
+            rf = self.rf_ann,
+            eps = 1e-12,
+            R1 = self.R1,
+            target = self.rf_week,
+        )
+
+        sortino = g.sortino_val_grad_from(
+            R = self.R1,
+            target = self.rf_week,
+            eps = ctx_grad.eps,
+            annualise_by = self.sqrt52
+        )
+
+        _, μ_bl_arr, Σ_bl = self._bl
+
+        ctx_bl = g.GradCtx(
+            mu = μ_bl_arr,
+            Sigma = Σ_bl,
+            rf = self.rf_ann,
+            eps = 1e-12
+        )
+
+
+        def bl_sharpe_val_grad(
+            w,
+            _ctx = None,
+            work = None
+        ):
+            """
+            Evaluate BL posterior Sharpe value and gradient for ``comb_port12``.
+
+            Uses posterior mean/covariance outputs from the BL model.
+            """
+         
+            return g.sharpe_val_grad(
+                w = w,
+                ctx = ctx_bl,
+                work = work
+            )
+
+
+        EmaxZ = expected_max_std_normal(
+            N = max(1, N_strategies)
+        )
+
+
+        def dsr_val_grad(
+            w,
+            _ctx = None,
+            work = None
+        ):
+            """
+            Evaluate deflated Sharpe objective and gradient for ``comb_port12``.
+
+            Incorporates multiple-testing deflation through ``EmaxZ``.
+            """
+           
+            return self.dsr_objective_and_grad(
+                R_weekly = self.R5,
+                rf_week = self.rf_week,
+                w = np.asarray(w, float).ravel(),
+                EmaxZ = EmaxZ,
+                er_ann_vec = self.er_arr,
+                rf_ann = self.rf_ann,
+                Sigma_ann = self.Σ,
+            )
+
+
+        def asr_val_grad(
+            w,
+            _ctx = None,
+            work = None
+        ):
+            """
+            Evaluate adjusted Sharpe objective and gradient for ``comb_port12``.
+
+            Captures higher-moment corrections to classical Sharpe.
+            """
+         
+            return self._asr_val_grad_single(
+                w = w
+            )
+
+
+        def mdp_val_grad(
+            w,
+            _ctx = None,
+            work = None
+        ):
+            """
+            Evaluate maximum diversification-ratio value and gradient.
+
+            Encourages broad risk spreading via high ratio of weighted standalone
+            volatilities to total portfolio volatility.
+            """
+          
+            return g._mdp_val_grad(
+                w = w,
+                ctx = ctx_grad,
+                work = work
+            )
+
+        ulpm_vg = self._ulpm_val_grad(
+            p = upm_p,
+            q = lpm_q,
+            alpha_upm = upm_alpha,
+            beta_lpm = lpm_beta,
+            beta_smooth = ulpm_beta_smooth,
+        )
+
+        gamma_udc = self._udc_linear_strict(
+            tradeoff = udc_tradeoff,
+            use_intercept = use_udc_intercept
+        )
+
+    
+        def udc_val_grad(
+            w,
+            _ctx = None,
+            work = None
+        ):
+            """
+            Evaluate strict UDC linear objective and constant gradient.
+
+            Coefficients come from ``_udc_linear_strict``, which requires valid
+            benchmark overlap and both up/down regimes.
+            """
+        
+            w = np.asarray(w, float).ravel()
+        
+            return float(gamma_udc @ w), gamma_udc
+
+
+        self._ulpm_p = upm_p
+     
+        self._ulpm_q = lpm_q
+     
+        self._ulpm_alpha = upm_alpha
+     
+        self._ulpm_beta = lpm_beta
+     
+        self._ulpm_beta_smooth = ulpm_beta_smooth
+
+        scale_so, scale_mdp, scale_bl, scale_dsr, scale_asr, scale_ulpm, scale_udc = self._calibrate_scales_comb12(
+            gamma = gamma
+        )
+
+        sc_so = γ_so * scale_so
+      
+        sc_mdp = γ_mdp * scale_mdp
+      
+        sc_bl = γ_bl * scale_bl
+      
+        sc_dsr = γ_dsr * scale_dsr
+      
+        sc_asr = γ_asr * scale_asr
+      
+        sc_ulpm = γ_ulpm * scale_ulpm
+      
+        sc_udc = γ_udc * scale_udc
+
+        obj = g.compose([
+            (sc_so, sortino),
+            (sc_mdp, mdp_val_grad),
+            (sc_bl, bl_sharpe_val_grad),
+            (sc_dsr, dsr_val_grad),
+            (sc_asr, asr_val_grad),
+            (sc_ulpm, ulpm_vg),
+            (sc_udc, udc_val_grad),
+        ])
+
+        n = self.n
+
+        w_var = cp.Variable(n, nonneg = True)
+     
+        lin_param = cp.Parameter(n)
+     
+        w_t = cp.Parameter(n)
+     
+        prox_kappa = float(getattr(self, "prox_kappa_comb12", 5e-2))
+
+        cons, rc_update = self.build_constraints(
+            w_var = w_var,
+            sector_risk_cap = True,
+            Sigma = self.Σ,
+            sector_masks = self.sector_masks,
+            sector_alpha = self.alpha_dict,
+            single_port_cap = True,
+        )
+
+        obj_expr = -lin_param @ w_var + 0.5 * prox_kappa * cp.sum_squares(w_var - w_t)
+       
+        prob = cp.Problem(cp.Minimize(obj_expr), cons)
+
+        def _true_value(
+            w
+        ):
+            """
+            Evaluate the full scaled seven-component objective for ``comb_port12``.
+
+            Used in line-search acceptance and seed selection.
+            """
+          
+            work_eval = g.Work()
+
+            so_v, _ = sortino(
+                w = w,
+                ctx = ctx_grad,
+                work = work_eval
+            )
+        
+            mdp_v, _ = mdp_val_grad(
+                w = w,
+                _ctx = None,
+                work = work_eval
+            )
+      
+            bl_v, _ = bl_sharpe_val_grad(
+                w = w,
+                _ctx = None,
+                work = work_eval
+            )
+      
+            dsr_v, _ = dsr_val_grad(
+                w = w,
+                _ctx = None,
+                work = work_eval
+            )
+        
+            asr_v, _ = asr_val_grad(
+                w = w,
+                _ctx = None,
+                work = work_eval
+            )
+       
+            ul_v, _ = ulpm_vg(
+                w = w,
+            )
+         
+            udc_v, _ = udc_val_grad(
+                w = w,
+                _ctx = None,
+                work = work_eval
+            )
+
+            return (
+                sc_so * so_v
+                + sc_mdp * mdp_v
+                + sc_bl * bl_v
+                + sc_dsr * dsr_v
+                + sc_asr * asr_v
+                + sc_ulpm * ul_v
+                + sc_udc * udc_v
+            )
+
+        seed_candidates = list(self._initial_seeds) + [
+            self._mdp,
+            self._dsr,
+            self._asr,
+            self._ulpm,
+            self._udrp,
+            self._bl[0],
+        ]
+     
+        seeds: list[np.ndarray] = []
+     
+        seen_keys: set[bytes] = set()
+     
+        for w0 in seed_candidates:
+     
+            arr = np.asarray(w0, float).ravel()
+     
+            if arr.ndim != 1 or arr.size != self.n or not np.all(np.isfinite(arr)):
+     
+                continue
+     
+            key = np.round(arr, 12).tobytes()
+     
+            if key in seen_keys:
+     
+                continue
+     
+            seen_keys.add(key)
+     
+            seeds.append(arr.copy())
+        
+        seeds = self._prune_seed_list(
+            seeds = seeds
+        )
+        
+        if not seeds:
+        
+            seeds = [np.full(self.n, 1.0 / self.n, dtype = float)]
+
+        best_w = None
+      
+        best_val = -np.inf
+
+        for w0 in seeds:
+            
+            w = np.asarray(w0, float).ravel().copy()
+            
+            work = g.Work()
+
+            for _ in range(max_iter):
+              
+                _, grad = obj(
+                    w = w,
+                    ctx = ctx_grad,
+                    work = work
+                )
+
+                lin_param.value = self._np1(
+                    x = grad
+                )
+                w_t.value = self._np1(
+                    x = w
+                )
+
+                rc_update(
+                    w_t = w
+                )
+
+                if (not self._solve(prob)) or (w_var.value is None):
+             
+                    raise RuntimeError("comb_port12: convex subproblem failed to solve.")
+
+                direction = w_var.value - w
+
+                if float(np.linalg.norm(direction)) < 1e-12:
+                
+                    break
+
+                prev = _true_value(
+                    w = w
+                )
+
+                eta = 1.0
+              
+                c = 1e-4
+
+                while eta > 1e-6:
+                 
+                    w_trial = w + eta * direction
+                 
+                    curr = _true_value(
+                        w = w_trial
+                    )
+
+                    if curr >= prev + c * eta * float(grad @ direction):
+                    
+                        w = w_trial
+                    
+                        break
+
+                    eta *= 0.5
+
+                if eta <= 1e-6:
+                
+                    break
+
+            val = _true_value(
+                w = w
+            )
+
+            if val > best_val:
+             
+                best_val = val
+             
+                best_w = w.copy()
+
+        if best_w is None:
+          
+            raise RuntimeError("comb_port12: no feasible solution found.")
+
+        return pd.Series(best_w, index = self.universe, name = "comb_port12")
+
+
+    def comb_port13(
+        self,
+        gamma: tuple | None = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0),
+        *,
+        upm_p: int = 1,
+        lpm_q: int = 2,
+        upm_alpha: float = 1.0,
+        lpm_beta: float = 1.0,
+        ulpm_beta_smooth: float = 50.0,
+        udc_tradeoff: float = 1.0,
+        use_udc_intercept: bool = True,
+        max_iter: int = 2000,
+        N_strategies: int = 1000
+    ) -> pd.Series:
+        """
+        Optimise a six-term downside-aware composite without explicit MDP.
+
+        Objective
+        ---------
+        The method maximises
+
+        ``F(w) = c_so * Sortino(w)
+               + c_bl * BLSharpe(w)
+               + c_dsr * DSR(w)
+               + c_asr * ASR(w)
+               + c_ulpm * ULPM(w)
+               + c_udc * UDC(w)``,
+
+        with ``c_i = gamma_i * scale_i`` and scales obtained from
+        ``_calibrate_scales_comb13``.
+
+        This specification can be interpreted as the ``comb_port12`` family with
+        MDP removed, producing a lighter objective that still spans downside,
+        posterior efficiency, higher moments, tail deflation, partial moments, and
+        upside/downside regime asymmetry.
+
+        Algorithm
+        ---------
+        Iterations follow the same proximal CCP + Armijo structure:
+
+        ``min_w  -g_t^T w + 0.5 * kappa * ||w - w_t||_2^2``,
+
+        subject to common feasibility constraints and updated linearised sector
+        risk-contribution caps. Step acceptance uses
+
+        ``F(w + eta d) >= F(w) + c * eta * (grad^T d)``.
+
+        UDC treatment
+        -------------
+        As in ``comb_port12``, UDC coefficients are created by
+        ``_udc_linear_strict`` so missing benchmark support is treated as an
+        explicit modelling error rather than a silent neutralisation.
+
+        Advantages
+        ----------
+        - Focuses on regime-aware downside quality with fewer competing terms.
+       
+        - Retains BL posterior structure and higher-moment controls.
+       
+        - Uses strict benchmark validation for the Up/Down term.
+
+        Parameters
+        ----------
+        gamma : tuple[float, ...] | None
+            Six weights ordered as ``(SO, BL, DSR, ASR, ULPM, UDC)``.
+        upm_p, lpm_q : int
+            ULPM partial-moment orders.
+        upm_alpha, lpm_beta : float
+            ULPM upside and downside multipliers.
+        ulpm_beta_smooth : float
+            Softplus slope for ULPM smoothing.
+        udc_tradeoff : float
+            Downside-beta multiplier in UDC.
+        use_udc_intercept : bool
+            Whether demeaned slope estimation is used for UDC coefficients.
+        max_iter : int
+            Maximum iterations per seed.
+        N_strategies : int
+            Effective strategy count for DSR deflation.
+
+        Returns
+        -------
+        pd.Series
+            Best feasible seed outcome, named ``"comb_port13"``.
+        """
+      
+        self._assert_alignment()
+
+        if gamma is None:
+      
+            gamma = (1.0,) * 7
+
+        if len(gamma) != 6:
+      
+            raise ValueError("gamma must be a length-6 tuple: (SO, BL, DSR, ASR, ULPM, UDC)")
+
+        γ_so, γ_bl, γ_dsr, γ_asr, γ_ulpm, γ_udc = gamma
+
+        ctx_grad = g.GradCtx(
+            mu = self.er_arr,
+            Sigma = self.Σ,
+            rf = self.rf_ann,
+            eps = 1e-12,
+            R1 = self.R1,
+            target = self.rf_week,
+        )
+
+        sortino = g.sortino_val_grad_from(
+            R = self.R1,
+            target = self.rf_week,
+            eps = ctx_grad.eps,
+            annualise_by = self.sqrt52
+        )
+
+        _, μ_bl_arr, Σ_bl = self._bl
+
+        ctx_bl = g.GradCtx(
+            mu = μ_bl_arr,
+            Sigma = Σ_bl,
+            rf = self.rf_ann,
+            eps = 1e-12
+        )
+
+
+        def bl_sharpe_val_grad(
+            w,
+            _ctx = None,
+            work = None
+        ):
+            """
+            Evaluate the BL posterior Sharpe component used inside ``comb_port13``.
+
+            The returned value and gradient are computed with posterior expected
+            returns and posterior covariance from the BL model.
+            """
+            return g.sharpe_val_grad(
+                w = w,
+                ctx = ctx_bl,
+                work = work
+            )
+
+
+        EmaxZ = expected_max_std_normal(
+            N = max(1, N_strategies)
+        )
+
+
+        def dsr_val_grad(
+            w,
+            _ctx = None,
+            work = None
+        ):
+            """
+            Evaluate deflated Sharpe value and gradient for ``comb_port13``.
+
+            Uses long-horizon weekly returns with multiple-testing adjustment.
+            """
+            return self.dsr_objective_and_grad(
+                R_weekly = self.R5,
+                rf_week = self.rf_week,
+                w = np.asarray(w, float).ravel(),
+                EmaxZ = EmaxZ,
+                er_ann_vec = self.er_arr,
+                rf_ann = self.rf_ann,
+                Sigma_ann = self.Σ,
+            )
+
+      
+        def asr_val_grad(
+            w,
+            _ctx = None,
+            work = None
+        ):
+            """
+            Evaluate adjusted Sharpe value and gradient for ``comb_port13``.
+
+            Provides higher-moment-aware reward contribution.
+            """
+            return self._asr_val_grad_single(
+                w = w
+            )
+
+
+        ulpm_vg = self._ulpm_val_grad(
+            p = upm_p,
+            q = lpm_q,
+            alpha_upm = upm_alpha,
+            beta_lpm = lpm_beta,
+            beta_smooth = ulpm_beta_smooth,
+        )
+
+        gamma_udc = self._udc_linear_strict(
+            tradeoff = udc_tradeoff,
+            use_intercept = use_udc_intercept
+        )
+
+      
+        def udc_val_grad(
+            w,
+            _ctx = None,
+            work = None
+        ):
+            """
+            Evaluate strict UDC linear objective and constant gradient.
+
+            The gradient is constant because UDC is linear in weights after the
+            coefficient vector has been constructed.
+            """
+     
+            w = np.asarray(w, float).ravel()
+     
+            return float(gamma_udc @ w), gamma_udc
+
+
+        self._ulpm_p = upm_p
+       
+        self._ulpm_q = lpm_q
+       
+        self._ulpm_alpha = upm_alpha
+       
+        self._ulpm_beta = lpm_beta
+       
+        self._ulpm_beta_smooth = ulpm_beta_smooth
+
+        scale_so, scale_bl, scale_dsr, scale_asr, scale_ulpm, scale_udc = self._calibrate_scales_comb13(
+            gamma = gamma
+        )
+
+        sc_so = γ_so * scale_so
+      
+        sc_bl = γ_bl * scale_bl
+      
+        sc_dsr = γ_dsr * scale_dsr
+      
+        sc_asr = γ_asr * scale_asr
+      
+        sc_ulpm = γ_ulpm * scale_ulpm
+      
+        sc_udc = γ_udc * scale_udc
+
+        obj = g.compose([
+            (sc_so, sortino),
+            (sc_bl, bl_sharpe_val_grad),
+            (sc_dsr, dsr_val_grad),
+            (sc_asr, asr_val_grad),
+            (sc_ulpm, ulpm_vg),
+            (sc_udc, udc_val_grad),
+        ])
+
+        n = self.n
+
+        w_var = cp.Variable(n, nonneg = True)
+     
+        lin_param = cp.Parameter(n)
+     
+        w_t = cp.Parameter(n)
+     
+        prox_kappa = float(getattr(self, "prox_kappa_comb13", 5e-2))
+
+        cons, rc_update = self.build_constraints(
+            w_var = w_var,
+            sector_risk_cap = True,
+            Sigma = self.Σ,
+            sector_masks = self.sector_masks,
+            sector_alpha = self.alpha_dict,
+            single_port_cap = True,
+        )
+
+        obj_expr = -lin_param @ w_var + 0.5 * prox_kappa * cp.sum_squares(w_var - w_t)
+       
+        prob = cp.Problem(cp.Minimize(obj_expr), cons)
+
+        def _true_value(
+            w
+        ):
+            """
+            Evaluate the full scaled six-component objective for ``comb_port13``.
+
+            This helper is used by Armijo tests and final seed ranking.
+            """
+            work_eval = g.Work()
+
+            so_v, _ = sortino(
+                w = w,
+                ctx = ctx_grad,
+                work = work_eval
+            )
+
+            bl_v, _ = bl_sharpe_val_grad(
+                w = w,
+                _ctx = None,
+                work = work_eval
+            )
+        
+            dsr_v, _ = dsr_val_grad(
+                w = w,
+                _ctx = None,
+                work = work_eval
+            )
+         
+            asr_v, _ = asr_val_grad(
+                w = w,
+                _ctx = None,
+                work = work_eval
+            )
+         
+            ul_v, _ = ulpm_vg(
+                w = w,
+            )
+        
+            udc_v, _ = udc_val_grad(
+                w = w,
+                _ctx = None,
+                work = work_eval
+            )
+
+            return (
+                sc_so * so_v
+                + sc_bl * bl_v
+                + sc_dsr * dsr_v
+                + sc_asr * asr_v
+                + sc_ulpm * ul_v
+                + sc_udc * udc_v
+            )
+
+        seed_candidates = list(self._initial_seeds) + [
+            self._dsr,
+            self._asr,
+            self._ulpm,
+            self._udrp,
+            self._bl[0],
+        ]
+      
+        seeds: list[np.ndarray] = []
+      
+        seen_keys: set[bytes] = set()
+      
+        for w0 in seed_candidates:
+      
+            arr = np.asarray(w0, float).ravel()
+      
+            if arr.ndim != 1 or arr.size != self.n or not np.all(np.isfinite(arr)):
+      
+                continue
+      
+            key = np.round(arr, 12).tobytes()
+      
+            if key in seen_keys:
+      
+                continue
+      
+            seen_keys.add(key)
+      
+            seeds.append(arr.copy())
+        
+        seeds = self._prune_seed_list(
+            seeds = seeds
+        )
+        
+        if not seeds:
+       
+            seeds = [np.full(self.n, 1.0 / self.n, dtype = float)]
+
+        best_w = None
+       
+        best_val = -np.inf
+
+        for w0 in seeds:
+          
+            w = np.asarray(w0, float).ravel().copy()
+          
+            work = g.Work()
+
+            for _ in range(max_iter):
+               
+                _, grad = obj(
+                    w = w,
+                    ctx = ctx_grad,
+                    work = work
+                )
+
+                lin_param.value = self._np1(
+                    x = grad
+                )
+                w_t.value = self._np1(
+                    x = w
+                )
+
+                rc_update(
+                    w_t = w
+                )
+
+                if (not self._solve(prob)) or (w_var.value is None):
+               
+                    raise RuntimeError("comb_port13: convex subproblem failed to solve.")
+
+                direction = w_var.value - w
+
+                if float(np.linalg.norm(direction)) < 1e-12:
+                 
+                    break
+
+                prev = _true_value(
+                    w = w
+                )
+
+                eta = 1.0
+             
+                c = 1e-4
+
+                while eta > 1e-6:
+               
+                    w_trial = w + eta * direction
+               
+                    curr = _true_value(
+                        w = w_trial
+                    )
+
+                    if curr >= prev + c * eta * float(grad @ direction):
+                     
+                        w = w_trial
+                     
+                        break
+
+                    eta *= 0.5
+
+                if eta <= 1e-6:
+                
+                    break
+
+            val = _true_value(
+                w = w
+            )
+
+            if val > best_val:
+                best_val = val
+                best_w = w.copy()
+
+        if best_w is None:
+    
+            raise RuntimeError("comb_port13: no feasible solution found.")
+
+        return pd.Series(best_w, index = self.universe, name = "comb_port13")
